@@ -1,0 +1,70 @@
+# Deploy: copia o projecto para um servidor via SSH/rsync e corre npm ci no backend.
+#
+# Secrets necessários no repositório (Settings → Secrets and variables → Actions):
+#   DEPLOY_HOST          — hostname ou IP do servidor
+#   DEPLOY_USER          — utilizador SSH
+#   DEPLOY_SSH_KEY       — chave privada SSH (PEM), com acesso ao servidor
+#   DEPLOY_REMOTE_PATH   — caminho absoluto no servidor (ex.: /var/www/bus-platform)
+#
+# Opcional:
+#   DEPLOY_POST_COMMAND  — comandos a correr na pasta do projecto após npm ci (ex.: reinício PM2/systemd).
+#                          Se vazio, só corre: cd backend && npm ci --omit=dev
+#
+# O ficheiro .env no servidor não é sobrescrito (excluído do rsync).
+
+name: Deploy (SSH)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: webfactory/ssh-agent@v0.9.0
+        with:
+          ssh-private-key: ${{ secrets.DEPLOY_SSH_KEY }}
+
+      - name: Add SSH host key
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+        run: |
+          mkdir -p ~/.ssh
+          ssh-keyscan -H "$DEPLOY_HOST" >> ~/.ssh/known_hosts
+
+      - name: Rsync project to server
+        env:
+          DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
+          DEPLOY_PATH: ${{ secrets.DEPLOY_REMOTE_PATH }}
+        run: |
+          rsync -avz \
+            --exclude '.git/' \
+            --exclude 'node_modules/' \
+            --exclude 'backend/node_modules/' \
+            --exclude '.env' \
+            --exclude 'backend/.env' \
+            --exclude '*.log' \
+            ./ "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/"
+
+      - name: Install backend deps on server
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.DEPLOY_HOST }}
+          username: ${{ secrets.DEPLOY_USER }}
+          key: ${{ secrets.DEPLOY_SSH_KEY }}
+          script_stop: true
+          script: |
+            set -e
+            cd "${{ secrets.DEPLOY_REMOTE_PATH }}/backend"
+            npm ci --omit=dev
+            POST_CMD='${{ secrets.DEPLOY_POST_COMMAND }}'
+            if [ -n "$POST_CMD" ]; then
+              cd "${{ secrets.DEPLOY_REMOTE_PATH }}"
+              eval "$POST_CMD"
+            fi

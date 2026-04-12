@@ -1,0 +1,39 @@
+Escala de teste para desenvolvimento
+====================================
+
+Ficheiros: database/escala-teste-desenvolvimento.csv
+          (cópia em frontend/fixtures/ — no servidor: http://localhost:4000/fixtures/escala-teste-desenvolvimento.csv )
+
+Objectivo
+---------
+Ter sempre a mesma escala de referência para testar a app, o supervisor, a
+importação e correcções de bugs, sem depender de dados reais de produção.
+
+Requisitos antes de importar
+----------------------------
+1. Pelo menos o motorista com mecanográfico 10001 (João Silva do modelo de
+   importação), ACTIVO. O CSV de teste usa duas linhas para o mesmo motorista
+   (L01 e L02) para funcionar logo após importar só o modelo.
+   - Para testar reatribuição entre dois motoristas, altere a segunda linha do
+     CSV para mec. 10002 e garanta que esse motorista existe e está activo.
+
+2. Se o ficheiro incluir colunas KmsCarga / KmsVazio / KmsVazioTecnico, aplicam-se
+   as regras de filtro por km descritas na interface do supervisor (carga vs vazio).
+
+Como importar
+-------------
+1. Inicie sessão como supervisor.
+2. Separador "Importar escala diaria por Excel/CSV".
+3. Defina a "Data" da escala para o dia em que quer testar (normalmente hoje).
+4. Escolha o ficheiro escala-teste-desenvolvimento.csv.
+5. Use "Validar ficheiro" e depois "Importar ficheiro para escala".
+
+Depois pode usar "Escala do dia" com essa data para testar reatribuições,
+motoristas, etc.
+
+Notas
+-----
+- Pode editar o CSV (horários, chapas, linhas) desde que mantenha colunas
+  reconhecidas.
+- Reimportar o mesmo ficheiro para a mesma data actualiza linhas existentes
+  (conforme regras de conflito da API).

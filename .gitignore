@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+backend/node_modules/
+
+# Environment (never commit secrets)
+.env
+backend/.env
+.env.*
+!.env.example
+!backend/.env.example
+
+# Logs & runtime
+*.log
+npm-debug.log*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+
+# Optional local tooling
+*.local

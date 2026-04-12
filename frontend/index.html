@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="pt">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Plataforma de Motoristas</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <div id="sessionWelcome" class="session-welcome hidden">Bem-vindo</div>
+    <button id="logoutBtn" class="session-logout hidden" type="button">Terminar sessão</button>
+    <main class="container">
+      <h1>Serviços de motoristas</h1>
+
+      <div id="loginScreen">
+        <section class="card login-card-small">
+          <h2>Início de sessão</h2>
+          <form id="loginForm" class="login-compact-form">
+            <input id="loginUsername" type="text" placeholder="Nome de utilizador" required />
+            <input id="loginPassword" type="password" placeholder="Palavra-passe" required />
+            <button type="submit">Entrar</button>
+          </form>
+        </section>
+      </div>
+
+      <div id="appScreen" class="hidden">
+        <div id="driverNotificationsBar" class="driver-notifications hidden" aria-live="polite"></div>
+        <section class="card">
+          <nav class="tab-nav" id="driverTabs">
+            <button type="button" class="tab-btn active" data-driver-tab-target="driverStepSelect">1. Escolher serviço</button>
+            <button type="button" class="tab-btn" data-driver-tab-target="driverStepStart">2. Iniciar viagem</button>
+            <button type="button" class="tab-btn" data-driver-tab-target="driverStepMap">3. Mapa e operações</button>
+            <button type="button" class="tab-btn" data-driver-tab-target="driverStepHistory">Histórico</button>
+          </nav>
+
+          <section id="driverStepSelect" class="tab-panel active">
+            <h2>Escolher serviço</h2>
+            <button id="refreshTodayServicesBtn">Atualizar serviços de hoje</button>
+            <ul id="todayServicesList"></ul>
+          </section>
+
+          <section id="driverStepStart" class="tab-panel">
+            <h2>Iniciar viagem</h2>
+            <form id="serviceForm">
+              <label for="plateNumber">Número da chapa</label>
+              <input id="plateNumber" type="text" placeholder="Ex: AA-12-BB" required />
+
+              <label for="serviceSchedule">Horário do serviço</label>
+              <input id="serviceSchedule" type="text" placeholder="Ex: 06:00-08:00" required />
+
+              <label for="lineCode">Linha</label>
+              <input id="lineCode" type="text" placeholder="Ex: L01" required />
+
+              <label for="fleetNumber">Número da viatura/frota</label>
+              <input id="fleetNumber" type="text" placeholder="Ex: F-210" required />
+              <small id="fleetWarning" class="field-warning hidden">
+                Frota alterada face a prevista na escala.
+              </small>
+              <small class="field-help">
+                Pode alterar a frota antes de iniciar, caso haja troca de viatura.
+              </small>
+              <button type="submit">Iniciar viagem</button>
+            </form>
+          </section>
+
+          <section id="driverStepMap" class="tab-panel">
+            <h2>Percurso e operações</h2>
+            <div id="map"></div>
+
+            <section class="card">
+              <h3>Resumo do serviço</h3>
+              <pre id="serviceSummary">Sem viagem em curso.</pre>
+            </section>
+
+            <section class="card">
+              <h3>Ações no serviço</h3>
+              <button id="endTripBtn" disabled>Finalizar viagem</button>
+              <button id="refreshPendingHandoversBtn" type="button">Atualizar serviços a assumir</button>
+              <ul id="pendingHandoversList"></ul>
+            </section>
+
+            <section class="card">
+              <h3>Transferir serviço (avaria/acidente)</h3>
+              <form id="handoverForm">
+                <label for="handoverToMechanicNumber">N.º mecanográfico do motorista de destino</label>
+                <input id="handoverToMechanicNumber" type="text" placeholder="Ex: 54321" />
+
+                <label for="handoverToFleetNumber">Nova frota/viatura</label>
+                <input id="handoverToFleetNumber" type="text" placeholder="Ex: F-450" />
+
+                <label for="handoverReason">Motivo</label>
+                <input id="handoverReason" type="text" placeholder="Ex: avaria" />
+
+                <label for="handoverNotes">Notas</label>
+                <input id="handoverNotes" type="text" placeholder="Detalhes da ocorrência" />
+
+                <label for="handoverLocationText">Paragem/local da transferência</label>
+                <input id="handoverLocationText" type="text" placeholder="Ex: Paragem Central - Plataforma 2" />
+                <button type="submit" id="handoverBtn">Transferir serviço</button>
+              </form>
+            </section>
+          </section>
+
+          <section id="driverStepHistory" class="tab-panel">
+            <h2>Histórico</h2>
+            <button id="refreshHistoryBtn">Atualizar histórico</button>
+            <ul id="historyList"></ul>
+          </section>
+        </section>
+      </div>
+    </main>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
