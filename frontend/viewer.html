@@ -21,49 +21,51 @@
         </form>
       </section>
 
-      <section class="card">
-        <h2>Resumo</h2>
-        <pre id="viewerOverview">Sem dados.</pre>
-      </section>
+      <div id="viewerAppSections" class="hidden">
+        <section class="card">
+          <h2>Resumo</h2>
+          <pre id="viewerOverview">Sem dados.</pre>
+        </section>
 
-      <section class="card">
-        <h2>Filtros e exportação</h2>
-        <form id="viewerFiltersForm">
-          <input id="vfDriverId" type="number" placeholder="ID do motorista" />
-          <input id="vfLineCode" type="text" placeholder="Linha" />
-          <input id="vfStatus" type="text" placeholder="Estado (códigos: completed, in_progress, …)" />
-          <input id="vfFromDate" type="date" />
-          <input id="vfToDate" type="date" />
-          <button type="submit">Aplicar filtros</button>
-        </form>
-        <button id="viewerExportBtn">Exportar resumo em CSV</button>
-      </section>
+        <section class="card">
+          <h2>Filtros e exportação</h2>
+          <form id="viewerFiltersForm">
+            <input id="vfDriverId" type="number" placeholder="ID do motorista" />
+            <input id="vfLineCode" type="text" placeholder="Linha" />
+            <input id="vfStatus" type="text" placeholder="Estado (códigos: completed, in_progress, …)" />
+            <input id="vfFromDate" type="date" />
+            <input id="vfToDate" type="date" />
+            <button type="submit">Aplicar filtros</button>
+          </form>
+          <button id="viewerExportBtn">Exportar resumo em CSV</button>
+        </section>
 
-      <section class="card viewer-layout-card">
-        <h2>Painel operacional (só consulta)</h2>
-        <div class="viewer-layout">
-          <div class="ops-main">
-            <h3>Serviços do dia</h3>
-            <div id="viewerServiceCards" class="service-cards"></div>
+        <section class="card viewer-layout-card">
+          <h2>Painel operacional (só consulta)</h2>
+          <div class="viewer-layout">
+            <div class="ops-main">
+              <h3>Serviços do dia</h3>
+              <div id="viewerServiceCards" class="service-cards"></div>
+            </div>
+            <aside class="ops-stats viewer-right-panel">
+              <div class="stat-card">
+                <h3>Estado dos serviços</h3>
+                <div id="viewerServicesPie" class="pie-chart"></div>
+                <div id="viewerServicesStatsText">Sem dados.</div>
+              </div>
+              <div class="stat-card">
+                <h3>Execução</h3>
+                <div id="viewerBlocksPie" class="pie-chart"></div>
+                <div id="viewerBlocksStatsText">Sem dados.</div>
+              </div>
+              <div class="stat-card">
+                <h3>Saídas (últimas)</h3>
+                <ul id="viewerDeparturesList"></ul>
+              </div>
+            </aside>
           </div>
-          <aside class="ops-stats viewer-right-panel">
-            <div class="stat-card">
-              <h3>Estado dos serviços</h3>
-              <div id="viewerServicesPie" class="pie-chart"></div>
-              <div id="viewerServicesStatsText">Sem dados.</div>
-            </div>
-            <div class="stat-card">
-              <h3>Execução</h3>
-              <div id="viewerBlocksPie" class="pie-chart"></div>
-              <div id="viewerBlocksStatsText">Sem dados.</div>
-            </div>
-            <div class="stat-card">
-              <h3>Saídas (últimas)</h3>
-              <ul id="viewerDeparturesList"></ul>
-            </div>
-          </aside>
-        </div>
-      </section>
+        </section>
+      </div>
     </main>
 
     <script src="./viewer.js"></script>

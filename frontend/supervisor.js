@@ -1313,6 +1313,21 @@ async function toggleDriverActive(driverId, currentActive) {
   await loadDrivers();
 }
 
+async function toggleAccessUserActive(userId, currentActive) {
+  if (!supToken) return;
+  const response = await fetch(`${API_BASE}/supervisor/users/${userId}`, {
+    method: "PATCH",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ isActive: !currentActive }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    alert(data.message || "Erro ao atualizar estado do utilizador.");
+    return;
+  }
+  await loadDrivers();
+}
+
 let inlineResetUserId = null;
 
 function renderUsersList() {
@@ -1346,6 +1361,12 @@ function renderUsersList() {
       toggleBtn.type = "button";
       toggleBtn.textContent = d.is_active ? "Desativar" : "Ativar";
       toggleBtn.addEventListener("click", () => toggleDriverActive(d.id, d.is_active));
+      actions.appendChild(toggleBtn);
+    } else if (["viewer", "viewr", "supervisor", "admin"].includes(role)) {
+      const toggleBtn = document.createElement("button");
+      toggleBtn.type = "button";
+      toggleBtn.textContent = d.is_active ? "Desativar" : "Ativar";
+      toggleBtn.addEventListener("click", () => toggleAccessUserActive(d.id, d.is_active));
       actions.appendChild(toggleBtn);
     }
     li.appendChild(actions);

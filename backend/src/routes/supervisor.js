@@ -1232,6 +1232,49 @@ router.patch("/users/password-reset", async (req, res) => {
   }
 });
 
+const ACCESS_USER_ROLES = new Set(["viewer", "viewr", "supervisor", "admin"]);
+
+router.patch("/users/:userId", async (req, res) => {
+  const userId = Number(req.params.userId);
+  const { isActive } = req.body || {};
+  const actorId = Number(req.user?.id);
+
+  if (!Number.isFinite(userId) || userId <= 0) {
+    return res.status(400).json({ message: "Identificador de utilizador invalido." });
+  }
+  if (typeof isActive !== "boolean") {
+    return res.status(400).json({ message: "Indique isActive (true ou false)." });
+  }
+  if (!isActive && Number.isFinite(actorId) && actorId === userId) {
+    return res.status(400).json({ message: "Nao pode desativar a sua propria conta nesta sessao." });
+  }
+
+  try {
+    const existing = await db.query(
+      `SELECT id, role FROM users WHERE id = $1 LIMIT 1`,
+      [userId]
+    );
+    if (!existing.rowCount) {
+      return res.status(404).json({ message: "Utilizador nao encontrado." });
+    }
+    const userRole = normalizeRole(existing.rows[0].role);
+    if (!ACCESS_USER_ROLES.has(userRole)) {
+      return res.status(400).json({
+        message: "Só e possivel ativar/desativar utilizadores de acesso (visualizacao, supervisor ou administrador).",
+      });
+    }
+
+    const result = await db.query(
+      `UPDATE users SET is_active = $2 WHERE id = $1
+       RETURNING id, name, username, email, role, is_active`,
+      [userId, isActive]
+    );
+    return res.json(result.rows[0]);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao atualizar estado do utilizador." });
+  }
+});
+
 router.post("/drivers/import", async (req, res) => {
   const { csvText, fileBase64, defaultCompany } = req.body;
   if (!csvText && !fileBase64) {

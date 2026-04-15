@@ -50,6 +50,7 @@ const blocksStatsTextEl = document.getElementById("viewerBlocksStatsText");
 const sessionWelcomeEl = document.getElementById("viewerSessionWelcome");
 const logoutBtnEl = document.getElementById("viewerLogoutBtn");
 const loginCardEl = document.getElementById("viewerLoginCard");
+const appSectionsEl = document.getElementById("viewerAppSections");
 
 function authHeaders() {
   return {
@@ -63,6 +64,7 @@ function applyViewerSession(user) {
   sessionWelcomeEl.classList.remove("hidden");
   logoutBtnEl.classList.remove("hidden");
   loginCardEl.classList.add("hidden");
+  appSectionsEl?.classList.remove("hidden");
 }
 
 function readUserFromJwt(token) {
@@ -224,9 +226,10 @@ async function loginViewer(event) {
   }
 
   viewerToken = data.token;
+  const sessionUser = data.user || readUserFromJwt(data.token) || { username, role };
   sessionStorage.setItem(AUTH_SESSION_KEY, JSON.stringify({ token: data.token, user: data.user }));
-  alert(`Sessão iniciada para ${data.user.username} (${labelPerfilResumidoPt(role)}).`);
-  applyViewerSession(data.user);
+  alert(`Sessão iniciada para ${sessionUser.username || sessionUser.name || username} (${labelPerfilResumidoPt(role)}).`);
+  applyViewerSession(sessionUser);
   await loadOverview();
   await loadServices();
 }
@@ -240,6 +243,7 @@ function logoutViewer() {
   sessionWelcomeEl.classList.add("hidden");
   logoutBtnEl.classList.add("hidden");
   loginCardEl.classList.remove("hidden");
+  appSectionsEl?.classList.add("hidden");
   overviewEl.textContent = "Sem dados.";
   servicesCardsEl.innerHTML = "";
   departuresListEl.innerHTML = "";

@@ -12,7 +12,7 @@
     />
     <link rel="stylesheet" href="./styles.css" />
   </head>
-  <body>
+  <body class="driver-page">
     <div id="sessionWelcome" class="session-welcome hidden">Bem-vindo</div>
     <button id="logoutBtn" class="session-logout hidden" type="button">Terminar sessão</button>
     <main class="container">
@@ -31,87 +31,90 @@
 
       <div id="appScreen" class="hidden">
         <div id="driverNotificationsBar" class="driver-notifications hidden" aria-live="polite"></div>
-        <section class="card">
-          <nav class="tab-nav" id="driverTabs">
-            <button type="button" class="tab-btn active" data-driver-tab-target="driverStepSelect">1. Escolher serviço</button>
-            <button type="button" class="tab-btn" data-driver-tab-target="driverStepStart">2. Iniciar viagem</button>
-            <button type="button" class="tab-btn" data-driver-tab-target="driverStepMap">3. Mapa e operações</button>
-            <button type="button" class="tab-btn" data-driver-tab-target="driverStepHistory">Histórico</button>
-          </nav>
+        <section class="card driver-dashboard-card">
+          <div class="dashboard-layout driver-dashboard-layout">
+            <nav class="tab-nav tab-nav-side" id="driverTabs">
+              <button type="button" class="tab-btn active" data-driver-tab-target="driverStepSelect">1. Escolher serviço</button>
+              <button type="button" class="tab-btn" data-driver-tab-target="driverStepStart">2. Iniciar viagem</button>
+              <button type="button" class="tab-btn" data-driver-tab-target="driverStepMap">3. Mapa e operações</button>
+              <button type="button" class="tab-btn" data-driver-tab-target="driverStepHistory">Histórico</button>
+            </nav>
+            <div class="tab-content">
+              <section id="driverStepSelect" class="tab-panel active">
+                <h2>Escolher serviço</h2>
+                <button id="refreshTodayServicesBtn">Atualizar serviços de hoje</button>
+                <ul id="todayServicesList"></ul>
+              </section>
 
-          <section id="driverStepSelect" class="tab-panel active">
-            <h2>Escolher serviço</h2>
-            <button id="refreshTodayServicesBtn">Atualizar serviços de hoje</button>
-            <ul id="todayServicesList"></ul>
-          </section>
+              <section id="driverStepStart" class="tab-panel">
+                <h2>Iniciar viagem</h2>
+                <form id="serviceForm">
+                  <label for="plateNumber">Número da chapa</label>
+                  <input id="plateNumber" type="text" placeholder="Ex: AA-12-BB" required />
 
-          <section id="driverStepStart" class="tab-panel">
-            <h2>Iniciar viagem</h2>
-            <form id="serviceForm">
-              <label for="plateNumber">Número da chapa</label>
-              <input id="plateNumber" type="text" placeholder="Ex: AA-12-BB" required />
+                  <label for="serviceSchedule">Horário do serviço</label>
+                  <input id="serviceSchedule" type="text" placeholder="Ex: 06:00-08:00" required />
 
-              <label for="serviceSchedule">Horário do serviço</label>
-              <input id="serviceSchedule" type="text" placeholder="Ex: 06:00-08:00" required />
+                  <label for="lineCode">Linha</label>
+                  <input id="lineCode" type="text" placeholder="Ex: L01" required />
 
-              <label for="lineCode">Linha</label>
-              <input id="lineCode" type="text" placeholder="Ex: L01" required />
+                  <label for="fleetNumber">Número da viatura/frota</label>
+                  <input id="fleetNumber" type="text" placeholder="Ex: F-210" required />
+                  <small id="fleetWarning" class="field-warning hidden">
+                    Frota alterada face a prevista na escala.
+                  </small>
+                  <small class="field-help">
+                    Pode alterar a frota antes de iniciar, caso haja troca de viatura.
+                  </small>
+                  <button type="submit">Iniciar viagem</button>
+                </form>
+              </section>
 
-              <label for="fleetNumber">Número da viatura/frota</label>
-              <input id="fleetNumber" type="text" placeholder="Ex: F-210" required />
-              <small id="fleetWarning" class="field-warning hidden">
-                Frota alterada face a prevista na escala.
-              </small>
-              <small class="field-help">
-                Pode alterar a frota antes de iniciar, caso haja troca de viatura.
-              </small>
-              <button type="submit">Iniciar viagem</button>
-            </form>
-          </section>
+              <section id="driverStepMap" class="tab-panel">
+                <h2>Percurso e operações</h2>
+                <div id="map"></div>
 
-          <section id="driverStepMap" class="tab-panel">
-            <h2>Percurso e operações</h2>
-            <div id="map"></div>
+                <section class="card">
+                  <h3>Resumo do serviço</h3>
+                  <pre id="serviceSummary">Sem viagem em curso.</pre>
+                </section>
 
-            <section class="card">
-              <h3>Resumo do serviço</h3>
-              <pre id="serviceSummary">Sem viagem em curso.</pre>
-            </section>
+                <section class="card">
+                  <h3>Ações no serviço</h3>
+                  <button id="endTripBtn" disabled>Finalizar viagem</button>
+                  <button id="refreshPendingHandoversBtn" type="button">Atualizar serviços a assumir</button>
+                  <ul id="pendingHandoversList"></ul>
+                </section>
 
-            <section class="card">
-              <h3>Ações no serviço</h3>
-              <button id="endTripBtn" disabled>Finalizar viagem</button>
-              <button id="refreshPendingHandoversBtn" type="button">Atualizar serviços a assumir</button>
-              <ul id="pendingHandoversList"></ul>
-            </section>
+                <section class="card">
+                  <h3>Transferir serviço (avaria/acidente)</h3>
+                  <form id="handoverForm">
+                    <label for="handoverToMechanicNumber">N.º mecanográfico do motorista de destino</label>
+                    <input id="handoverToMechanicNumber" type="text" placeholder="Ex: 54321" />
 
-            <section class="card">
-              <h3>Transferir serviço (avaria/acidente)</h3>
-              <form id="handoverForm">
-                <label for="handoverToMechanicNumber">N.º mecanográfico do motorista de destino</label>
-                <input id="handoverToMechanicNumber" type="text" placeholder="Ex: 54321" />
+                    <label for="handoverToFleetNumber">Nova frota/viatura</label>
+                    <input id="handoverToFleetNumber" type="text" placeholder="Ex: F-450" />
 
-                <label for="handoverToFleetNumber">Nova frota/viatura</label>
-                <input id="handoverToFleetNumber" type="text" placeholder="Ex: F-450" />
+                    <label for="handoverReason">Motivo</label>
+                    <input id="handoverReason" type="text" placeholder="Ex: avaria" />
 
-                <label for="handoverReason">Motivo</label>
-                <input id="handoverReason" type="text" placeholder="Ex: avaria" />
+                    <label for="handoverNotes">Notas</label>
+                    <input id="handoverNotes" type="text" placeholder="Detalhes da ocorrência" />
 
-                <label for="handoverNotes">Notas</label>
-                <input id="handoverNotes" type="text" placeholder="Detalhes da ocorrência" />
+                    <label for="handoverLocationText">Paragem/local da transferência</label>
+                    <input id="handoverLocationText" type="text" placeholder="Ex: Paragem Central - Plataforma 2" />
+                    <button type="submit" id="handoverBtn">Transferir serviço</button>
+                  </form>
+                </section>
+              </section>
 
-                <label for="handoverLocationText">Paragem/local da transferência</label>
-                <input id="handoverLocationText" type="text" placeholder="Ex: Paragem Central - Plataforma 2" />
-                <button type="submit" id="handoverBtn">Transferir serviço</button>
-              </form>
-            </section>
-          </section>
-
-          <section id="driverStepHistory" class="tab-panel">
-            <h2>Histórico</h2>
-            <button id="refreshHistoryBtn">Atualizar histórico</button>
-            <ul id="historyList"></ul>
-          </section>
+              <section id="driverStepHistory" class="tab-panel">
+                <h2>Histórico</h2>
+                <button id="refreshHistoryBtn">Atualizar histórico</button>
+                <ul id="historyList"></ul>
+              </section>
+            </div>
+          </div>
         </section>
       </div>
     </main>
