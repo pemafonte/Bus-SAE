@@ -78,6 +78,7 @@ const supLiveServicesListEl = document.getElementById("supLiveServicesList");
 const liveServiceFilterSelectEl = document.getElementById("liveServiceFilterSelect");
 
 let driversCache = [];
+let usersCache = [];
 let rosterDayCache = [];
 let rosterDaySelectedDriverId = null;
 let supLiveMap = null;
@@ -995,6 +996,68 @@ async function createAccessUser(event) {
   alert(`Utilizador ${data.username} (${labelPerfilAcessoPt(data.role)}) criado com sucesso.`);
 }
 
+async function resetUserPassword({ username, newPassword, allowedRoles, activateUser }) {
+  if (!supToken) return { ok: false, message: "Sessao expirada." };
+  const response = await fetch(`${API_BASE}/supervisor/users/password-reset`, {
+    method: "PATCH",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ username, newPassword, allowedRoles, activateUser }),
+  });
+  const data = await response.json().catch(() => ({}));
+  return {
+    ok: response.ok,
+    message: data.message || (response.ok ? "Password atualizada." : "Erro ao atualizar password."),
+    user: data.user || null,
+  };
+}
+
+async function resetDriverPassword(event) {
+  event.preventDefault();
+  const username = document.getElementById("rpDriverUsername").value.trim();
+  const newPassword = document.getElementById("rpDriverPassword").value.trim();
+  const activateUser = document.getElementById("rpDriverActivate").checked;
+  if (!username || !newPassword) {
+    alert("Preencha username e nova palavra-passe.");
+    return;
+  }
+  const result = await resetUserPassword({
+    username,
+    newPassword,
+    allowedRoles: ["driver"],
+    activateUser,
+  });
+  if (!result.ok) {
+    alert(result.message);
+    return;
+  }
+  alert(`Password do motorista ${result.user?.username || username} atualizada com sucesso.`);
+  document.getElementById("driverPasswordResetForm").reset();
+  await loadDrivers();
+}
+
+async function resetAccessPassword(event) {
+  event.preventDefault();
+  const username = document.getElementById("rpAccessUsername").value.trim();
+  const newPassword = document.getElementById("rpAccessPassword").value.trim();
+  const activateUser = document.getElementById("rpAccessActivate").checked;
+  if (!username || !newPassword) {
+    alert("Preencha username e nova palavra-passe.");
+    return;
+  }
+  const result = await resetUserPassword({
+    username,
+    newPassword,
+    allowedRoles: ["viewer", "supervisor", "admin"],
+    activateUser,
+  });
+  if (!result.ok) {
+    alert(result.message);
+    return;
+  }
+  alert(`Password do utilizador ${result.user?.username || username} atualizada com sucesso.`);
+  document.getElementById("accessPasswordResetForm").reset();
+}
+
 async function importDrivers() {
   if (!supToken) return;
   const csvText = document.getElementById("driversCsvText").value;
@@ -1250,6 +1313,83 @@ async function toggleDriverActive(driverId, currentActive) {
   await loadDrivers();
 }
 
+let inlineResetUserId = null;
+
+function renderUsersList() {
+  driversListEl.innerHTML = "";
+  usersCache.forEach((d) => {
+    const role = String(d.role || "").toLowerCase();
+    const li = document.createElement("li");
+    li.className = "user-row-item";
+
+    const summary = document.createElement("div");
+    summary.className = "user-row-summary";
+    summary.textContent = `${d.name} | Utilizador ${d.username || "-"} | Perfil ${labelPerfilAcessoPt(role)} | Mec. ${
+      d.mechanic_number || "-"
+    } | ${d.email || "-"} | Empresa ${d.company_name || "-"} | ${d.is_active ? "Ativo" : "Nao ativo"}`;
+    li.appendChild(summary);
+
+    const actions = document.createElement("div");
+    actions.className = "user-row-actions";
+
+    const resetBtn = document.createElement("button");
+    resetBtn.type = "button";
+    resetBtn.textContent = inlineResetUserId === d.id ? "Cancelar reset" : "Reset password";
+    resetBtn.addEventListener("click", () => {
+      inlineResetUserId = inlineResetUserId === d.id ? null : d.id;
+      renderUsersList();
+    });
+    actions.appendChild(resetBtn);
+
+    if (role === "driver") {
+      const toggleBtn = document.createElement("button");
+      toggleBtn.type = "button";
+      toggleBtn.textContent = d.is_active ? "Desativar" : "Ativar";
+      toggleBtn.addEventListener("click", () => toggleDriverActive(d.id, d.is_active));
+      actions.appendChild(toggleBtn);
+    }
+    li.appendChild(actions);
+
+    if (inlineResetUserId === d.id) {
+      const form = document.createElement("form");
+      form.className = "inline-reset-form";
+      form.innerHTML = `
+        <input type="password" name="newPassword" placeholder="Nova palavra-passe" required />
+        <label><input type="checkbox" name="activateUser" /> Ativar conta ao resetar</label>
+        <button type="submit">Guardar nova password</button>
+      `;
+      form.addEventListener("submit", async (event) => {
+        event.preventDefault();
+        const fd = new FormData(form);
+        const newPassword = String(fd.get("newPassword") || "").trim();
+        const activateUser = fd.get("activateUser") === "on";
+        const username = String(d.username || "").trim();
+        if (!username || !newPassword) {
+          alert("Preencha a nova palavra-passe.");
+          return;
+        }
+        const allowedRoles = role === "driver" ? ["driver"] : ["viewer", "supervisor", "admin"];
+        const result = await resetUserPassword({
+          username,
+          newPassword,
+          allowedRoles,
+          activateUser,
+        });
+        if (!result.ok) {
+          alert(result.message);
+          return;
+        }
+        alert(`Password de ${username} atualizada com sucesso.`);
+        inlineResetUserId = null;
+        await loadDrivers();
+      });
+      li.appendChild(form);
+    }
+
+    driversListEl.appendChild(li);
+  });
+}
+
 async function loadDrivers() {
   if (!supToken) return;
   const response = await fetch(`${API_BASE}/supervisor/drivers`, {
@@ -1258,23 +1398,12 @@ async function loadDrivers() {
   const data = await response.json();
   if (!response.ok) return;
 
+  usersCache = data;
   driversCache = data.filter((d) => String(d.role || "").toLowerCase() === "driver");
-
-  driversListEl.innerHTML = "";
-  data
-    .filter((d) => String(d.role || "").toLowerCase() === "driver")
-    .forEach((d) => {
-      const li = document.createElement("li");
-      li.textContent = `${d.name} | Utilizador ${d.username || "-"} | Mec. ${d.mechanic_number || "-"} | ${d.email || "-"} | Empresa ${d.company_name || "-"} | ${
-        d.is_active ? "Ativo" : "Nao ativo"
-      } `;
-      const btn = document.createElement("button");
-      btn.type = "button";
-      btn.textContent = d.is_active ? "Desativar" : "Ativar";
-      btn.addEventListener("click", () => toggleDriverActive(d.id, d.is_active));
-      li.appendChild(btn);
-      driversListEl.appendChild(li);
-    });
+  if (inlineResetUserId != null && !usersCache.some((u) => Number(u.id) === Number(inlineResetUserId))) {
+    inlineResetUserId = null;
+  }
+  renderUsersList();
 }
 
 function renderRosterDayServiceRows(rows) {
@@ -1486,6 +1615,8 @@ document.getElementById("exportBtn").addEventListener("click", exportCsv);
 document.getElementById("exportExcelBtn").addEventListener("click", exportExcelServices);
 document.getElementById("driverCreateForm").addEventListener("submit", createDriver);
 document.getElementById("accessUserCreateForm").addEventListener("submit", createAccessUser);
+document.getElementById("driverPasswordResetForm").addEventListener("submit", resetDriverPassword);
+document.getElementById("accessPasswordResetForm").addEventListener("submit", resetAccessPassword);
 document.getElementById("importDriversBtn").addEventListener("click", importDrivers);
 document.getElementById("downloadDriversTemplateCsvBtn").addEventListener("click", downloadDriversTemplateCsv);
 document.getElementById("downloadDriversTemplateXlsxBtn").addEventListener("click", downloadDriversTemplateXlsx);

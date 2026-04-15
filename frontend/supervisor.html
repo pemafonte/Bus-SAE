@@ -161,6 +161,17 @@
             </select>
             <button type="submit">Guardar motorista</button>
           </form>
+          <hr />
+          <h3>Reset de palavra-passe (motorista)</h3>
+          <form id="driverPasswordResetForm">
+            <input id="rpDriverUsername" type="text" placeholder="Username do motorista" required />
+            <input id="rpDriverPassword" type="text" placeholder="Nova palavra-passe" required />
+            <label>
+              <input id="rpDriverActivate" type="checkbox" />
+              Ativar conta ao fazer reset
+            </label>
+            <button type="submit">Reset password motorista</button>
+          </form>
         </div>
 
         <div id="tabCriarAcesso" class="tab-panel">
@@ -180,6 +191,17 @@
               <option value="false">Nao ativo</option>
             </select>
             <button type="submit">Criar utilizador</button>
+          </form>
+          <hr />
+          <h3>Reset de palavra-passe (gestor / visualização / admin)</h3>
+          <form id="accessPasswordResetForm">
+            <input id="rpAccessUsername" type="text" placeholder="Username do utilizador" required />
+            <input id="rpAccessPassword" type="text" placeholder="Nova palavra-passe" required />
+            <label>
+              <input id="rpAccessActivate" type="checkbox" />
+              Ativar conta ao fazer reset
+            </label>
+            <button type="submit">Reset password acesso</button>
           </form>
         </div>
 
@@ -227,8 +249,8 @@
         </div>
 
         <div id="tabListaMotoristas" class="tab-panel">
-          <h2>Lista de motoristas</h2>
-          <button id="refreshDriversBtn">Atualizar motoristas</button>
+          <h2>Lista de utilizadores</h2>
+          <button id="refreshDriversBtn">Atualizar utilizadores</button>
           <ul id="driversList"></ul>
         </div>
           </div>

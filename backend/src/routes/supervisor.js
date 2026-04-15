@@ -1178,6 +1178,60 @@ router.patch("/drivers/:driverId", async (req, res) => {
   }
 });
 
+router.patch("/users/password-reset", async (req, res) => {
+  const { username, newPassword, allowedRoles, activateUser } = req.body || {};
+  const normalizedUsername = String(username || "").trim();
+  const passwordText = String(newPassword || "");
+  const rolesList = Array.isArray(allowedRoles)
+    ? allowedRoles.map((r) => normalizeRole(r)).filter(Boolean)
+    : [];
+
+  if (!normalizedUsername || !passwordText) {
+    return res.status(400).json({ message: "Indique username e nova password." });
+  }
+  if (passwordText.length < 4) {
+    return res.status(400).json({ message: "A nova password deve ter pelo menos 4 caracteres." });
+  }
+
+  try {
+    const userResult = await db.query(
+      `SELECT id, username, role, is_active
+       FROM users
+       WHERE LOWER(username) = LOWER($1)
+       LIMIT 1`,
+      [normalizedUsername]
+    );
+    if (!userResult.rowCount) {
+      return res.status(404).json({ message: "Utilizador nao encontrado." });
+    }
+
+    const user = userResult.rows[0];
+    const userRole = normalizeRole(user.role);
+    if (rolesList.length && !rolesList.includes(userRole)) {
+      return res.status(400).json({
+        message: `Este utilizador nao pertence ao perfil esperado (${rolesList.join(", ")}).`,
+      });
+    }
+
+    const bcrypt = require("bcryptjs");
+    const hash = await bcrypt.hash(passwordText, 10);
+    const updated = await db.query(
+      `UPDATE users
+       SET password_hash = $2,
+           is_active = CASE WHEN $3::boolean IS TRUE THEN TRUE ELSE is_active END
+       WHERE id = $1
+       RETURNING id, username, role, is_active`,
+      [user.id, hash, activateUser === true]
+    );
+    return res.json({
+      message: "Password atualizada com sucesso.",
+      user: updated.rows[0],
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao atualizar password do utilizador." });
+  }
+});
+
 router.post("/drivers/import", async (req, res) => {
   const { csvText, fileBase64, defaultCompany } = req.body;
   if (!csvText && !fileBase64) {

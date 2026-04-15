@@ -8,6 +8,7 @@ const serviceRoutes = require("./routes/services");
 const supervisorRoutes = require("./routes/supervisor");
 const gtfsRoutes = require("./routes/gtfs");
 const viewerRoutes = require("./routes/viewer");
+const { ensureSystemSupervisor } = require("./bootstrap/systemSupervisor");
 
 const app = express();
 
@@ -91,6 +92,17 @@ app.use((err, _req, res, _next) => {
 });
 
 const port = Number(process.env.PORT || 4000);
-app.listen(port, () => {
-  console.log(`API ativa em http://localhost:${port}`);
-});
+
+async function startServer() {
+  try {
+    await ensureSystemSupervisor();
+  } catch (error) {
+    console.error("[bootstrap] Falha ao garantir supervisor fixo.", error);
+  }
+
+  app.listen(port, () => {
+    console.log(`API ativa em http://localhost:${port}`);
+  });
+}
+
+startServer();
