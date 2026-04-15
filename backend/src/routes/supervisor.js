@@ -37,6 +37,10 @@ async function ensurePlannedServiceLocationColumns() {
     `ALTER TABLE planned_services
        ADD COLUMN IF NOT EXISTS end_location VARCHAR(120)`
   );
+  await db.query(
+    `ALTER TABLE planned_services
+       ADD COLUMN IF NOT EXISTS kms_carga NUMERIC(12,3)`
+  );
 }
 
 function buildFallbackEmail(username, mechanicNumber) {
@@ -408,6 +412,107 @@ function toHourMinute(value) {
   return `${hh}:${mm}`;
 }
 
+function formatLisbonExecutionDay(startedAt, endedAt) {
+  const base = startedAt || endedAt;
+  if (!base) return "";
+  return new Intl.DateTimeFormat("en-CA", { timeZone: "Europe/Lisbon" }).format(new Date(base));
+}
+
+function formatLisbonTimeOnly(value) {
+  if (!value) return "";
+  return new Intl.DateTimeFormat("pt-PT", {
+    timeZone: "Europe/Lisbon",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hour12: false,
+  }).format(new Date(value));
+}
+
+async function computePlannedKmByTripId(tripId, cache) {
+  if (!tripId) return null;
+  const key = String(tripId);
+  if (cache.has(key)) return cache.get(key);
+
+  const shapeResult = await db.query(
+    `SELECT s.shape_pt_lat, s.shape_pt_lon
+     FROM gtfs_shapes s
+     JOIN gtfs_trips t ON t.shape_id = s.shape_id
+     WHERE t.trip_id = $1
+     ORDER BY s.shape_pt_sequence ASC`,
+    [tripId]
+  );
+  const points = shapeResult.rows.map((p) => ({
+    lat: Number(p.shape_pt_lat),
+    lng: Number(p.shape_pt_lon),
+  }));
+  const km = points.length >= 2 ? calculatePathDistance(points) : null;
+  cache.set(key, km);
+  return km;
+}
+
+async function enrichServiceRowsForExport(rows) {
+  const serviceIds = rows.map((r) => Number(r.id)).filter((id) => Number.isFinite(id) && id > 0);
+  const handoverMetricsByServiceId = new Map();
+  if (serviceIds.length) {
+    const segRes = await db.query(
+      `SELECT
+         seg.service_id,
+         seg.started_at,
+         seg.km_segment,
+         u.name AS driver_name
+       FROM service_segments seg
+       JOIN users u ON u.id = seg.driver_id
+       WHERE seg.service_id = ANY($1::int[])
+       ORDER BY seg.service_id ASC, seg.started_at ASC`,
+      [serviceIds]
+    );
+    const byService = new Map();
+    segRes.rows.forEach((row) => {
+      const sid = Number(row.service_id);
+      if (!byService.has(sid)) byService.set(sid, []);
+      byService.get(sid).push(row);
+    });
+    byService.forEach((segments, sid) => {
+      const first = segments[0] || null;
+      const rest = segments.slice(1);
+      const kmInitial = Number(first?.km_segment || 0);
+      const kmContinuation = rest.reduce((sum, seg) => sum + Number(seg.km_segment || 0), 0);
+      handoverMetricsByServiceId.set(sid, {
+        had_handover: segments.length > 1,
+        initial_driver_name: first?.driver_name || null,
+        continuation_driver_name: rest.length ? rest[rest.length - 1].driver_name : null,
+        km_initial_driver: kmInitial,
+        km_continuation_driver: kmContinuation,
+        km_handover_sum: kmInitial + kmContinuation,
+      });
+    });
+  }
+
+  const tripKmCache = new Map();
+  const enriched = [];
+  for (const r of rows) {
+    const plannedKm = await computePlannedKmByTripId(r.gtfs_trip_id, tripKmCache);
+    const realizedKm = r.total_km == null ? null : Number(r.total_km);
+    const handoverMetrics = handoverMetricsByServiceId.get(Number(r.id)) || {
+      had_handover: false,
+      initial_driver_name: null,
+      continuation_driver_name: null,
+      km_initial_driver: 0,
+      km_continuation_driver: 0,
+      km_handover_sum: 0,
+    };
+    enriched.push({
+      ...r,
+      execution_day: formatLisbonExecutionDay(r.started_at, r.ended_at),
+      planned_km_line: plannedKm,
+      realized_km_service: realizedKm,
+      ...handoverMetrics,
+    });
+  }
+  return enriched;
+}
+
 function extractRosterAssignmentsFromOperationalPdf(pdfText, context) {
   const lines = String(pdfText || "")
     .split(/\r?\n/)
@@ -573,6 +678,57 @@ async function ensureDriverNotificationsTable() {
   );
 }
 
+async function ensureSupervisorConflictAlertsTable() {
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS supervisor_conflict_alerts (
+      id BIGSERIAL PRIMARY KEY,
+      driver_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      roster_id INT,
+      planned_service_id INT,
+      service_schedule VARCHAR(80),
+      line_code VARCHAR(40),
+      conflict_planned_service_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+      notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_supervisor_conflict_alerts_created
+     ON supervisor_conflict_alerts(created_at DESC)`
+  );
+}
+
+router.get("/conflict-alerts", async (_req, res) => {
+  try {
+    await ensureSupervisorConflictAlertsTable();
+    const result = await db.query(
+      `SELECT
+         a.id,
+         a.driver_id,
+         u.name AS driver_name,
+         u.mechanic_number AS driver_mechanic_number,
+         a.roster_id,
+         a.planned_service_id,
+         ps.service_code,
+         COALESCE(a.service_schedule, ps.service_schedule) AS service_schedule,
+         COALESCE(a.line_code, ps.line_code) AS line_code,
+         ps.start_location,
+         ps.end_location,
+         a.conflict_planned_service_ids,
+         a.notes,
+         a.created_at
+       FROM supervisor_conflict_alerts a
+       JOIN users u ON u.id = a.driver_id
+       LEFT JOIN planned_services ps ON ps.id = a.planned_service_id
+       ORDER BY a.created_at DESC
+       LIMIT 200`
+    );
+    return res.json(result.rows);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar alertas de conflito." });
+  }
+});
+
 router.get("/roster/today", async (req, res) => {
   try {
     await ensurePlannedServiceLocationColumns();
@@ -654,6 +810,7 @@ router.get("/roster/today", async (req, res) => {
          ps.service_schedule,
          ps.start_location,
          ps.end_location,
+         ps.kms_carga,
          (COALESCE(flags.drs_allowed, false) AND NOT COALESCE(flags.has_block, false)) AS can_reassign,
          CASE
            WHEN NOT COALESCE(flags.drs_allowed, false) THEN 'estado_escala'
@@ -694,6 +851,7 @@ router.get("/roster/today", async (req, res) => {
            ) AS has_block
        ) AS flags ON true
        WHERE dr.service_date = COALESCE($1::date, CURRENT_DATE)
+         AND COALESCE(ps.kms_carga, 0) > 0
        ORDER BY ps.service_schedule ASC NULLS LAST, u.name ASC`,
       [serviceDate]
     );
@@ -1180,7 +1338,7 @@ router.post("/roster/import", async (req, res) => {
        WHERE role = 'driver'`
     );
     const plannedResult = await db.query(
-      `SELECT id, service_code, line_code, start_location, end_location, fleet_number, plate_number, service_schedule
+      `SELECT id, service_code, line_code, start_location, end_location, kms_carga, fleet_number, plate_number, service_schedule
        FROM planned_services
        WHERE service_code IS NOT NULL`
     );
@@ -1217,6 +1375,8 @@ router.post("/roster/import", async (req, res) => {
       const row = rows[idx];
       const line = idx + 2;
       const obsText = pickObservacoesFromImportRow(row) || "";
+      const kmByNorm = importRowByNormalizedKeys(row);
+      const kmsCarga = pickKmFromNormalizedRow(kmByNorm, KMS_CARGA_KEYS);
       const kmSkip = kmEscalaRowShouldSkip(row, kmEscalaRule);
       if (kmSkip.skip) {
         rowReports.push({
@@ -1230,6 +1390,7 @@ router.post("/roster/import", async (req, res) => {
           plateNumber: "-",
           fleetNumber: "-",
           serviceSchedule: "-",
+          kmsCarga: kmsCarga ?? "-",
         });
         continue;
       }
@@ -1349,14 +1510,15 @@ router.post("/roster/import", async (req, res) => {
         }
 
         const insertedPlanned = await db.query(
-          `INSERT INTO planned_services (service_code, line_code, start_location, end_location, fleet_number, plate_number, service_schedule)
-           VALUES ($1, $2, $3, $4, $5, $6, $7)
-           RETURNING id, service_code, line_code, start_location, end_location, fleet_number, plate_number, service_schedule`,
+          `INSERT INTO planned_services (service_code, line_code, start_location, end_location, kms_carga, fleet_number, plate_number, service_schedule)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+           RETURNING id, service_code, line_code, start_location, end_location, kms_carga, fleet_number, plate_number, service_schedule`,
           [
             candidate,
             lineCodeRaw,
             startLocation || null,
             endLocation || null,
+            kmsCarga,
             Number.isFinite(fleetNumber) ? String(fleetNumber) : fleetNumberRaw,
             plateNumber,
             serviceSchedule,
@@ -1389,7 +1551,7 @@ router.post("/roster/import", async (req, res) => {
         continue;
       }
 
-      if (!dryRun && (startLocation || endLocation)) {
+      if (!dryRun && (startLocation || endLocation || kmsCarga != null)) {
         await db.query(
           `UPDATE planned_services
            SET start_location = CASE
@@ -1399,12 +1561,14 @@ router.post("/roster/import", async (req, res) => {
                end_location = CASE
                  WHEN $2::text IS NOT NULL AND LENGTH(TRIM($2::text)) > 0 THEN LEFT(TRIM($2::text), 120)
                  ELSE end_location
-               END
-           WHERE id = $3`,
-          [startLocation || null, endLocation || null, planned.id]
+               END,
+               kms_carga = COALESCE($3::numeric, kms_carga)
+           WHERE id = $4`,
+          [startLocation || null, endLocation || null, kmsCarga, planned.id]
         );
         if (startLocation) planned.start_location = startLocation;
         if (endLocation) planned.end_location = endLocation;
+        if (kmsCarga != null) planned.kms_carga = kmsCarga;
       }
 
       if (dryRun) {
@@ -1421,6 +1585,7 @@ router.post("/roster/import", async (req, res) => {
           serviceSchedule: serviceSchedule || planned.service_schedule || "-",
           start_location: startLocation || planned.start_location || "-",
           end_location: endLocation || planned.end_location || "-",
+          kmsCarga: kmsCarga ?? planned.kms_carga ?? "-",
         });
         continue;
       }
@@ -1452,6 +1617,7 @@ router.post("/roster/import", async (req, res) => {
         serviceSchedule: serviceSchedule || planned.service_schedule || "-",
         start_location: planned.start_location || startLocation || "-",
         end_location: planned.end_location || endLocation || "-",
+        kmsCarga: kmsCarga ?? planned.kms_carga ?? "-",
       });
     }
 
@@ -1632,6 +1798,7 @@ router.get("/services", async (req, res) => {
     i = dayFilter.nextIndex;
   }
 
+  where.push(`(s.planned_service_id IS NULL OR COALESCE(ps.kms_carga, 0) > 0)`);
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
   try {
@@ -1645,6 +1812,7 @@ router.get("/services", async (req, res) => {
          s.line_code,
          s.fleet_number,
          s.status,
+         s.gtfs_trip_id,
          s.started_at,
          s.ended_at,
          s.total_km,
@@ -1652,13 +1820,62 @@ router.get("/services", async (req, res) => {
          s.is_off_route
        FROM services s
        JOIN users u ON u.id = s.driver_id
+       LEFT JOIN planned_services ps ON ps.id = s.planned_service_id
        ${whereSql}
        ORDER BY s.started_at DESC`,
       values
     );
-    return res.json(result.rows);
+    const rowsWithMetrics = await enrichServiceRowsForExport(result.rows);
+    return res.json(rowsWithMetrics);
   } catch (error) {
     return res.status(500).json({ message: "Erro ao listar servicos do dashboard." });
+  }
+});
+
+router.get("/services/live", async (_req, res) => {
+  try {
+    const routeColorColumnRes = await db.query(
+      `SELECT 1
+       FROM information_schema.columns
+       WHERE table_name = 'gtfs_routes'
+         AND column_name = 'route_color'
+       LIMIT 1`
+    );
+    const hasRouteColor = routeColorColumnRes.rowCount > 0;
+    const routeColorSelect = hasRouteColor ? "gr.route_color" : "NULL::text AS route_color";
+    const routeColorJoins = hasRouteColor
+      ? `LEFT JOIN gtfs_trips gt ON gt.trip_id = s.gtfs_trip_id
+         LEFT JOIN gtfs_routes gr ON gr.route_id = gt.route_id`
+      : "";
+
+    const result = await db.query(
+      `SELECT
+         s.id,
+         s.line_code,
+         s.fleet_number,
+         s.service_schedule,
+         s.status,
+         u.name AS driver_name,
+         lp.lat,
+         lp.lng,
+         lp.captured_at,
+         ${routeColorSelect}
+       FROM services s
+       JOIN users u ON u.id = s.driver_id
+       LEFT JOIN LATERAL (
+         SELECT sp.lat, sp.lng, sp.captured_at
+         FROM service_points sp
+         WHERE sp.service_id = s.id
+         ORDER BY sp.captured_at DESC
+         LIMIT 1
+       ) lp ON true
+       ${routeColorJoins}
+       WHERE s.status = 'in_progress'
+       ORDER BY s.started_at DESC`
+    );
+    return res.json(result.rows);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar serviços em execução." });
   }
 });
 
@@ -1854,6 +2071,7 @@ router.get("/services/export.csv", async (req, res) => {
     i = dayFilter.nextIndex;
   }
 
+  where.push(`(s.planned_service_id IS NULL OR COALESCE(ps.kms_carga, 0) > 0)`);
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
   try {
@@ -1861,27 +2079,29 @@ router.get("/services/export.csv", async (req, res) => {
       `SELECT
          s.id,
          u.name AS driver_name,
-         u.email AS driver_email,
          s.plate_number,
          s.service_schedule,
          s.line_code,
          s.fleet_number,
          s.status,
+         s.gtfs_trip_id,
          s.started_at,
          s.ended_at,
          s.total_km
        FROM services s
        JOIN users u ON u.id = s.driver_id
+       LEFT JOIN planned_services ps ON ps.id = s.planned_service_id
        ${whereSql}
        ORDER BY s.started_at DESC`,
       values
     );
+    const rowsWithMetrics = await enrichServiceRowsForExport(result.rows);
 
     const header = [
       "service_id",
       "motorista",
-      "email",
       "chapa",
+      "dia_execucao",
       "horario",
       "linha",
       "frota",
@@ -1889,21 +2109,39 @@ router.get("/services/export.csv", async (req, res) => {
       "inicio",
       "fim",
       "kms",
+      "kms_programados_linha",
+      "kms_realizados_servico",
+      "handover_existe",
+      "motorista_continuacao",
+      "kms_motorista_inicial",
+      "kms_motorista_continuacao",
+      "kms_soma_handover",
+      "delta_previsto_vs_soma_handover",
+      "delta_realizado_vs_soma_handover",
     ];
 
-    const rows = result.rows.map((r) =>
+    const rows = rowsWithMetrics.map((r) =>
       [
         r.id,
         r.driver_name,
-        r.driver_email,
         r.plate_number,
+        r.execution_day,
         r.service_schedule,
         r.line_code,
         r.fleet_number,
         r.status,
-        r.started_at ? new Date(r.started_at).toISOString() : "",
-        r.ended_at ? new Date(r.ended_at).toISOString() : "",
+        formatLisbonTimeOnly(r.started_at),
+        formatLisbonTimeOnly(r.ended_at),
         r.total_km,
+        r.planned_km_line == null ? "" : Number(r.planned_km_line).toFixed(3),
+        r.realized_km_service == null ? "" : Number(r.realized_km_service).toFixed(3),
+        r.had_handover ? "sim" : "nao",
+        r.continuation_driver_name || "",
+        Number(r.km_initial_driver || 0).toFixed(3),
+        Number(r.km_continuation_driver || 0).toFixed(3),
+        Number(r.km_handover_sum || 0).toFixed(3),
+        (Number(r.planned_km_line || 0) - Number(r.km_handover_sum || 0)).toFixed(3),
+        (Number(r.realized_km_service || 0) - Number(r.km_handover_sum || 0)).toFixed(3),
       ]
         .map(csvEscape)
         .join(",")
@@ -1915,6 +2153,134 @@ router.get("/services/export.csv", async (req, res) => {
     return res.status(200).send(csv);
   } catch (error) {
     return res.status(500).json({ message: "Erro ao exportar CSV." });
+  }
+});
+
+router.get("/services/export.xlsx", async (req, res) => {
+  const { driverId, lineCode, status, fromDate, toDate } = req.query;
+  const where = [];
+  const values = [];
+  let i = 1;
+
+  if (driverId) {
+    where.push(`s.driver_id = $${i}`);
+    values.push(driverId);
+    i += 1;
+  }
+  if (lineCode) {
+    where.push(`s.line_code = $${i}`);
+    values.push(lineCode);
+    i += 1;
+  }
+  if (status) {
+    where.push(`s.status = $${i}`);
+    values.push(status);
+    i += 1;
+  }
+  const dayFilter = serviceActivityLisbonDayFilter(fromDate, toDate, i);
+  if (dayFilter) {
+    where.push(dayFilter.sql);
+    dayFilter.values.forEach((v) => values.push(v));
+  }
+  where.push(`(s.planned_service_id IS NULL OR COALESCE(ps.kms_carga, 0) > 0)`);
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+  try {
+    const result = await db.query(
+      `SELECT
+         s.id,
+         u.name AS driver_name,
+         s.plate_number,
+         s.service_schedule,
+         s.line_code,
+         s.fleet_number,
+         s.status,
+         s.gtfs_trip_id,
+         s.started_at,
+         s.ended_at,
+         s.total_km
+       FROM services s
+       JOIN users u ON u.id = s.driver_id
+       LEFT JOIN planned_services ps ON ps.id = s.planned_service_id
+       ${whereSql}
+       ORDER BY s.started_at DESC`,
+      values
+    );
+    const rowsWithMetrics = await enrichServiceRowsForExport(result.rows);
+
+    const servicesRows = rowsWithMetrics.map((r) => ({
+      service_id: r.id,
+      motorista: r.driver_name || "",
+      chapa: r.plate_number || "",
+      dia_execucao: r.execution_day || "",
+      horario: r.service_schedule || "",
+      linha: r.line_code || "",
+      frota: r.fleet_number || "",
+      estado: r.status || "",
+      inicio: formatLisbonTimeOnly(r.started_at),
+      fim: formatLisbonTimeOnly(r.ended_at),
+      kms: r.total_km ?? "",
+      kms_programados_linha: r.planned_km_line == null ? "" : Number(r.planned_km_line).toFixed(3),
+      kms_realizados_servico: r.realized_km_service == null ? "" : Number(r.realized_km_service).toFixed(3),
+      handover_existe: r.had_handover ? "sim" : "nao",
+      motorista_continuacao: r.continuation_driver_name || "",
+      kms_motorista_inicial: Number(r.km_initial_driver || 0).toFixed(3),
+      kms_motorista_continuacao: Number(r.km_continuation_driver || 0).toFixed(3),
+      kms_soma_handover: Number(r.km_handover_sum || 0).toFixed(3),
+      delta_previsto_vs_soma_handover: (Number(r.planned_km_line || 0) - Number(r.km_handover_sum || 0)).toFixed(3),
+      delta_realizado_vs_soma_handover: (Number(r.realized_km_service || 0) - Number(r.km_handover_sum || 0)).toFixed(3),
+    }));
+
+    const dailyMap = new Map();
+    for (const row of rowsWithMetrics) {
+      const key = row.execution_day || "sem_data";
+      if (!dailyMap.has(key)) {
+        dailyMap.set(key, {
+          dia_execucao: key,
+          total_servicos: 0,
+          kms_programados_total: 0,
+          kms_realizados_total: 0,
+        });
+      }
+      const acc = dailyMap.get(key);
+      acc.total_servicos += 1;
+      acc.kms_programados_total += Number(row.planned_km_line || 0);
+      acc.kms_realizados_total += Number(row.realized_km_service || 0);
+    }
+
+    const summaryRows = [...dailyMap.values()]
+      .sort((a, b) => String(a.dia_execucao).localeCompare(String(b.dia_execucao)))
+      .map((r) => ({
+        ...r,
+        kms_programados_total: Number(r.kms_programados_total).toFixed(3),
+        kms_realizados_total: Number(r.kms_realizados_total).toFixed(3),
+      }));
+
+    const totalServices = rowsWithMetrics.length;
+    const totalPlanned = rowsWithMetrics.reduce((sum, r) => sum + Number(r.planned_km_line || 0), 0);
+    const totalRealized = rowsWithMetrics.reduce((sum, r) => sum + Number(r.realized_km_service || 0), 0);
+    summaryRows.push({
+      dia_execucao: "TOTAL",
+      total_servicos: totalServices,
+      kms_programados_total: Number(totalPlanned).toFixed(3),
+      kms_realizados_total: Number(totalRealized).toFixed(3),
+    });
+
+    const workbook = XLSX.utils.book_new();
+    const servicesSheet = XLSX.utils.json_to_sheet(servicesRows);
+    const summarySheet = XLSX.utils.json_to_sheet(summaryRows);
+    XLSX.utils.book_append_sheet(workbook, servicesSheet, "servicos");
+    XLSX.utils.book_append_sheet(workbook, summarySheet, "resumo_dia_total");
+    const buffer = XLSX.write(workbook, { type: "buffer", bookType: "xlsx" });
+
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader("Content-Disposition", "attachment; filename=servicos.xlsx");
+    return res.status(200).send(buffer);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao exportar Excel de serviços." });
   }
 });
 

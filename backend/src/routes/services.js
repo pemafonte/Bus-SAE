@@ -15,6 +15,10 @@ async function ensurePlannedServiceLocationColumns() {
     `ALTER TABLE planned_services
        ADD COLUMN IF NOT EXISTS end_location VARCHAR(120)`
   );
+  await db.query(
+    `ALTER TABLE planned_services
+       ADD COLUMN IF NOT EXISTS kms_carga NUMERIC(12,3)`
+  );
 }
 
 async function getActiveSegment(serviceId) {
@@ -336,6 +340,26 @@ async function ensureDriverNotificationsTable() {
   );
 }
 
+async function ensureSupervisorConflictAlertsTable() {
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS supervisor_conflict_alerts (
+      id BIGSERIAL PRIMARY KEY,
+      driver_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      roster_id INT,
+      planned_service_id INT,
+      service_schedule VARCHAR(80),
+      line_code VARCHAR(40),
+      conflict_planned_service_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+      notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_supervisor_conflict_alerts_created
+     ON supervisor_conflict_alerts(created_at DESC)`
+  );
+}
+
 router.get("/notifications", async (req, res) => {
   try {
     await ensureDriverNotificationsTable();
@@ -373,6 +397,54 @@ router.patch("/notifications/:notificationId/read", async (req, res) => {
     return res.json({ ok: true, id: result.rows[0].id });
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao marcar notificacao como lida." });
+  }
+});
+
+router.post("/conflicts/notify-supervisor", async (req, res) => {
+  try {
+    const role = String(req.user?.role || "").trim().toLowerCase();
+    if (role !== "driver") {
+      return res.status(403).json({ message: "Apenas motoristas podem enviar este alerta." });
+    }
+    await ensureSupervisorConflictAlertsTable();
+    const rosterId = Number(req.body?.rosterId);
+    const plannedServiceId = Number(req.body?.plannedServiceId);
+    const serviceSchedule = String(req.body?.serviceSchedule || "").trim() || null;
+    const lineCode = String(req.body?.lineCode || "").trim() || null;
+    const notes = String(req.body?.notes || "").trim() || null;
+    const rawConflictIds = Array.isArray(req.body?.conflictPlannedServiceIds) ? req.body.conflictPlannedServiceIds : [];
+    const conflictPlannedServiceIds = rawConflictIds
+      .map((id) => Number(id))
+      .filter((id) => Number.isFinite(id) && id > 0);
+
+    if (!Number.isFinite(plannedServiceId) || plannedServiceId <= 0) {
+      return res.status(400).json({ message: "plannedServiceId invalido." });
+    }
+
+    const result = await db.query(
+      `INSERT INTO supervisor_conflict_alerts (
+         driver_id, roster_id, planned_service_id, service_schedule, line_code, conflict_planned_service_ids, notes
+       )
+       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7)
+       RETURNING id, created_at`,
+      [
+        req.user.id,
+        Number.isFinite(rosterId) && rosterId > 0 ? rosterId : null,
+        plannedServiceId,
+        serviceSchedule,
+        lineCode,
+        JSON.stringify(conflictPlannedServiceIds),
+        notes,
+      ]
+    );
+
+    return res.status(201).json({
+      message: "Alerta enviado ao supervisor.",
+      alertId: result.rows[0].id,
+      createdAt: result.rows[0].created_at,
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao enviar alerta ao supervisor." });
   }
 });
 
@@ -474,6 +546,7 @@ router.get("/history-detailed", async (req, res) => {
 router.get("/today-planned", async (req, res) => {
   try {
     await ensurePlannedServiceLocationColumns();
+    await ensureDriverNotificationsTable();
 
     const result = await db.query(
       `SELECT
@@ -483,15 +556,24 @@ router.get("/today-planned", async (req, res) => {
          ps.id AS planned_service_id,
          ps.service_code,
          ps.line_code,
-         ps.start_location,
-         ps.end_location,
+         COALESCE(NULLIF(TRIM(ps.start_location), ''), '-') AS start_location,
+         COALESCE(NULLIF(TRIM(ps.end_location), ''), '-') AS end_location,
+         ps.kms_carga,
          ps.fleet_number,
          ps.plate_number,
-         ps.service_schedule
+         ps.service_schedule,
+         EXISTS (
+           SELECT 1
+           FROM driver_notifications dn
+           WHERE dn.driver_id = dr.driver_id
+             AND dn.roster_id = dr.id
+             AND dn.notification_type = 'roster_assigned'
+         ) AS is_roster_changed
        FROM daily_roster dr
        JOIN planned_services ps ON ps.id = dr.planned_service_id
        WHERE dr.driver_id = $1
          AND dr.service_date = CURRENT_DATE
+         AND COALESCE(ps.kms_carga, 0) > 0
        ORDER BY ps.service_schedule ASC`,
       [req.user.id]
     );
@@ -729,7 +811,7 @@ router.post("/:serviceId/handover", async (req, res) => {
 
   try {
     const serviceResult = await db.query(
-      `SELECT id, driver_id, fleet_number, status
+      `SELECT id, driver_id, fleet_number, status, line_code, service_schedule
        FROM services
        WHERE id = $1 AND driver_id = $2`,
       [serviceId, req.user.id]
@@ -807,6 +889,17 @@ router.post("/:serviceId/handover", async (req, res) => {
        SET status = 'awaiting_handover'
        WHERE id = $1`,
       [serviceId]
+    );
+
+    await ensureDriverNotificationsTable();
+    await db.query(
+      `INSERT INTO driver_notifications (driver_id, title, message, notification_type, roster_id)
+       VALUES ($1, $2, $3, 'service_handover_pending', NULL)`,
+      [
+        toDriver.id,
+        "Transferência de serviço pendente",
+        `Tem um serviço pendente para assumir: Serviço ${serviceId} | Linha ${serviceResult.rows[0].line_code || "-"} | ${serviceResult.rows[0].service_schedule || "-"} | Motivo: ${reason}`,
+      ]
     );
 
     return res.status(201).json({

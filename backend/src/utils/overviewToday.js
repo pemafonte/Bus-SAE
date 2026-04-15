@@ -15,16 +15,20 @@ WITH day AS (
 planned AS (
   SELECT COUNT(*)::int AS planned_roster_count
   FROM daily_roster dr
+  JOIN planned_services ps ON ps.id = dr.planned_service_id
   CROSS JOIN day
   WHERE dr.service_date = day.d
+    AND COALESCE(ps.kms_carga, 0) > 0
 ),
 realized_slots AS (
   SELECT COUNT(DISTINCT dr.id)::int AS realized_roster_slots
   FROM daily_roster dr
+  JOIN planned_services ps ON ps.id = dr.planned_service_id
   JOIN services s ON s.planned_service_id = dr.planned_service_id
     AND s.driver_id = dr.driver_id
   CROSS JOIN day
   WHERE dr.service_date = day.d
+    AND COALESCE(ps.kms_carga, 0) > 0
     AND LOWER(TRIM(s.status::text)) = 'completed'
     AND (
       (s.ended_at IS NOT NULL AND ((s.ended_at AT TIME ZONE 'Europe/Lisbon')::date) = day.d)
@@ -57,6 +61,9 @@ svc AS (
       ON dr.planned_service_id = s.planned_service_id
      AND dr.driver_id = s.driver_id
      AND dr.service_date = day.d
+    INNER JOIN planned_services ps
+      ON ps.id = dr.planned_service_id
+     AND COALESCE(ps.kms_carga, 0) > 0
     WHERE (
       (
         LOWER(TRIM(s.status::text)) = 'completed'

@@ -61,6 +61,7 @@ const servicesPieEl = document.getElementById("servicesPie");
 const servicesStatsTextEl = document.getElementById("servicesStatsText");
 const blocksPieEl = document.getElementById("blocksPie");
 const blocksStatsTextEl = document.getElementById("blocksStatsText");
+const servicesDailySummaryEl = document.getElementById("servicesDailySummary");
 const importRosterReportEl = document.getElementById("importRosterReport");
 const importGtfsReportEl = document.getElementById("importGtfsReport");
 const serviceDrawerEl = document.getElementById("serviceDrawer");
@@ -71,10 +72,18 @@ const serviceRouteMiniMapEl = document.getElementById("serviceRouteMiniMap");
 const serviceHandoversListEl = document.getElementById("serviceHandoversList");
 const forceEndServiceBtn = document.getElementById("forceEndServiceBtn");
 const serviceRouteTimesEl = document.getElementById("serviceRouteTimes");
+const conflictAlertsListEl = document.getElementById("conflictAlertsList");
+const supLiveMapEl = document.getElementById("supLiveMap");
+const supLiveServicesListEl = document.getElementById("supLiveServicesList");
+const liveServiceFilterSelectEl = document.getElementById("liveServiceFilterSelect");
 
 let driversCache = [];
 let rosterDayCache = [];
 let rosterDaySelectedDriverId = null;
+let supLiveMap = null;
+let supLiveMarkersLayer = null;
+let supLiveRefreshInterval = null;
+let currentLiveServices = [];
 
 function labelEstadoExecucaoServicoPt(code) {
   const k = String(code || "").toLowerCase();
@@ -217,6 +226,48 @@ function formatDelay(delayMinutes) {
   const h = String(Math.floor(abs / 60)).padStart(2, "0");
   const m = String(abs % 60).padStart(2, "0");
   return `${sign}${h}:${m}`;
+}
+
+function renderServicesDailySummary(services) {
+  if (!servicesDailySummaryEl) return;
+  if (!Array.isArray(services) || !services.length) {
+    servicesDailySummaryEl.textContent = "Sem dados.";
+    return;
+  }
+
+  const byDay = new Map();
+  services.forEach((s) => {
+    const dayKey = String(s.execution_day || "-");
+    if (!byDay.has(dayKey)) {
+      byDay.set(dayKey, {
+        totalServices: 0,
+        plannedKm: 0,
+        realizedKm: 0,
+      });
+    }
+    const acc = byDay.get(dayKey);
+    acc.totalServices += 1;
+    acc.plannedKm += Number(s.planned_km_line || 0);
+    acc.realizedKm += Number(s.realized_km_service || 0);
+  });
+
+  const lines = [];
+  const sortedDays = [...byDay.keys()].sort((a, b) => String(a).localeCompare(String(b)));
+  sortedDays.forEach((day) => {
+    const d = byDay.get(day);
+    lines.push(
+      `${day} | Serviços: ${d.totalServices} | Km programados: ${d.plannedKm.toFixed(3)} | Km realizados: ${d.realizedKm.toFixed(3)}`
+    );
+  });
+
+  const totalServices = services.length;
+  const totalPlanned = services.reduce((sum, s) => sum + Number(s.planned_km_line || 0), 0);
+  const totalRealized = services.reduce((sum, s) => sum + Number(s.realized_km_service || 0), 0);
+  lines.push("---");
+  lines.push(
+    `TOTAL | Serviços: ${totalServices} | Km programados: ${totalPlanned.toFixed(3)} | Km realizados: ${totalRealized.toFixed(3)}`
+  );
+  servicesDailySummaryEl.textContent = lines.join("\n");
 }
 
 function buildPieBackground(parts) {
@@ -464,7 +515,10 @@ async function loginSupervisor(event) {
   applySessionAndLoad(data.user);
   await loadOverview();
   await loadServices();
+  await loadLiveServicesMap();
   await loadDrivers();
+  await loadConflictAlerts();
+  startLiveMapAutoRefresh();
 }
 
 function logoutSupervisor() {
@@ -480,6 +534,10 @@ function logoutSupervisor() {
   loginCardEl.classList.remove("hidden");
   document.getElementById("supervisorTabs").classList.add("hidden");
   closeServiceDrawer();
+  if (supLiveRefreshInterval) {
+    clearInterval(supLiveRefreshInterval);
+    supLiveRefreshInterval = null;
+  }
   document.getElementById("supLoginForm").reset();
   sessionStorage.removeItem(AUTH_SESSION_KEY);
 }
@@ -497,6 +555,13 @@ function openSupervisorTab(tabId) {
   });
   if (tabId === "tabEscalaDia") {
     loadRosterToday();
+  }
+  if (tabId === "tabServicos") {
+    loadLiveServicesMap();
+    if (supLiveMap) setTimeout(() => supLiveMap.invalidateSize(), 80);
+  }
+  if (tabId === "tabAlertasConflito") {
+    loadConflictAlerts();
   }
 }
 
@@ -529,6 +594,159 @@ function initServiceFilterMode() {
     originBtn.classList.remove("active");
     serviceInput.classList.remove("hidden");
     originInput.classList.add("hidden");
+  });
+}
+
+function resolveLineColorHex(rawColor, fallback = "#2563eb") {
+  const c = String(rawColor || "").trim();
+  if (/^[0-9a-fA-F]{6}$/.test(c)) return `#${c}`;
+  if (/^#[0-9a-fA-F]{6}$/.test(c)) return c;
+  return fallback;
+}
+
+function initSupervisorLiveMap() {
+  if (!supLiveMapEl || supLiveMap) return;
+  supLiveMap = L.map("supLiveMap").setView([38.7223, -9.1393], 12);
+  const primary = L.tileLayer(`${API_BASE}/map-tiles/{z}/{x}/{y}.png`, {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap contributors",
+  });
+  const fallback = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+    maxZoom: 20,
+    attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+  });
+  let tileErrors = 0;
+  primary.on("tileerror", () => {
+    tileErrors += 1;
+    if (tileErrors < 4) return;
+    if (supLiveMap.hasLayer(primary)) supLiveMap.removeLayer(primary);
+    if (!supLiveMap.hasLayer(fallback)) fallback.addTo(supLiveMap);
+  });
+  primary.addTo(supLiveMap);
+  supLiveMarkersLayer = L.layerGroup().addTo(supLiveMap);
+}
+
+function buildSupervisorBusIcon(fleetNumber, lineColor) {
+  return L.divIcon({
+    className: "sup-bus-marker",
+    html: `<div class="sup-bus-label" style="background:${lineColor}">Frota ${fleetNumber || "-"}</div><div class="sup-bus-icon">🚌</div>`,
+    iconSize: [60, 44],
+    iconAnchor: [30, 22],
+  });
+}
+
+async function loadLiveServicesMap() {
+  if (!supToken || !supLiveMapEl || !supLiveServicesListEl) return;
+  initSupervisorLiveMap();
+  const response = await fetch(`${API_BASE}/supervisor/services/live`, {
+    headers: getAuthHeaders(),
+  });
+  const data = await response.json().catch(() => ([]));
+  if (!response.ok) {
+    supLiveServicesListEl.innerHTML = `<div>${data.message || "Erro ao carregar serviços em execução."}</div>`;
+    return;
+  }
+  currentLiveServices = Array.isArray(data) ? data : [];
+  const selectedServiceId = String(liveServiceFilterSelectEl?.value || "all");
+  const list =
+    selectedServiceId === "all"
+      ? currentLiveServices
+      : currentLiveServices.filter((svc) => String(svc.id) === selectedServiceId);
+
+  if (liveServiceFilterSelectEl) {
+    const currentValue = String(liveServiceFilterSelectEl.value || "all");
+    const options = [
+      `<option value="all">Mostrar todos</option>`,
+      ...currentLiveServices.map(
+        (svc) =>
+          `<option value="${svc.id}">Serviço #${svc.id} | Linha ${svc.line_code || "-"} | Frota ${svc.fleet_number || "-"}</option>`
+      ),
+    ];
+    liveServiceFilterSelectEl.innerHTML = options.join("");
+    const exists = currentValue === "all" || currentLiveServices.some((svc) => String(svc.id) === currentValue);
+    liveServiceFilterSelectEl.value = exists ? currentValue : "all";
+  }
+
+  supLiveServicesListEl.innerHTML = "";
+  if (!list.length) {
+    supLiveServicesListEl.innerHTML = "<div>Sem serviços em execução neste momento.</div>";
+  }
+
+  supLiveMarkersLayer.clearLayers();
+  const bounds = [];
+  list.forEach((svc) => {
+    const lat = Number(svc.lat);
+    const lng = Number(svc.lng);
+    const lineColor = resolveLineColorHex(svc.route_color);
+    if (Number.isFinite(lat) && Number.isFinite(lng)) {
+      const marker = L.marker([lat, lng], {
+        icon: buildSupervisorBusIcon(svc.fleet_number, lineColor),
+      });
+      marker.bindPopup(
+        `Serviço #${svc.id}<br/>Linha ${svc.line_code || "-"}<br/>Motorista: ${svc.driver_name || "-"}<br/>Horário: ${svc.service_schedule || "-"}`
+      );
+      supLiveMarkersLayer.addLayer(marker);
+      bounds.push([lat, lng]);
+    }
+    const card = document.createElement("article");
+    card.className = "service-card-item";
+    card.innerHTML = `<div><strong>Serviço #${svc.id}</strong> | Linha ${svc.line_code || "-"} | Frota ${svc.fleet_number || "-"} | ${svc.driver_name || "-"}</div>`;
+    supLiveServicesListEl.appendChild(card);
+  });
+
+  if (bounds.length) {
+    supLiveMap.fitBounds(bounds, { padding: [20, 20], maxZoom: 15 });
+  }
+}
+
+function startLiveMapAutoRefresh() {
+  if (supLiveRefreshInterval) clearInterval(supLiveRefreshInterval);
+  supLiveRefreshInterval = setInterval(() => {
+    if (!supToken) return;
+    loadLiveServicesMap();
+  }, 15000);
+}
+
+async function loadConflictAlerts() {
+  if (!supToken || !conflictAlertsListEl) return;
+  conflictAlertsListEl.innerHTML = "<div>A carregar alertas...</div>";
+  const response = await fetch(`${API_BASE}/supervisor/conflict-alerts`, {
+    headers: getAuthHeaders(),
+  });
+  const data = await response.json().catch(() => ([]));
+  if (!response.ok) {
+    conflictAlertsListEl.innerHTML = `<div>${data.message || "Erro ao carregar alertas de conflito."}</div>`;
+    return;
+  }
+  if (!Array.isArray(data) || !data.length) {
+    conflictAlertsListEl.innerHTML = "<div>Sem alertas de conflito registados.</div>";
+    return;
+  }
+
+  conflictAlertsListEl.innerHTML = "";
+  data.forEach((item) => {
+    const article = document.createElement("article");
+    article.className = "service-card-item";
+    const conflictIds = Array.isArray(item.conflict_planned_service_ids) ? item.conflict_planned_service_ids : [];
+    const startLoc = item.start_location || "-";
+    const endLoc = item.end_location || "-";
+    article.innerHTML = `
+      <div class="service-card-head">
+        <strong>Alerta #${item.id}</strong>
+        <span class="status-badge status-other">Conflito</span>
+      </div>
+      <div class="service-card-grid">
+        <div><small>Data/Hora alerta</small><div>${item.created_at ? new Date(item.created_at).toLocaleString() : "-"}</div></div>
+        <div><small>Motorista</small><div>${item.driver_name || "-"} (Mec. ${item.driver_mechanic_number || "-"})</div></div>
+        <div><small>Serviço</small><div>${item.service_code || "-"} (ID plan. ${item.planned_service_id || "-"})</div></div>
+        <div><small>Horário</small><div>${item.service_schedule || "-"}</div></div>
+        <div><small>Linha</small><div>${item.line_code || "-"}</div></div>
+        <div><small>Origem / destino</small><div>${startLoc} → ${endLoc}</div></div>
+        <div><small>IDs em conflito</small><div>${conflictIds.length ? conflictIds.join(", ") : "-"}</div></div>
+        <div><small>Notas</small><div>${item.notes || "-"}</div></div>
+      </div>
+    `;
+    conflictAlertsListEl.appendChild(article);
   });
 }
 
@@ -654,6 +872,7 @@ async function loadServices(event) {
     { value: remaining, color: "#f59e0b" },
   ]);
   blocksStatsTextEl.textContent = `Total: ${total} | Realizados: ${executed} | Por realizar: ${remaining}`;
+  renderServicesDailySummary(filteredData);
 }
 
 async function exportCsv() {
@@ -683,6 +902,41 @@ async function exportCsv() {
   const a = document.createElement("a");
   a.href = url;
   a.download = "servicos.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function exportExcelServices() {
+  if (!supToken) {
+    alert("Inicie sessão como supervisor ou administrador.");
+    return;
+  }
+
+  if (!activeQueryString) {
+    activeQueryString = buildQueryString();
+  }
+
+  const response = await fetch(
+    `${API_BASE}/supervisor/services/export.xlsx${activeQueryString}`,
+    { headers: { Authorization: `Bearer ${supToken}` } }
+  );
+
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    alert(error.message || "Erro ao exportar Excel.");
+    return;
+  }
+
+  const buffer = await response.arrayBuffer();
+  const blob = new Blob([buffer], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "servicos.xlsx";
   document.body.appendChild(a);
   a.click();
   a.remove();
@@ -832,7 +1086,12 @@ async function importRosterFile(dryRun = false) {
     `Escala ${dryRun ? "validada" : "importada"} para ${data.serviceDate} | lidas=${data.parsedLines} | inseridas=${data.inserted} | atualizadas=${data.updated} | ignoradas=${data.ignored || 0} | falhas=${data.failed}`,
   ];
   (data.rowReports || []).forEach((r) => {
-    const extras = [r.plateNumber ? `Chapa ${r.plateNumber}` : null, r.fleetNumber ? `Frota ${r.fleetNumber}` : null, r.serviceSchedule ? `Horario ${r.serviceSchedule}` : null]
+    const extras = [
+      r.plateNumber ? `Chapa ${r.plateNumber}` : null,
+      r.fleetNumber ? `Frota ${r.fleetNumber}` : null,
+      r.serviceSchedule ? `Horario ${r.serviceSchedule}` : null,
+      r.kmsCarga != null && r.kmsCarga !== "-" ? `KmsCarga ${r.kmsCarga}` : null,
+    ]
       .filter(Boolean)
       .join(" | ");
     lines.push(
@@ -1061,6 +1320,7 @@ function renderRosterDayServiceRows(rows) {
         <div><small>Horário</small><div>${row.service_schedule || "-"}</div></div>
         <div><small>Linha</small><div>${row.line_code || "-"}</div></div>
         <div><small>Frota</small><div>${row.fleet_number || "-"}</div></div>
+        <div><small>Km carga</small><div>${row.kms_carga == null ? "-" : Number(row.kms_carga).toFixed(3)}</div></div>
         <div><small>Chapa</small><div>${row.plate_number || "-"}</div></div>
         <div><small>Motorista</small><div>${row.driver_name || "-"} (Mec. ${row.driver_mechanic_number || "-"})</div></div>
         <div><small>Origem / destino</small><div>${startLoc} → ${endLoc}</div></div>
@@ -1223,6 +1483,7 @@ async function loadRosterToday(options = {}) {
 document.getElementById("supLoginForm").addEventListener("submit", loginSupervisor);
 document.getElementById("filtersForm").addEventListener("submit", loadServices);
 document.getElementById("exportBtn").addEventListener("click", exportCsv);
+document.getElementById("exportExcelBtn").addEventListener("click", exportExcelServices);
 document.getElementById("driverCreateForm").addEventListener("submit", createDriver);
 document.getElementById("accessUserCreateForm").addEventListener("submit", createAccessUser);
 document.getElementById("importDriversBtn").addEventListener("click", importDrivers);
@@ -1252,6 +1513,55 @@ if (rosterDayDateInput) {
   rosterDayDateInput.addEventListener("change", () => {
     rosterDaySelectedDriverId = null;
     loadRosterToday();
+  });
+}
+const refreshConflictAlertsBtn = document.getElementById("refreshConflictAlertsBtn");
+if (refreshConflictAlertsBtn) {
+  refreshConflictAlertsBtn.addEventListener("click", loadConflictAlerts);
+}
+const refreshLiveServicesBtn = document.getElementById("refreshLiveServicesBtn");
+if (refreshLiveServicesBtn) {
+  refreshLiveServicesBtn.addEventListener("click", loadLiveServicesMap);
+}
+if (liveServiceFilterSelectEl) {
+  liveServiceFilterSelectEl.addEventListener("change", () => {
+    if (!currentLiveServices.length) {
+      loadLiveServicesMap();
+      return;
+    }
+    const selectedServiceId = String(liveServiceFilterSelectEl.value || "all");
+    const filtered =
+      selectedServiceId === "all"
+        ? currentLiveServices
+        : currentLiveServices.filter((svc) => String(svc.id) === selectedServiceId);
+
+    supLiveMarkersLayer.clearLayers();
+    supLiveServicesListEl.innerHTML = "";
+    const bounds = [];
+    filtered.forEach((svc) => {
+      const lat = Number(svc.lat);
+      const lng = Number(svc.lng);
+      const lineColor = resolveLineColorHex(svc.route_color);
+      if (Number.isFinite(lat) && Number.isFinite(lng)) {
+        const marker = L.marker([lat, lng], {
+          icon: buildSupervisorBusIcon(svc.fleet_number, lineColor),
+        });
+        marker.bindPopup(
+          `Serviço #${svc.id}<br/>Linha ${svc.line_code || "-"}<br/>Motorista: ${svc.driver_name || "-"}<br/>Horário: ${svc.service_schedule || "-"}`
+        );
+        supLiveMarkersLayer.addLayer(marker);
+        bounds.push([lat, lng]);
+      }
+      const card = document.createElement("article");
+      card.className = "service-card-item";
+      card.innerHTML = `<div><strong>Serviço #${svc.id}</strong> | Linha ${svc.line_code || "-"} | Frota ${svc.fleet_number || "-"} | ${svc.driver_name || "-"}</div>`;
+      supLiveServicesListEl.appendChild(card);
+    });
+    if (!filtered.length) {
+      supLiveServicesListEl.innerHTML = "<div>Sem serviços em execução neste momento.</div>";
+    } else if (bounds.length) {
+      supLiveMap.fitBounds(bounds, { padding: [20, 20], maxZoom: 15 });
+    }
   });
 }
 const rosterDayCardsEl = document.getElementById("rosterDayCards");
@@ -1323,7 +1633,10 @@ initServiceFilterMode();
     applySessionAndLoad(session.user);
     loadOverview();
     loadServices();
+    loadLiveServicesMap();
     loadDrivers();
+    loadConflictAlerts();
+    startLiveMapAutoRefresh();
   } catch (_error) {
     // ignore invalid persisted session
   }

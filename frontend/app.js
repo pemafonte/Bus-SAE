@@ -43,6 +43,29 @@ function labelEstadoTransferenciaPt(code) {
   return map[k] || code || "—";
 }
 
+function parseServiceScheduleRangeMinutes(serviceSchedule) {
+  const text = String(serviceSchedule || "").trim();
+  if (!text) return null;
+  const rangeMatch = text.match(/(\d{1,2})\s*:\s*(\d{2})\s*-\s*(\d{1,2})\s*:\s*(\d{2})/);
+  if (rangeMatch) {
+    let start = Number(rangeMatch[1]) * 60 + Number(rangeMatch[2]);
+    let end = Number(rangeMatch[3]) * 60 + Number(rangeMatch[4]);
+    if (Number.isNaN(start) || Number.isNaN(end)) return null;
+    if (end <= start) end += 24 * 60;
+    return { start, end };
+  }
+  const singleMatch = text.match(/(\d{1,2})\s*:\s*(\d{2})/);
+  if (!singleMatch) return null;
+  const start = Number(singleMatch[1]) * 60 + Number(singleMatch[2]);
+  if (Number.isNaN(start)) return null;
+  return { start, end: start + 4 * 60 };
+}
+
+function scheduleRangesOverlap(a, b) {
+  if (!a || !b) return false;
+  return a.start < b.end && b.start < a.end;
+}
+
 let token = "";
 let activeServiceId = null;
 let watchId = null;
@@ -50,6 +73,7 @@ let selectedPlannedServiceId = null;
 let selectedPlannedFleetNumber = "";
 let authenticatedUser = null;
 const AUTH_SESSION_KEY = "auth_session";
+const conflictNotifiedPlannedServiceIds = new Set();
 
 const loginScreenEl = document.getElementById("loginScreen");
 const appScreenEl = document.getElementById("appScreen");
@@ -67,15 +91,54 @@ const driverTabsEl = document.getElementById("driverTabs");
 const driverNotificationsBarEl = document.getElementById("driverNotificationsBar");
 
 const map = L.map("map").setView([38.7223, -9.1393], 12);
-L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
-  maxZoom: 19,
-  attribution: "&copy; OpenStreetMap contributors",
-}).addTo(map);
+
+function attachBaseTileLayer(targetMap) {
+  const primary = L.tileLayer(`${API_BASE}/map-tiles/{z}/{x}/{y}.png`, {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap contributors",
+  });
+  const fallback = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+    maxZoom: 20,
+    attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+  });
+  let tileErrors = 0;
+  primary.on("tileerror", () => {
+    tileErrors += 1;
+    if (tileErrors < 4) return;
+    if (targetMap.hasLayer(primary)) targetMap.removeLayer(primary);
+    if (!targetMap.hasLayer(fallback)) fallback.addTo(targetMap);
+  });
+  primary.addTo(targetMap);
+}
+
+attachBaseTileLayer(map);
 
 const routePolyline = L.polyline([], { color: "#2563eb", weight: 5 }).addTo(map);
 const referenceRoutePolyline = L.polyline([], { color: "#f97316", weight: 4, dashArray: "8 8" }).addTo(map);
 const gtfsStopsLayer = L.layerGroup().addTo(map);
+let activeBusMarker = null;
 handoverBtn.disabled = true;
+
+function buildBusIcon(fleetNumber) {
+  const fleet = String(fleetNumber || "-");
+  return L.divIcon({
+    className: "driver-bus-marker",
+    html: `<div class="driver-bus-label">Frota ${fleet}</div><div class="driver-bus-icon">🚌</div>`,
+    iconSize: [56, 44],
+    iconAnchor: [28, 22],
+  });
+}
+
+function updateActiveBusMarker(lat, lng, fleetNumber) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+  const icon = buildBusIcon(fleetNumber);
+  if (!activeBusMarker) {
+    activeBusMarker = L.marker([lat, lng], { icon }).addTo(map);
+    return;
+  }
+  activeBusMarker.setLatLng([lat, lng]);
+  activeBusMarker.setIcon(icon);
+}
 
 function showDriverTab(tabId) {
   const buttons = driverTabsEl?.querySelectorAll(".tab-btn") || [];
@@ -255,6 +318,10 @@ function logoutDriver() {
   routePolyline.setLatLngs([]);
   referenceRoutePolyline.setLatLngs([]);
   gtfsStopsLayer.clearLayers();
+  if (activeBusMarker) {
+    map.removeLayer(activeBusMarker);
+    activeBusMarker = null;
+  }
   endTripBtn.disabled = true;
   handoverBtn.disabled = true;
   sessionWelcomeEl.classList.add("hidden");
@@ -299,6 +366,14 @@ async function restoreActiveService() {
       `Estado: ${labelEstadoExecucaoServicoPt(active.status)}`,
     ].join("\n")
   );
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        updateActiveBusMarker(position.coords.latitude, position.coords.longitude, active.fleet_number);
+      },
+      () => {}
+    );
+  }
   await loadReferenceRoute(active.id);
   startLocationTracking();
   showDriverTab("driverStepMap");
@@ -336,6 +411,14 @@ async function startTrip(event) {
   handoverBtn.disabled = false;
   document.getElementById("handoverToFleetNumber").value = payload.fleetNumber;
   routePolyline.setLatLngs([]);
+  if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        updateActiveBusMarker(position.coords.latitude, position.coords.longitude, data.fleet_number);
+      },
+      () => {}
+    );
+  }
   setSummary(
     [
       `Serviço: ${data.id}`,
@@ -404,6 +487,7 @@ function startLocationTracking() {
       const lng = position.coords.longitude;
 
       routePolyline.addLatLng([lat, lng]);
+      updateActiveBusMarker(lat, lng, fleetNumberInput.value.trim() || selectedPlannedFleetNumber);
       map.setView([lat, lng], 15);
 
       if (!activeServiceId || !token) return;
@@ -455,6 +539,10 @@ async function endTrip() {
   if (watchId) {
     navigator.geolocation.clearWatch(watchId);
     watchId = null;
+  }
+  if (activeBusMarker) {
+    map.removeLayer(activeBusMarker);
+    activeBusMarker = null;
   }
 
   setSummary(
@@ -508,17 +596,90 @@ async function loadTodayServices() {
     return;
   }
 
+  const changedServices = data.filter((item) => item.is_roster_changed);
+  const conflictByPlannedServiceId = new Set();
+  const conflictsMap = new Map();
+  if (changedServices.length) {
+    data.forEach((item) => {
+      const itemRange = parseServiceScheduleRangeMinutes(item.service_schedule);
+      if (!itemRange) return;
+      changedServices.forEach((changed) => {
+        if (changed.planned_service_id === item.planned_service_id) return;
+        const changedRange = parseServiceScheduleRangeMinutes(changed.service_schedule);
+        if (!changedRange) return;
+        if (scheduleRangesOverlap(itemRange, changedRange)) {
+          conflictByPlannedServiceId.add(item.planned_service_id);
+          conflictByPlannedServiceId.add(changed.planned_service_id);
+          if (!conflictsMap.has(item.planned_service_id)) conflictsMap.set(item.planned_service_id, new Set());
+          if (!conflictsMap.has(changed.planned_service_id)) conflictsMap.set(changed.planned_service_id, new Set());
+          conflictsMap.get(item.planned_service_id).add(changed.planned_service_id);
+          conflictsMap.get(changed.planned_service_id).add(item.planned_service_id);
+        }
+      });
+    });
+  }
+
   data.forEach((item) => {
     const li = document.createElement("li");
     const btn = document.createElement("button");
-    const startLocation = item.start_location || "-";
-    const endLocation = item.end_location || "-";
+    let startLocation = String(item.start_location || "").trim();
+    let endLocation = String(item.end_location || "").trim();
+    if ((!startLocation || startLocation === "-") && (!endLocation || endLocation === "-")) {
+      const [fromLineCode, toLineCode] = String(item.line_code || "").split("->").map((part) => part.trim());
+      if (fromLineCode && toLineCode) {
+        startLocation = fromLineCode;
+        endLocation = toLineCode;
+      }
+    }
+    startLocation = startLocation || "-";
+    endLocation = endLocation || "-";
     btn.type = "button";
-    btn.className = "planned-service-btn";
+    const isConflict = conflictByPlannedServiceId.has(item.planned_service_id);
+    btn.className = `planned-service-btn${item.is_roster_changed ? " planned-service-btn--roster-change" : ""}${isConflict ? " planned-service-btn--conflict" : ""}`;
+    const kmsCargaText = item.kms_carga == null ? "-" : Number(item.kms_carga).toFixed(3);
     btn.innerHTML = `
-      <span class="planned-service-line1">Linha ${item.line_code} | ${item.service_schedule} | Frota ${item.fleet_number} | Chapa ${item.plate_number}</span>
-      <span class="planned-service-line2">${startLocation} → ${endLocation} | ${labelEstadoEscalaPt(item.roster_status)}</span>
+      <span class="planned-service-line1">Linha ${item.line_code} | ${item.service_schedule} | Frota ${item.fleet_number} | Chapa ${item.plate_number} | Km carga ${kmsCargaText}</span>
+      <span class="planned-service-line2">${startLocation} → ${endLocation} | ${labelEstadoEscalaPt(item.roster_status)}${isConflict ? " | Conflito de horário" : ""}</span>
     `;
+    if (isConflict && item.is_roster_changed) {
+      const notifyBtn = document.createElement("button");
+      const alreadyNotified = conflictNotifiedPlannedServiceIds.has(item.planned_service_id);
+      notifyBtn.type = "button";
+      notifyBtn.className = "notify-supervisor-btn";
+      notifyBtn.textContent = alreadyNotified ? "Supervisor notificado" : "Notificar supervisor";
+      notifyBtn.disabled = alreadyNotified;
+      notifyBtn.addEventListener("click", async (event) => {
+        event.stopPropagation();
+        if (conflictNotifiedPlannedServiceIds.has(item.planned_service_id)) return;
+        try {
+          const conflictIds = Array.from(conflictsMap.get(item.planned_service_id) || []);
+          const response = await fetch(`${API_BASE}/services/conflicts/notify-supervisor`, {
+            method: "POST",
+            headers: authHeaders(),
+            body: JSON.stringify({
+              rosterId: item.roster_id,
+              plannedServiceId: item.planned_service_id,
+              serviceSchedule: item.service_schedule,
+              lineCode: item.line_code,
+              conflictPlannedServiceIds: conflictIds,
+              notes: "Conflito de horario detetado pelo motorista na escala do dia.",
+            }),
+          });
+          const payload = await response.json().catch(() => ({}));
+          if (!response.ok) {
+            alert(payload.message || "Não foi possível notificar o supervisor.");
+            return;
+          }
+          conflictNotifiedPlannedServiceIds.add(item.planned_service_id);
+          notifyBtn.textContent = "Supervisor notificado";
+          notifyBtn.disabled = true;
+          alert("Supervisor notificado sobre o conflito de horário.");
+        } catch (_error) {
+          alert("Erro de ligação ao notificar o supervisor.");
+        }
+      });
+      li.appendChild(notifyBtn);
+    }
     btn.addEventListener("click", () => {
       selectedPlannedServiceId = item.planned_service_id;
       selectedPlannedFleetNumber = item.fleet_number;
@@ -583,6 +744,7 @@ async function loadPendingHandovers() {
           `Estado: ${labelEstadoExecucaoServicoPt(resumeData.service.status)}`,
         ].join("\n")
       );
+      await loadReferenceRoute(item.service_id);
       startLocationTracking();
       await loadPendingHandovers();
       await refreshHistory();
@@ -658,6 +820,10 @@ async function transferService(event) {
     navigator.geolocation.clearWatch(watchId);
     watchId = null;
   }
+  if (activeBusMarker) {
+    map.removeLayer(activeBusMarker);
+    activeBusMarker = null;
+  }
   activeServiceId = null;
   endTripBtn.disabled = true;
   handoverBtn.disabled = true;
@@ -728,6 +894,7 @@ document.getElementById("serviceForm").addEventListener("submit", startTrip);
 document.getElementById("refreshHistoryBtn").addEventListener("click", refreshHistory);
 document.getElementById("refreshTodayServicesBtn").addEventListener("click", async () => {
   await loadTodayServices();
+  await loadPendingHandovers();
   await refreshDriverNotifications();
 });
 document.getElementById("refreshPendingHandoversBtn").addEventListener("click", loadPendingHandovers);

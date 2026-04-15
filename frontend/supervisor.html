@@ -4,6 +4,12 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Painel do supervisor</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
     <link rel="stylesheet" href="./styles.css" />
   </head>
   <body class="supervisor-page">
@@ -27,6 +33,7 @@
             <button type="button" class="tab-btn active" data-tab-target="tabResumo">Resumo</button>
             <button type="button" class="tab-btn" data-tab-target="tabServicos">Serviços</button>
             <button type="button" class="tab-btn" data-tab-target="tabEscalaDia">Escala do dia</button>
+            <button type="button" class="tab-btn" data-tab-target="tabAlertasConflito">Alertas de conflito</button>
             <button type="button" class="tab-btn" data-tab-target="tabCriarMotorista">Criar motorista</button>
             <button type="button" class="tab-btn" data-tab-target="tabCriarAcesso">Criar acesso</button>
             <button type="button" class="tab-btn" data-tab-target="tabImportarMotoristas">Importar dados</button>
@@ -42,6 +49,16 @@
 
         <div id="tabServicos" class="tab-panel">
           <h2>Serviços</h2>
+          <section class="card">
+            <h3>Serviços em execução (mapa)</h3>
+            <label for="liveServiceFilterSelect">Filtrar serviço no mapa</label>
+            <select id="liveServiceFilterSelect">
+              <option value="all">Mostrar todos</option>
+            </select>
+            <button type="button" id="refreshLiveServicesBtn">Atualizar mapa</button>
+            <div id="supLiveMap"></div>
+            <div id="supLiveServicesList" class="service-cards"></div>
+          </section>
           <div class="supervisor-services-roster-hint card" style="margin-bottom: 14px; padding: 12px 14px">
             <p style="margin: 0 0 10px; font-size: 14px">
               <strong>Trocar o motorista de um serviço escalado e ainda por realizar?</strong>
@@ -71,6 +88,7 @@
                 <button type="submit">Aplicar filtros</button>
               </form>
               <button id="exportBtn">Exportar CSV</button>
+              <button id="exportExcelBtn">Exportar Excel</button>
             </aside>
 
             <section class="ops-main">
@@ -89,6 +107,10 @@
                 <strong>Execução (resumo)</strong>
                 <div id="blocksPie" class="pie-chart"></div>
                 <small id="blocksStatsText">Sem dados.</small>
+              </div>
+              <div class="stat-card">
+                <strong>Resumo diário (km)</strong>
+                <pre id="servicesDailySummary">Sem dados.</pre>
               </div>
             </aside>
           </div>
@@ -113,6 +135,15 @@
             Escolha um motorista acima para ver os serviços e alterar o escalamento.
           </p>
           <div id="rosterDayCards" class="service-cards"></div>
+        </div>
+
+        <div id="tabAlertasConflito" class="tab-panel">
+          <h2>Alertas de conflito</h2>
+          <p class="field-help" style="margin-top: 0">
+            Alertas enviados pelos motoristas quando existe sobreposição de horários na escala.
+          </p>
+          <button type="button" id="refreshConflictAlertsBtn">Atualizar alertas</button>
+          <div id="conflictAlertsList" class="service-cards"></div>
         </div>
 
         <div id="tabCriarMotorista" class="tab-panel">
@@ -240,6 +271,11 @@
       </form>
     </aside>
 
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
     <script src="./supervisor.js"></script>
   </body>
 </html>
