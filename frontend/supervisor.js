@@ -194,6 +194,15 @@ function formatDateOnly(value) {
   return new Date(value).toLocaleDateString();
 }
 
+function formatDateTimePt(iso) {
+  if (!iso) return "—";
+  try {
+    return new Date(iso).toLocaleString("pt-PT", { timeZone: "Europe/Lisbon" });
+  } catch (_e) {
+    return "—";
+  }
+}
+
 function getStatusClass(status) {
   if (status === "completed") return "status-completed";
   if (status === "in_progress") return "status-in_progress";
@@ -282,6 +291,24 @@ function buildPieBackground(parts) {
     return slice;
   });
   return `conic-gradient(${slices.join(", ")})`;
+}
+
+/** Pré-preenche o ID em «Paragens (serviço)» e muda para esse separador. */
+function openStopPassagesTabForService(serviceId) {
+  const id = Number(serviceId);
+  if (!Number.isFinite(id) || id <= 0) return;
+  const idInput = document.getElementById("stopPassageServiceId");
+  if (idInput) idInput.value = String(id);
+  const summaryEl = document.getElementById("stopPassageSummary");
+  if (summaryEl) {
+    summaryEl.textContent = `Serviço #${id} pré-seleccionado. Carregue «Carregar análise» para ver as paragens.`;
+  }
+  const wrapEl = document.getElementById("stopPassageTableWrap");
+  if (wrapEl) wrapEl.classList.add("hidden");
+  const tbody = document.getElementById("stopPassageTableBody");
+  if (tbody) tbody.innerHTML = "";
+  openSupervisorTab("tabParagensServico");
+  if (idInput) idInput.focus();
 }
 
 function closeServiceDrawer() {
@@ -691,7 +718,10 @@ async function loadLiveServicesMap() {
     }
     const card = document.createElement("article");
     card.className = "service-card-item";
-    card.innerHTML = `<div><strong>Serviço #${svc.id}</strong> | Linha ${svc.line_code || "-"} | Frota ${svc.fleet_number || "-"} | ${svc.driver_name || "-"}</div>`;
+    card.innerHTML = `<div><strong>Serviço #${svc.id}</strong> | Linha ${svc.line_code || "-"} | Frota ${svc.fleet_number || "-"} | ${svc.driver_name || "-"}</div>
+      <div class="service-card-actions">
+        <button type="button" class="stop-passages-shortcut-btn" data-stop-passages-service-id="${svc.id}">Paragens</button>
+      </div>`;
     supLiveServicesListEl.appendChild(card);
   });
 
@@ -836,6 +866,7 @@ async function loadServices(event) {
       </div>
       <div class="service-card-actions">
         <button type="button" class="adjust-btn" data-service-id="${s.id}">Abrir detalhe</button>
+        <button type="button" class="stop-passages-shortcut-btn" data-stop-passages-service-id="${s.id}">Paragens</button>
       </div>
     `;
     serviceCardsEl.appendChild(card);
@@ -1411,6 +1442,70 @@ function renderUsersList() {
   });
 }
 
+async function loadStopPassages() {
+  if (!supToken) {
+    alert("Inicie sessão como supervisor ou administrador.");
+    return;
+  }
+  const idInput = document.getElementById("stopPassageServiceId");
+  const radiusInput = document.getElementById("stopPassageRadiusM");
+  const summaryEl = document.getElementById("stopPassageSummary");
+  const wrapEl = document.getElementById("stopPassageTableWrap");
+  const tbody = document.getElementById("stopPassageTableBody");
+  const sid = Number(idInput?.value);
+  if (!Number.isFinite(sid) || sid <= 0) {
+    alert("Indique o n.º do serviço (ID).");
+    return;
+  }
+  let radius = Number(radiusInput?.value);
+  if (!Number.isFinite(radius)) radius = 85;
+  radius = Math.min(200, Math.max(40, radius));
+
+  summaryEl.textContent = "A carregar...";
+  wrapEl.classList.add("hidden");
+  tbody.innerHTML = "";
+
+  const response = await fetch(
+    `${API_BASE}/supervisor/services/${sid}/stop-passages?radiusM=${encodeURIComponent(radius)}`,
+    { headers: getAuthHeaders() }
+  );
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    summaryEl.textContent = data.message || "Erro ao carregar a análise.";
+    return;
+  }
+
+  const svc = data.service || {};
+  summaryEl.textContent = [
+    `Serviço #${svc.id} | ${svc.driver_name || "-"} | Linha ${svc.line_code || "-"} | ${svc.service_schedule || "-"}`,
+    `Trip GTFS: ${data.trip_id || "-"} | Tolerância: ${data.threshold_meters ?? radius} m`,
+    `Pontos GPS: ${data.gps_points_count ?? 0}`,
+    `Paragens com passagem detetada: ${data.summary?.stops_matched ?? 0} / ${data.summary?.stops_total ?? 0} (${data.summary?.pct ?? 0}%)`,
+    data.note ? String(data.note) : "",
+  ]
+    .filter((line) => line)
+    .join("\n");
+
+  (data.stops || []).forEach((row) => {
+    const tr = document.createElement("tr");
+    const cells = [
+      row.stop_sequence ?? "—",
+      row.stop_name || row.stop_id || "—",
+      row.scheduled_departure || row.scheduled_arrival || "—",
+      formatDateTimePt(row.passed_at),
+      row.distance_from_stop_m != null ? Number(row.distance_from_stop_m).toFixed(1) : "—",
+      row.passed_near_stop ? "Sim" : "Não",
+    ];
+    cells.forEach((text) => {
+      const td = document.createElement("td");
+      td.textContent = text;
+      tr.appendChild(td);
+    });
+    tbody.appendChild(tr);
+  });
+  wrapEl.classList.remove("hidden");
+}
+
 async function loadDrivers() {
   if (!supToken) return;
   const response = await fetch(`${API_BASE}/supervisor/drivers`, {
@@ -1644,6 +1739,10 @@ document.getElementById("downloadDriversTemplateXlsxBtn").addEventListener("clic
 document.getElementById("exportDriversCsvBtn").addEventListener("click", exportDriversCsv);
 document.getElementById("exportDriversXlsxBtn").addEventListener("click", exportDriversXlsx);
 document.getElementById("refreshDriversBtn").addEventListener("click", loadDrivers);
+const loadStopPassagesBtn = document.getElementById("loadStopPassagesBtn");
+if (loadStopPassagesBtn) {
+  loadStopPassagesBtn.addEventListener("click", loadStopPassages);
+}
 document.getElementById("importRosterPreviewBtn").addEventListener("click", () => importRosterFile(true));
 document.getElementById("importRosterBtn").addEventListener("click", () => importRosterFile(false));
 document.getElementById("importGtfsBtn").addEventListener("click", importGtfsZip);
@@ -1706,7 +1805,10 @@ if (liveServiceFilterSelectEl) {
       }
       const card = document.createElement("article");
       card.className = "service-card-item";
-      card.innerHTML = `<div><strong>Serviço #${svc.id}</strong> | Linha ${svc.line_code || "-"} | Frota ${svc.fleet_number || "-"} | ${svc.driver_name || "-"}</div>`;
+      card.innerHTML = `<div><strong>Serviço #${svc.id}</strong> | Linha ${svc.line_code || "-"} | Frota ${svc.fleet_number || "-"} | ${svc.driver_name || "-"}</div>
+        <div class="service-card-actions">
+          <button type="button" class="stop-passages-shortcut-btn" data-stop-passages-service-id="${svc.id}">Paragens</button>
+        </div>`;
       supLiveServicesListEl.appendChild(card);
     });
     if (!filtered.length) {
@@ -1764,6 +1866,25 @@ if (rosterDayCardsEl) {
 }
 initTabs();
 initServiceFilterMode();
+
+if (serviceCardsEl && !serviceCardsEl.dataset.stopPassagesDelegation) {
+  serviceCardsEl.dataset.stopPassagesDelegation = "1";
+  serviceCardsEl.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-stop-passages-service-id]");
+    if (!btn) return;
+    e.preventDefault();
+    openStopPassagesTabForService(btn.getAttribute("data-stop-passages-service-id"));
+  });
+}
+if (supLiveServicesListEl && !supLiveServicesListEl.dataset.stopPassagesDelegation) {
+  supLiveServicesListEl.dataset.stopPassagesDelegation = "1";
+  supLiveServicesListEl.addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-stop-passages-service-id]");
+    if (!btn) return;
+    e.preventDefault();
+    openStopPassagesTabForService(btn.getAttribute("data-stop-passages-service-id"));
+  });
+}
 
 (() => {
   const raw = sessionStorage.getItem(AUTH_SESSION_KEY);

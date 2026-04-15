@@ -75,4 +75,8 @@ function minDistanceToPolylineMeters(point, polylinePoints) {
   return Number(minMeters.toFixed(2));
 }
 
-module.exports = { calculatePathDistance, minDistanceToPolylineMeters };
+function haversineMeters(lat1, lon1, lat2, lon2) {
+  return Number((haversineKm(lat1, lon1, lat2, lon2) * 1000).toFixed(2));
+}
+
+module.exports = { calculatePathDistance, minDistanceToPolylineMeters, haversineMeters };

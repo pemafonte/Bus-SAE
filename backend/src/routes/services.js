@@ -2,6 +2,12 @@ const express = require("express");
 const db = require("../db");
 const authMiddleware = require("../middleware/auth");
 const { calculatePathDistance, minDistanceToPolylineMeters } = require("../utils/distance");
+const {
+  parseServiceScheduleStartMinutes,
+  findBestTripForLine,
+  getShapePointsByTripId,
+  getStopsByTripId,
+} = require("../utils/gtfsTripResolve");
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -63,18 +69,6 @@ async function closeActiveSegment(serviceId) {
   return { ...activeSegment, kmSegment };
 }
 
-function parseServiceScheduleStartMinutes(serviceSchedule) {
-  if (!serviceSchedule) return null;
-  const text = String(serviceSchedule).trim();
-  const firstChunk = text.includes("-") ? text.split("-")[0] : text;
-  const match = firstChunk.match(/(\d{1,2}):(\d{2})/);
-  if (!match) return null;
-  const hh = Number(match[1]);
-  const mm = Number(match[2]);
-  if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
-  return hh * 60 + mm;
-}
-
 /** Intervalo [start,end) em minutos desde meia-noite; suporta janelas que atravessam meia-noite. */
 function parseServiceScheduleRangeMinutes(serviceSchedule) {
   const text = String(serviceSchedule || "").trim();
@@ -95,121 +89,6 @@ function parseServiceScheduleRangeMinutes(serviceSchedule) {
 function scheduleRangesOverlap(a, b) {
   if (!a || !b) return false;
   return a.start < b.end && b.start < a.end;
-}
-
-function parseGtfsTimeToMinutes(gtfsTime) {
-  if (!gtfsTime || !String(gtfsTime).includes(":")) return null;
-  const [h, m] = String(gtfsTime).split(":");
-  const hh = Number(h);
-  const mm = Number(m);
-  if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
-  return hh * 60 + mm;
-}
-
-function resolveGtfsRouteCandidates(lineCode) {
-  const raw = String(lineCode || "").trim();
-  if (!raw) return [];
-  const candidates = [raw];
-  // Ex: 1014 / 1024 -> linha GTFS base "4"
-  if (/^\d{4}$/.test(raw)) {
-    candidates.push(raw.slice(-1));
-  }
-  return [...new Set(candidates)];
-}
-
-function resolveDirectionHint(lineCode) {
-  const raw = String(lineCode || "").trim();
-  // Heuristica para codigos internos de 4 digitos:
-  // penultimo digito 1/2 costuma representar sentido (0/1 no GTFS).
-  if (/^\d{4}$/.test(raw)) {
-    const penultimate = Number(raw.charAt(2));
-    if (penultimate === 1) return 0;
-    if (penultimate === 2) return 1;
-  }
-  return null;
-}
-
-async function findBestTripForLine(lineCode, serviceSchedule) {
-  if (!lineCode) return null;
-  const targetMinutes = parseServiceScheduleStartMinutes(serviceSchedule);
-  const routeCandidates = resolveGtfsRouteCandidates(lineCode);
-  const directionHint = resolveDirectionHint(lineCode);
-  const tripsResult = await db.query(
-    `SELECT
-       t.trip_id,
-       t.shape_id,
-       t.direction_id,
-       MIN(st.departure_time) AS first_departure_time
-     FROM gtfs_trips t
-     JOIN gtfs_routes r ON r.route_id = t.route_id
-     LEFT JOIN gtfs_stop_times st ON st.trip_id = t.trip_id
-     WHERE r.route_short_name = ANY($1::text[])
-       AND ($2::int IS NULL OR t.direction_id = $2)
-     GROUP BY t.trip_id, t.shape_id, t.direction_id`,
-    [routeCandidates, directionHint]
-  );
-  if (!tripsResult.rows.length) return null;
-
-  let selected = tripsResult.rows[0];
-  let selectedDiff = Number.POSITIVE_INFINITY;
-
-  if (targetMinutes != null) {
-    for (const trip of tripsResult.rows) {
-      const tripMinutes = parseGtfsTimeToMinutes(trip.first_departure_time);
-      if (tripMinutes == null) continue;
-      const diff = Math.abs(tripMinutes - targetMinutes);
-      if (diff < selectedDiff) {
-        selectedDiff = diff;
-        selected = trip;
-      }
-    }
-  }
-
-  return selected;
-}
-
-async function getShapePointsByTripId(tripId) {
-  if (!tripId) return [];
-  const shapeResult = await db.query(
-    `SELECT s.shape_pt_lat, s.shape_pt_lon
-     FROM gtfs_shapes s
-     JOIN gtfs_trips t ON t.shape_id = s.shape_id
-     WHERE t.trip_id = $1
-     ORDER BY s.shape_pt_sequence ASC`,
-    [tripId]
-  );
-  return shapeResult.rows.map((p) => ({
-    lat: Number(p.shape_pt_lat),
-    lng: Number(p.shape_pt_lon),
-  }));
-}
-
-async function getStopsByTripId(tripId) {
-  if (!tripId) return [];
-  const stopsResult = await db.query(
-    `SELECT
-       st.stop_id,
-       s.stop_name,
-       s.stop_lat,
-       s.stop_lon,
-       st.stop_sequence,
-       st.arrival_time,
-       st.departure_time
-     FROM gtfs_stop_times st
-     JOIN gtfs_stops s ON s.stop_id = st.stop_id
-     WHERE st.trip_id = $1
-     ORDER BY st.stop_sequence ASC`,
-    [tripId]
-  );
-  return stopsResult.rows.map((row) => ({
-    stopId: row.stop_id,
-    stopName: row.stop_name || row.stop_id,
-    lat: Number(row.stop_lat),
-    lng: Number(row.stop_lon),
-    sequence: row.stop_sequence,
-    arrivalTime: row.arrival_time || null,
-    departureTime: row.departure_time || null,
-  }));
 }
 
 router.get("/", async (req, res) => {
@@ -783,6 +662,12 @@ router.get("/:serviceId/reference-route", async (req, res) => {
     if (!tripId) {
       const bestTrip = await findBestTripForLine(service.line_code, service.service_schedule);
       tripId = bestTrip?.trip_id || null;
+      if (tripId) {
+        await db.query(`UPDATE services SET gtfs_trip_id = $1 WHERE id = $2 AND gtfs_trip_id IS NULL`, [
+          tripId,
+          serviceId,
+        ]);
+      }
     }
     if (!tripId) {
       return res.status(404).json({ message: "Sem rota GTFS para esta linha/horario." });

@@ -7,6 +7,8 @@ const { calculatePathDistance } = require("../utils/distance");
 const { archiveClosedRosterDays } = require("../utils/rosterArchive");
 const { OVERVIEW_TODAY_SQL } = require("../utils/overviewToday");
 const { serviceActivityLisbonDayFilter } = require("../utils/serviceListFilters");
+const { findBestTripForLine, getStopsByTripId } = require("../utils/gtfsTripResolve");
+const { matchGpsPointsToGtfsStops } = require("../utils/stopPassageMatch");
 
 /** Mudar ao alterar mensagens/lógica do PATCH /roster/:id/reassign (diagnóstico de deploy). */
 const ROSTER_REASSIGN_API_REVISION = "20260412g";
@@ -2013,6 +2015,111 @@ router.patch("/services/:serviceId", async (req, res) => {
     return res.json(result.rows[0]);
   } catch (error) {
     return res.status(500).json({ message: "Erro ao ajustar servico." });
+  }
+});
+
+router.get("/services/:serviceId/stop-passages", async (req, res) => {
+  const serviceId = Number(req.params.serviceId);
+  const radiusMeters = Math.min(Math.max(Number(req.query.radiusM) || 85, 40), 200);
+  if (!Number.isFinite(serviceId) || serviceId <= 0) {
+    return res.status(400).json({ message: "Identificador de servico invalido." });
+  }
+
+  try {
+    const svcRes = await db.query(
+      `SELECT s.id, s.driver_id, s.gtfs_trip_id, s.line_code, s.service_schedule,
+              s.plate_number, s.fleet_number, s.status, s.started_at, s.ended_at,
+              u.name AS driver_name
+       FROM services s
+       JOIN users u ON u.id = s.driver_id
+       WHERE s.id = $1
+       LIMIT 1`,
+      [serviceId]
+    );
+    if (!svcRes.rowCount) {
+      return res.status(404).json({ message: "Servico nao encontrado." });
+    }
+    const svc = svcRes.rows[0];
+    let tripId = svc.gtfs_trip_id;
+    if (!tripId) {
+      const best = await findBestTripForLine(svc.line_code, svc.service_schedule);
+      tripId = best?.trip_id || null;
+    }
+    if (!tripId) {
+      return res.status(404).json({
+        message: "Nao foi possivel determinar o trip GTFS deste servico (linha/horario).",
+        service: {
+          id: svc.id,
+          line_code: svc.line_code,
+          service_schedule: svc.service_schedule,
+        },
+      });
+    }
+
+    const stops = await getStopsByTripId(tripId);
+    const pointsRes = await db.query(
+      `SELECT lat, lng, captured_at
+       FROM service_points
+       WHERE service_id = $1
+       ORDER BY captured_at ASC`,
+      [serviceId]
+    );
+    const points = pointsRes.rows;
+
+    if (!stops.length) {
+      return res.json({
+        service: {
+          id: svc.id,
+          driver_name: svc.driver_name,
+          line_code: svc.line_code,
+          service_schedule: svc.service_schedule,
+          plate_number: svc.plate_number,
+          fleet_number: svc.fleet_number,
+          gtfs_trip_id: tripId,
+          status: svc.status,
+          started_at: svc.started_at,
+          ended_at: svc.ended_at,
+        },
+        trip_id: tripId,
+        threshold_meters: radiusMeters,
+        gps_points_count: points.length,
+        summary: { stops_matched: 0, stops_total: 0, pct: 0 },
+        stops: [],
+        note: "Sem paragens GTFS para este trip.",
+      });
+    }
+
+    const { rows, matched, total } = matchGpsPointsToGtfsStops(stops, points, {
+      radiusMeters,
+      serviceStartedAt: svc.started_at,
+    });
+
+    return res.json({
+      service: {
+        id: svc.id,
+        driver_name: svc.driver_name,
+        line_code: svc.line_code,
+        service_schedule: svc.service_schedule,
+        plate_number: svc.plate_number,
+        fleet_number: svc.fleet_number,
+        gtfs_trip_id: tripId,
+        status: svc.status,
+        started_at: svc.started_at,
+        ended_at: svc.ended_at,
+      },
+      trip_id: tripId,
+      threshold_meters: radiusMeters,
+      gps_points_count: points.length,
+      summary: {
+        stops_matched: matched,
+        stops_total: total,
+        pct: total ? Math.round((matched / total) * 1000) / 10 : 0,
+      },
+      stops: rows,
+    });
+  } catch (error) {
+    console.error("stop-passages", error);
+    return res.status(500).json({ message: "Erro ao analisar passagem pelas paragens." });
   }
 });
 

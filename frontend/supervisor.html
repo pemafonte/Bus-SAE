@@ -39,6 +39,7 @@
             <button type="button" class="tab-btn" data-tab-target="tabImportarMotoristas">Importar dados</button>
             <button type="button" class="tab-btn" data-tab-target="tabExportarMotoristas">Exportar dados</button>
             <button type="button" class="tab-btn" data-tab-target="tabListaMotoristas">Lista de motoristas</button>
+            <button type="button" class="tab-btn" data-tab-target="tabParagensServico">Paragens (serviço)</button>
           </aside>
 
           <div class="tab-content">
@@ -252,6 +253,41 @@
           <h2>Lista de utilizadores</h2>
           <button id="refreshDriversBtn">Atualizar utilizadores</button>
           <ul id="driversList"></ul>
+        </div>
+
+        <div id="tabParagensServico" class="tab-panel">
+          <h2>Paragens da linha vs GPS do motorista</h2>
+          <p class="field-help" style="margin-top: 0">
+            Indique o <strong>n.º do serviço (ID)</strong> — o mesmo que aparece nos cartões em «Serviços» ou no filtro por
+            n.º de serviço. Nos cartões de <strong>Saídas</strong> e de <strong>serviços em execução (mapa)</strong> pode
+            premir <strong>Paragens</strong> para preencher o ID e abrir este separador. A app cruza as paragens GTFS da
+            linha com os pontos GPS registados (tolerância por defeito 85&nbsp;m; ordem sequencial das paragens).
+          </p>
+          <div class="stop-passage-toolbar">
+            <label for="stopPassageServiceId">N.º do serviço (ID)</label>
+            <input id="stopPassageServiceId" type="number" min="1" placeholder="Ex.: 42" />
+            <label for="stopPassageRadiusM">Tolerância (metros)</label>
+            <input id="stopPassageRadiusM" type="number" min="40" max="200" value="85" />
+            <button type="button" id="loadStopPassagesBtn">Carregar análise</button>
+          </div>
+          <pre id="stopPassageSummary">Indique um ID de serviço e carregue a análise.</pre>
+          <div id="stopPassageTableWrap" class="hidden">
+            <div class="ops-table-wrap">
+              <table class="ops-table" id="stopPassageTable">
+                <thead>
+                  <tr>
+                    <th>#</th>
+                    <th>Paragem</th>
+                    <th>Partida GTFS</th>
+                    <th>Passagem GPS</th>
+                    <th>Dist. (m)</th>
+                    <th>OK</th>
+                  </tr>
+                </thead>
+                <tbody id="stopPassageTableBody"></tbody>
+              </table>
+            </div>
+          </div>
         </div>
           </div>
         </div>
