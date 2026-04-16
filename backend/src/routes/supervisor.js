@@ -7,7 +7,7 @@ const { calculatePathDistance } = require("../utils/distance");
 const { archiveClosedRosterDays } = require("../utils/rosterArchive");
 const { OVERVIEW_TODAY_SQL } = require("../utils/overviewToday");
 const { serviceActivityLisbonDayFilter } = require("../utils/serviceListFilters");
-const { findBestTripForLine, getStopsByTripId } = require("../utils/gtfsTripResolve");
+const { findBestTripForLine, getShapePointsByTripId, getStopsByTripId } = require("../utils/gtfsTripResolve");
 const { matchGpsPointsToGtfsStops } = require("../utils/stopPassageMatch");
 
 /** Mudar ao alterar mensagens/lógica do PATCH /roster/:id/reassign (diagnóstico de deploy). */
@@ -451,6 +451,48 @@ async function computePlannedKmByTripId(tripId, cache) {
   const km = points.length >= 2 ? calculatePathDistance(points) : null;
   cache.set(key, km);
   return km;
+}
+
+async function getActiveSegment(serviceId) {
+  const segmentResult = await db.query(
+    `SELECT id, driver_id, fleet_number, started_at
+     FROM service_segments
+     WHERE service_id = $1 AND status = 'in_progress'
+     ORDER BY started_at DESC
+     LIMIT 1`,
+    [serviceId]
+  );
+  return segmentResult.rows[0] || null;
+}
+
+async function closeActiveSegment(serviceId, finalStatus = "completed") {
+  const activeSegment = await getActiveSegment(serviceId);
+  if (!activeSegment) return null;
+
+  const pointsResult = await db.query(
+    `SELECT lat, lng
+     FROM service_points
+     WHERE service_segment_id = $1
+     ORDER BY captured_at ASC`,
+    [activeSegment.id]
+  );
+
+  const points = pointsResult.rows.map((p) => ({
+    lat: Number(p.lat),
+    lng: Number(p.lng),
+  }));
+  const kmSegment = calculatePathDistance(points);
+
+  await db.query(
+    `UPDATE service_segments
+     SET status = $2,
+         ended_at = COALESCE(ended_at, NOW()),
+         km_segment = $3
+     WHERE id = $1`,
+    [activeSegment.id, finalStatus, kmSegment]
+  );
+
+  return { ...activeSegment, kmSegment };
 }
 
 async function enrichServiceRowsForExport(rows) {
@@ -2192,6 +2234,52 @@ router.get("/services/:serviceId/details", async (req, res) => {
   }
 });
 
+router.get("/services/:serviceId/reference-route", async (req, res) => {
+  const serviceId = Number(req.params.serviceId);
+  if (!Number.isFinite(serviceId) || serviceId <= 0) {
+    return res.status(400).json({ message: "Identificador de servico invalido." });
+  }
+  try {
+    const serviceResult = await db.query(
+      `SELECT id, gtfs_trip_id, line_code, service_schedule
+       FROM services
+       WHERE id = $1
+       LIMIT 1`,
+      [serviceId]
+    );
+    if (!serviceResult.rowCount) {
+      return res.status(404).json({ message: "Servico nao encontrado." });
+    }
+
+    const service = serviceResult.rows[0];
+    let tripId = service.gtfs_trip_id;
+    if (!tripId) {
+      const bestTrip = await findBestTripForLine(service.line_code, service.service_schedule);
+      tripId = bestTrip?.trip_id || null;
+      if (tripId) {
+        await db.query(`UPDATE services SET gtfs_trip_id = $1 WHERE id = $2 AND gtfs_trip_id IS NULL`, [
+          tripId,
+          serviceId,
+        ]);
+      }
+    }
+    if (!tripId) {
+      return res.status(404).json({ message: "Sem rota GTFS para esta linha/horario." });
+    }
+
+    const shapePoints = await getShapePointsByTripId(tripId);
+    const stops = await getStopsByTripId(tripId);
+    return res.json({
+      tripId,
+      lineCode: service.line_code,
+      points: shapePoints,
+      stops,
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao obter rota de referencia GTFS." });
+  }
+});
+
 router.post("/services/:serviceId/force-end", async (req, res) => {
   const { serviceId } = req.params;
   try {
@@ -2209,14 +2297,7 @@ router.post("/services/:serviceId/force-end", async (req, res) => {
       return res.status(409).json({ message: "Servico ja finalizado." });
     }
 
-    await db.query(
-      `UPDATE service_segments
-       SET status = 'completed',
-           ended_at = COALESCE(ended_at, NOW())
-       WHERE service_id = $1
-         AND status = 'in_progress'`,
-      [serviceId]
-    );
+    await closeActiveSegment(serviceId, "completed");
 
     const pointsResult = await db.query(
       `SELECT lat, lng
@@ -2244,6 +2325,181 @@ router.post("/services/:serviceId/force-end", async (req, res) => {
     return res.json(updated.rows[0]);
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao finalizar servico." });
+  }
+});
+
+router.post("/services/:serviceId/cancel", async (req, res) => {
+  const { serviceId } = req.params;
+  try {
+    const current = await db.query(
+      `SELECT id, status, planned_service_id, driver_id
+       FROM services
+       WHERE id = $1
+       LIMIT 1`,
+      [serviceId]
+    );
+    if (!current.rowCount) {
+      return res.status(404).json({ message: "Servico nao encontrado." });
+    }
+    if (current.rows[0].status !== "in_progress") {
+      return res.status(409).json({ message: "Apenas servicos em curso podem ser anulados." });
+    }
+
+    await closeActiveSegment(serviceId, "cancelled");
+
+    const pointsResult = await db.query(
+      `SELECT lat, lng
+       FROM service_points
+       WHERE service_id = $1
+       ORDER BY captured_at ASC`,
+      [serviceId]
+    );
+    const points = pointsResult.rows.map((p) => ({
+      lat: Number(p.lat),
+      lng: Number(p.lng),
+    }));
+    const totalKm = calculatePathDistance(points);
+
+    const updated = await db.query(
+      `UPDATE services
+       SET status = 'cancelled',
+           ended_at = NOW(),
+           total_km = $2
+       WHERE id = $1
+       RETURNING id, driver_id, plate_number, service_schedule, line_code, fleet_number, status, started_at, ended_at, total_km`,
+      [serviceId, totalKm]
+    );
+
+    if (current.rows[0]?.planned_service_id) {
+      await db.query(
+        `UPDATE daily_roster
+         SET status = 'pending'
+         WHERE driver_id = $1
+           AND planned_service_id = $2
+           AND service_date = CURRENT_DATE`,
+        [current.rows[0].driver_id, current.rows[0].planned_service_id]
+      );
+    }
+
+    return res.json(updated.rows[0]);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao anular servico." });
+  }
+});
+
+router.post("/services/:serviceId/handover", async (req, res) => {
+  const { serviceId } = req.params;
+  const { toDriverId, toFleetNumber, reason, notes, handoverLocationText } = req.body || {};
+  const toDriverIdNum = Number(toDriverId);
+
+  if (!Number.isFinite(toDriverIdNum) || toDriverIdNum <= 0) {
+    return res.status(400).json({ message: "Indique o motorista destino." });
+  }
+  if (!String(reason || "").trim()) {
+    return res.status(400).json({ message: "Indique o motivo da transferencia." });
+  }
+
+  try {
+    const serviceResult = await db.query(
+      `SELECT id, driver_id, fleet_number, status, line_code, service_schedule
+       FROM services
+       WHERE id = $1
+       LIMIT 1`,
+      [serviceId]
+    );
+    if (!serviceResult.rowCount) {
+      return res.status(404).json({ message: "Servico nao encontrado." });
+    }
+    const service = serviceResult.rows[0];
+    if (service.status !== "in_progress") {
+      return res.status(409).json({ message: "Servico nao esta em curso." });
+    }
+
+    const toDriverResult = await db.query(
+      `SELECT id, name
+       FROM users
+       WHERE id = $1
+         AND role = 'driver'
+         AND is_active = TRUE
+       LIMIT 1`,
+      [toDriverIdNum]
+    );
+    if (!toDriverResult.rowCount) {
+      return res.status(404).json({ message: "Motorista destino nao encontrado ou inativo." });
+    }
+    const toDriver = toDriverResult.rows[0];
+    if (toDriver.id === service.driver_id) {
+      return res.status(400).json({ message: "Motorista destino deve ser diferente do atual." });
+    }
+
+    const activeOther = await db.query(
+      `SELECT id FROM services
+       WHERE driver_id = $1 AND status = 'in_progress'
+       LIMIT 1`,
+      [toDriver.id]
+    );
+    if (activeOther.rowCount > 0) {
+      return res.status(409).json({ message: "Motorista destino ja tem servico em curso." });
+    }
+
+    const closedSegment = await closeActiveSegment(serviceId, "completed");
+    const latestPointResult = await db.query(
+      `SELECT lat, lng
+       FROM service_points
+       WHERE service_id = $1
+       ORDER BY captured_at DESC
+       LIMIT 1`,
+      [serviceId]
+    );
+    const latestPoint = latestPointResult.rows[0] || {};
+    const nextFleetNumber = toFleetNumber || service.fleet_number;
+
+    const handover = await db.query(
+      `INSERT INTO service_handover_events (
+         service_id, from_segment_id, from_driver_id, to_driver_id,
+         from_fleet_number, to_fleet_number, reason, notes,
+         handover_lat, handover_lng, handover_location_text, status, completed_at
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, 'completed', NOW())
+       RETURNING id, service_id, reason, status, to_driver_id, to_fleet_number, created_at, completed_at`,
+      [
+        serviceId,
+        closedSegment?.id || null,
+        service.driver_id,
+        toDriver.id,
+        service.fleet_number,
+        nextFleetNumber,
+        String(reason).trim(),
+        notes || null,
+        latestPoint.lat || null,
+        latestPoint.lng || null,
+        handoverLocationText || null,
+      ]
+    );
+
+    await db.query(
+      `INSERT INTO service_segments (service_id, driver_id, fleet_number, status)
+       VALUES ($1, $2, $3, 'in_progress')`,
+      [serviceId, toDriver.id, nextFleetNumber]
+    );
+
+    const updatedService = await db.query(
+      `UPDATE services
+       SET driver_id = $2,
+           fleet_number = $3,
+           status = 'in_progress'
+       WHERE id = $1
+       RETURNING id, driver_id, plate_number, service_schedule, line_code, fleet_number, status, started_at`,
+      [serviceId, toDriver.id, nextFleetNumber]
+    );
+
+    return res.json({
+      message: "Transferencia realizada com sucesso.",
+      service: updatedService.rows[0],
+      handover: handover.rows[0],
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao transferir servico." });
   }
 });
 

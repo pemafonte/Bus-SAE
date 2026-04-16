@@ -36,12 +36,27 @@
             <input id="vfFromDate" type="date" />
             <input id="vfToDate" type="date" />
             <button type="submit">Aplicar filtros</button>
+            <button type="button" id="viewerClearFiltersBtn">Limpar filtros</button>
           </form>
           <button id="viewerExportBtn">Exportar resumo em CSV</button>
         </section>
 
         <section class="card viewer-layout-card">
           <h2>Painel operacional (só consulta)</h2>
+          <div class="map-legend" aria-label="Legenda de estados dos serviços">
+            <span class="map-legend-item">
+              <span class="status-badge status-completed">Concluído</span>
+            </span>
+            <span class="map-legend-item">
+              <span class="status-badge status-in_progress">Em curso</span>
+            </span>
+            <span class="map-legend-item">
+              <span class="status-badge status-awaiting_handover">Aguarda transferência</span>
+            </span>
+            <span class="map-legend-item">
+              <span class="status-badge status-cancelled">Cancelado</span>
+            </span>
+          </div>
           <div class="viewer-layout">
             <div class="ops-main">
               <h3>Serviços do dia</h3>

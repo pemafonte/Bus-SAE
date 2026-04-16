@@ -73,6 +73,16 @@
               <section id="driverStepMap" class="tab-panel">
                 <h2>Percurso e operações</h2>
                 <div id="map"></div>
+                <div class="map-legend" aria-label="Legenda do mapa do motorista">
+                  <span class="map-legend-item">
+                    <span class="map-legend-line map-legend-line--executed"></span>
+                    Percurso executado (GPS)
+                  </span>
+                  <span class="map-legend-item">
+                    <span class="map-legend-line map-legend-line--reference"></span>
+                    Linha de referência (planeada)
+                  </span>
+                </div>
 
                 <section class="card">
                   <h3>Resumo do serviço</h3>
@@ -82,6 +92,7 @@
                 <section class="card">
                   <h3>Ações no serviço</h3>
                   <button id="endTripBtn" disabled>Finalizar viagem</button>
+                  <button id="cancelTripBtn" type="button" class="danger-btn" disabled>Anular viagem iniciada por engano</button>
                   <button id="refreshPendingHandoversBtn" type="button">Atualizar serviços a assumir</button>
                   <ul id="pendingHandoversList"></ul>
                 </section>

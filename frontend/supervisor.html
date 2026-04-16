@@ -58,6 +58,16 @@
             </select>
             <button type="button" id="refreshLiveServicesBtn">Atualizar mapa</button>
             <div id="supLiveMap"></div>
+            <div class="map-legend" aria-label="Legenda do mapa do supervisor">
+              <span class="map-legend-item">
+                <span class="map-legend-line map-legend-line--reference"></span>
+                Linha de referência (planeada)
+              </span>
+              <span class="map-legend-item">
+                <span class="map-legend-dot map-legend-dot--bus"></span>
+                Posição atual da frota
+              </span>
+            </div>
             <div id="supLiveServicesList" class="service-cards"></div>
           </section>
           <div class="supervisor-services-roster-hint card" style="margin-bottom: 14px; padding: 12px 14px">
@@ -84,9 +94,14 @@
                 <input id="fDriverId" type="number" placeholder="ID do motorista" />
                 <input id="fLineCode" type="text" placeholder="Linha" />
                 <input id="fStatus" type="text" placeholder="Estado (códigos: completed, in_progress, …)" />
+                <label class="inline-checkbox">
+                  <input id="fOnlyCancelled" type="checkbox" />
+                  Mostrar apenas serviços anulados
+                </label>
                 <input id="fFromDate" type="date" />
                 <input id="fToDate" type="date" />
                 <button type="submit">Aplicar filtros</button>
+                <button type="button" id="clearFiltersBtn">Limpar filtros</button>
               </form>
               <button id="exportBtn">Exportar CSV</button>
               <button id="exportExcelBtn">Exportar Excel</button>
@@ -304,6 +319,16 @@
       <section class="drawer-section">
         <h4>Rota (mini mapa)</h4>
         <div id="serviceRouteMiniMap" class="mini-route-map">Sem pontos GPS.</div>
+        <div class="map-legend" aria-label="Legenda do detalhe da viagem">
+          <span class="map-legend-item">
+            <span class="map-legend-line map-legend-line--executed"></span>
+            Percurso executado (GPS)
+          </span>
+          <span class="map-legend-item">
+            <span class="map-legend-line map-legend-line--reference"></span>
+            Linha de referência (planeada)
+          </span>
+        </div>
         <small id="serviceRouteTimes" class="route-times">-</small>
       </section>
       <section class="drawer-section">
@@ -324,7 +349,17 @@
         </select>
         <label for="adjustFleetNumber">Numero de frota</label>
         <input id="adjustFleetNumber" type="number" placeholder="Ex.: 1204" />
+        <label for="handoverToDriverId">Transferir para motorista</label>
+        <select id="handoverToDriverId">
+          <option value="">— Selecionar motorista —</option>
+        </select>
+        <label for="handoverReasonSup">Motivo da transferência</label>
+        <input id="handoverReasonSup" type="text" placeholder="Ex.: Troca de turno" />
+        <label for="handoverLocationSup">Local da transferência</label>
+        <input id="handoverLocationSup" type="text" placeholder="Ex.: Terminal Central" />
         <button type="submit">Guardar ajuste</button>
+        <button type="button" id="transferServiceBtn" class="warning-btn hidden">Transferir serviço em curso</button>
+        <button type="button" id="cancelServiceBtn" class="danger-btn hidden">Anular serviço em curso</button>
         <button type="button" id="forceEndServiceBtn" class="danger-btn hidden">Finalizar ja</button>
       </form>
     </aside>

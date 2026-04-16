@@ -81,6 +81,7 @@ const sessionWelcomeEl = document.getElementById("sessionWelcome");
 const logoutBtnEl = document.getElementById("logoutBtn");
 const summaryEl = document.getElementById("serviceSummary");
 const endTripBtn = document.getElementById("endTripBtn");
+const cancelTripBtn = document.getElementById("cancelTripBtn");
 const handoverBtn = document.getElementById("handoverBtn");
 const historyList = document.getElementById("historyList");
 const todayServicesList = document.getElementById("todayServicesList");
@@ -118,6 +119,22 @@ const referenceRoutePolyline = L.polyline([], { color: "#f97316", weight: 4, das
 const gtfsStopsLayer = L.layerGroup().addTo(map);
 let activeBusMarker = null;
 handoverBtn.disabled = true;
+cancelTripBtn.disabled = true;
+
+function clearActiveServiceState() {
+  activeServiceId = null;
+  endTripBtn.disabled = true;
+  handoverBtn.disabled = true;
+  cancelTripBtn.disabled = true;
+  if (watchId) {
+    navigator.geolocation.clearWatch(watchId);
+    watchId = null;
+  }
+  if (activeBusMarker) {
+    map.removeLayer(activeBusMarker);
+    activeBusMarker = null;
+  }
+}
 
 function buildBusIcon(fleetNumber) {
   const fleet = String(fleetNumber || "-");
@@ -324,6 +341,7 @@ function logoutDriver() {
   }
   endTripBtn.disabled = true;
   handoverBtn.disabled = true;
+  cancelTripBtn.disabled = true;
   sessionWelcomeEl.classList.add("hidden");
   logoutBtnEl.classList.add("hidden");
   appScreenEl.classList.add("hidden");
@@ -351,6 +369,7 @@ async function restoreActiveService() {
   activeServiceId = active.id;
   endTripBtn.disabled = false;
   handoverBtn.disabled = false;
+  cancelTripBtn.disabled = false;
   document.getElementById("plateNumber").value = active.plate_number || "";
   document.getElementById("serviceSchedule").value = active.service_schedule || "";
   document.getElementById("lineCode").value = active.line_code || "";
@@ -409,6 +428,7 @@ async function startTrip(event) {
   activeServiceId = data.id;
   endTripBtn.disabled = false;
   handoverBtn.disabled = false;
+  cancelTripBtn.disabled = false;
   document.getElementById("handoverToFleetNumber").value = payload.fleetNumber;
   routePolyline.setLatLngs([]);
   if (navigator.geolocation) {
@@ -473,6 +493,25 @@ async function loadReferenceRoute(serviceId) {
   }
 }
 
+async function loadReferenceRoutePreview(lineCode, serviceSchedule) {
+  const lc = String(lineCode || "").trim();
+  const ss = String(serviceSchedule || "").trim();
+  if (!lc || !ss || !token) return;
+  const response = await fetch(
+    `${API_BASE}/services/reference-route-preview/by-header?lineCode=${encodeURIComponent(lc)}&serviceSchedule=${encodeURIComponent(ss)}`,
+    {
+      headers: authHeaders(),
+    }
+  );
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !data.points?.length) return;
+  const latLngs = data.points.map((p) => [p.lat, p.lng]);
+  referenceRoutePolyline.setLatLngs(latLngs);
+  if (routePolyline.getLatLngs().length === 0 && latLngs.length > 1) {
+    map.fitBounds(referenceRoutePolyline.getBounds(), { padding: [20, 20] });
+  }
+}
+
 function startLocationTracking() {
   if (!("geolocation" in navigator)) {
     alert("Geolocalização indisponível neste navegador.");
@@ -533,17 +572,7 @@ async function endTrip() {
     return;
   }
 
-  endTripBtn.disabled = true;
-  handoverBtn.disabled = true;
-  activeServiceId = null;
-  if (watchId) {
-    navigator.geolocation.clearWatch(watchId);
-    watchId = null;
-  }
-  if (activeBusMarker) {
-    map.removeLayer(activeBusMarker);
-    activeBusMarker = null;
-  }
+  clearActiveServiceState();
 
   setSummary(
     [
@@ -568,6 +597,40 @@ async function endTrip() {
   selectedPlannedServiceId = null;
   selectedPlannedFleetNumber = "";
   updateFleetWarning();
+  showDriverTab("driverStepSelect");
+  window.scrollTo({ top: 0, behavior: "smooth" });
+  await loadTodayServices();
+  await loadPendingHandovers();
+  await refreshHistory();
+}
+
+async function cancelTrip() {
+  if (!activeServiceId || !token) return;
+
+  const confirmed = window.confirm(
+    "Tem a certeza de que quer anular esta viagem? A viagem NÃO ficará concluída e poderá escolher outro serviço."
+  );
+  if (!confirmed) return;
+
+  const response = await fetch(`${API_BASE}/services/${activeServiceId}/cancel`, {
+    method: "POST",
+    headers: authHeaders(),
+  });
+  const data = await response.json();
+
+  if (!response.ok) {
+    alert(data.message || "Erro ao anular a viagem.");
+    return;
+  }
+
+  clearActiveServiceState();
+  referenceRoutePolyline.setLatLngs([]);
+  gtfsStopsLayer.clearLayers();
+  routePolyline.setLatLngs([]);
+  selectedPlannedServiceId = null;
+  selectedPlannedFleetNumber = "";
+  updateFleetWarning();
+  setSummary("Viagem anulada. Pode selecionar o serviço correto.");
   showDriverTab("driverStepSelect");
   window.scrollTo({ top: 0, behavior: "smooth" });
   await loadTodayServices();
@@ -688,6 +751,7 @@ async function loadTodayServices() {
       document.getElementById("lineCode").value = item.line_code;
       document.getElementById("fleetNumber").value = item.fleet_number;
       updateFleetWarning();
+      loadReferenceRoutePreview(item.line_code, item.service_schedule);
       alert(`Serviço ${item.service_code} selecionado.`);
       showDriverTab("driverStepStart");
     });
@@ -735,6 +799,7 @@ async function loadPendingHandovers() {
       activeServiceId = item.service_id;
       endTripBtn.disabled = false;
       handoverBtn.disabled = false;
+      cancelTripBtn.disabled = false;
       document.getElementById("fleetNumber").value = resumeData.service.fleet_number || "";
       setSummary(
         [
@@ -816,17 +881,7 @@ async function transferService(event) {
     return;
   }
 
-  if (watchId) {
-    navigator.geolocation.clearWatch(watchId);
-    watchId = null;
-  }
-  if (activeBusMarker) {
-    map.removeLayer(activeBusMarker);
-    activeBusMarker = null;
-  }
-  activeServiceId = null;
-  endTripBtn.disabled = true;
-  handoverBtn.disabled = true;
+  clearActiveServiceState();
   setSummary("Serviço transferido com sucesso. À espera do motorista de substituição.");
   showDriverTab("driverStepSelect");
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -846,6 +901,7 @@ async function refreshHistory() {
   historyList.innerHTML = "";
   data.forEach((item) => {
     const li = document.createElement("li");
+    const serviceStatus = String(item.status || "").toLowerCase();
 
     const initiated = item.initiated_by
       ? `Iniciado por ${item.initiated_by.driverName} (Mec. ${item.initiated_by.mechanicNumber || "-"}) | Frota inicial ${item.initiated_by.fleetNumber}`
@@ -875,16 +931,24 @@ async function refreshHistory() {
             .join("\n")
         : "Sem transferências.";
 
-    li.textContent = [
-      `Serviço n.º ${item.id}`,
-      `Horário: ${item.service_schedule}`,
-      `Linha: ${item.line_code}`,
-      `Frota final: ${item.fleet_number}`,
-      `Quilómetros realizados: ${item.total_km} km`,
-      initiated,
-      handoverDetails,
-      segmentDetails,
-    ].join("\n");
+    const statusBadgeText =
+      serviceStatus === "cancelled"
+        ? "ANULADO (erro corrigido)"
+        : serviceStatus === "completed"
+          ? "CONCLUÍDO"
+          : labelEstadoExecucaoServicoPt(item.status);
+    const statusBadgeClass = serviceStatus === "cancelled" ? "history-badge history-badge--cancelled" : "history-badge";
+
+    li.innerHTML = `
+      <div><strong>Serviço n.º ${item.id}</strong> <span class="${statusBadgeClass}">${statusBadgeText}</span></div>
+      <div>Horário: ${item.service_schedule}</div>
+      <div>Linha: ${item.line_code}</div>
+      <div>Frota final: ${item.fleet_number}</div>
+      <div>Quilómetros realizados: ${item.total_km} km</div>
+      <pre>${initiated}
+${handoverDetails}
+${segmentDetails}</pre>
+    `;
     historyList.appendChild(li);
   });
 }
@@ -900,7 +964,14 @@ document.getElementById("refreshTodayServicesBtn").addEventListener("click", asy
 document.getElementById("refreshPendingHandoversBtn").addEventListener("click", loadPendingHandovers);
 document.getElementById("handoverForm").addEventListener("submit", transferService);
 fleetNumberInput.addEventListener("input", updateFleetWarning);
+document.getElementById("lineCode").addEventListener("change", () => {
+  loadReferenceRoutePreview(document.getElementById("lineCode").value, document.getElementById("serviceSchedule").value);
+});
+document.getElementById("serviceSchedule").addEventListener("change", () => {
+  loadReferenceRoutePreview(document.getElementById("lineCode").value, document.getElementById("serviceSchedule").value);
+});
 endTripBtn.addEventListener("click", endTrip);
+cancelTripBtn.addEventListener("click", cancelTrip);
 document.getElementById("logoutBtn").addEventListener("click", logoutDriver);
 initDriverTabs();
 

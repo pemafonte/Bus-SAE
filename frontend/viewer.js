@@ -198,6 +198,20 @@ function buildQueryString() {
   return query ? `?${query}` : "";
 }
 
+function clearViewerFilters() {
+  const fields = ["vfDriverId", "vfLineCode", "vfStatus"];
+  fields.forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.value = "";
+  });
+  const fromInput = document.getElementById("vfFromDate");
+  const toInput = document.getElementById("vfToDate");
+  const today = todayISOInLisbon();
+  if (fromInput) fromInput.value = today;
+  if (toInput) toInput.value = today;
+  loadServices();
+}
+
 async function loginViewer(event) {
   event.preventDefault();
   const username = document.getElementById("viewerUsername").value.trim();
@@ -323,6 +337,7 @@ async function exportCsv() {
 
 document.getElementById("viewerLoginForm").addEventListener("submit", loginViewer);
 document.getElementById("viewerFiltersForm").addEventListener("submit", loadServices);
+document.getElementById("viewerClearFiltersBtn").addEventListener("click", clearViewerFilters);
 document.getElementById("viewerExportBtn").addEventListener("click", exportCsv);
 document.getElementById("viewerLogoutBtn").addEventListener("click", logoutViewer);
 

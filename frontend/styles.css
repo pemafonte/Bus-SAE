@@ -420,6 +420,10 @@ body::after {
   background: #7c3aed;
 }
 
+.status-cancelled {
+  background: #dc2626;
+}
+
 .status-other {
   background: #6b7280;
 }
@@ -816,6 +820,48 @@ pre {
   font-size: 11px;
 }
 
+.map-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  margin-top: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: #374151;
+}
+
+.map-legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.map-legend-line {
+  display: inline-block;
+  width: 26px;
+  border-top: 3px solid #111827;
+}
+
+.map-legend-line--executed {
+  border-top-color: #2563eb;
+}
+
+.map-legend-line--reference {
+  border-top-color: #f97316;
+  border-top-style: dashed;
+}
+
+.map-legend-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  display: inline-block;
+}
+
+.map-legend-dot--bus {
+  background: #111827;
+}
+
 .handover-list {
   margin: 0;
   padding-left: 16px;
@@ -824,6 +870,35 @@ pre {
 
 .danger-btn {
   background: #dc2626;
+}
+
+.warning-btn {
+  background: #b45309;
+  border-color: #92400e;
+}
+
+.inline-checkbox {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #1f2937;
+}
+
+.history-badge {
+  display: inline-block;
+  margin-left: 8px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #065f46;
+  background: #d1fae5;
+}
+
+.history-badge--cancelled {
+  color: #991b1b;
+  background: #fee2e2;
 }
 
 .planned-service-btn {

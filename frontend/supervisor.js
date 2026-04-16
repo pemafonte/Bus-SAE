@@ -71,6 +71,8 @@ const drawerTitleEl = document.getElementById("drawerTitle");
 const serviceRouteMiniMapEl = document.getElementById("serviceRouteMiniMap");
 const serviceHandoversListEl = document.getElementById("serviceHandoversList");
 const forceEndServiceBtn = document.getElementById("forceEndServiceBtn");
+const transferServiceBtn = document.getElementById("transferServiceBtn");
+const cancelServiceBtn = document.getElementById("cancelServiceBtn");
 const serviceRouteTimesEl = document.getElementById("serviceRouteTimes");
 const conflictAlertsListEl = document.getElementById("conflictAlertsList");
 const supLiveMapEl = document.getElementById("supLiveMap");
@@ -83,8 +85,11 @@ let rosterDayCache = [];
 let rosterDaySelectedDriverId = null;
 let supLiveMap = null;
 let supLiveMarkersLayer = null;
+let supLiveRoutesLayer = null;
 let supLiveRefreshInterval = null;
 let currentLiveServices = [];
+let serviceDetailRouteMap = null;
+let serviceDetailRouteLayer = null;
 
 function labelEstadoExecucaoServicoPt(code) {
   const k = String(code || "").toLowerCase();
@@ -163,12 +168,17 @@ function buildQueryString() {
   const driverId = document.getElementById("fDriverId").value.trim();
   const lineCode = document.getElementById("fLineCode").value.trim();
   const status = document.getElementById("fStatus").value.trim();
+  const onlyCancelled = document.getElementById("fOnlyCancelled")?.checked;
   const fromDate = document.getElementById("fFromDate").value;
   const toDate = document.getElementById("fToDate").value;
 
   if (driverId) params.set("driverId", driverId);
   if (lineCode) params.set("lineCode", lineCode);
-  if (status) params.set("status", status);
+  if (onlyCancelled) {
+    params.set("status", "cancelled");
+  } else if (status) {
+    params.set("status", status);
+  }
   if (fromDate) params.set("fromDate", fromDate);
   if (toDate) params.set("toDate", toDate);
   if (!fromDate && !toDate) {
@@ -326,9 +336,29 @@ function openServiceDrawer(service) {
   serviceHandoversListEl.innerHTML = "<li>A carregar transferências...</li>";
   document.getElementById("adjustStatus").value = "";
   document.getElementById("adjustFleetNumber").value = service.fleet_number || "";
+  document.getElementById("handoverToDriverId").value = "";
+  document.getElementById("handoverReasonSup").value = "";
+  document.getElementById("handoverLocationSup").value = "";
   serviceDrawerBackdropEl.classList.remove("hidden");
   serviceDrawerEl.classList.remove("hidden");
   loadServiceDetails(service.id);
+}
+
+function populateSupervisorHandoverDrivers(service) {
+  const selectEl = document.getElementById("handoverToDriverId");
+  if (!selectEl) return;
+  const currentDriverId = Number(service?.driver_id);
+  const options = driversCache
+    .filter(
+      (d) =>
+        d.is_active &&
+        String(d.role || "").toLowerCase() === "driver" &&
+        Number(d.id) !== currentDriverId
+    )
+    .sort((a, b) => String(a.name || "").localeCompare(String(b.name || ""), "pt"))
+    .map((d) => `<option value="${d.id}">${d.name} (Mec ${d.mechanic_number || "-"})</option>`);
+
+  selectEl.innerHTML = `<option value="">— Selecionar motorista —</option>${options.join("")}`;
 }
 
 function renderMiniRouteMap(points) {
@@ -449,10 +479,46 @@ async function loadServiceDetails(serviceId) {
     `Quilómetros: ${data.service.total_km || 0}`,
   ].join("\n");
   document.getElementById("adjustFleetNumber").value = data.service.fleet_number || "";
-  renderMiniRouteMap(data.points || []);
+  initServiceDetailMap();
+  if (serviceDetailRouteLayer) serviceDetailRouteLayer.clearLayers();
+  const executedRoute = (data.points || [])
+    .map((p) => [Number(p.lat), Number(p.lng)])
+    .filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+  if (serviceDetailRouteLayer && executedRoute.length >= 2) {
+    const doneLine = L.polyline(executedRoute, { color: "#2563eb", weight: 4 }).addTo(serviceDetailRouteLayer);
+    serviceDetailRouteMap.fitBounds(doneLine.getBounds(), { padding: [20, 20] });
+  } else if (serviceDetailRouteLayer) {
+    const refPoints = await loadSupervisorReferenceRoute(serviceId);
+    const refLatLngs = refPoints
+      .map((p) => [Number(p.lat), Number(p.lng)])
+      .filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+    if (refLatLngs.length >= 2) {
+      const refLine = L.polyline(refLatLngs, { color: "#f97316", weight: 4, dashArray: "8 8" }).addTo(serviceDetailRouteLayer);
+      serviceDetailRouteMap.fitBounds(refLine.getBounds(), { padding: [20, 20] });
+    }
+  }
+  if (executedRoute.length >= 1) {
+    const firstPoint = data.points?.[0];
+    const lastPoint = data.points?.[data.points.length - 1];
+    const firstTime = firstPoint?.captured_at ? new Date(firstPoint.captured_at).toLocaleString() : "-";
+    const lastTime = lastPoint?.captured_at ? new Date(lastPoint.captured_at).toLocaleString() : "-";
+    serviceRouteTimesEl.textContent = `Início: ${firstTime} | Fim: ${lastTime}`;
+  } else {
+    serviceRouteTimesEl.textContent = "Sem percurso GPS registado.";
+  }
+  setTimeout(() => serviceDetailRouteMap?.invalidateSize(), 80);
   renderHandovers(data.handovers || []);
-  if (data.service.status === "in_progress") forceEndServiceBtn.classList.remove("hidden");
-  else forceEndServiceBtn.classList.add("hidden");
+  populateSupervisorHandoverDrivers(data.service);
+  const inProgress = data.service.status === "in_progress";
+  if (inProgress) {
+    forceEndServiceBtn.classList.remove("hidden");
+    transferServiceBtn.classList.remove("hidden");
+    cancelServiceBtn.classList.remove("hidden");
+  } else {
+    forceEndServiceBtn.classList.add("hidden");
+    transferServiceBtn.classList.add("hidden");
+    cancelServiceBtn.classList.add("hidden");
+  }
 }
 
 async function saveServiceAdjust(event) {
@@ -486,6 +552,7 @@ async function saveServiceAdjust(event) {
   alert("Ajuste guardado com sucesso.");
   closeServiceDrawer();
   await loadServices();
+  await loadLiveServicesMap();
 }
 
 async function forceEndService() {
@@ -505,6 +572,66 @@ async function forceEndService() {
   alert("Servico finalizado com sucesso.");
   closeServiceDrawer();
   await loadServices();
+  await loadLiveServicesMap();
+}
+
+async function cancelServiceBySupervisor() {
+  if (!supToken || !selectedService) return;
+  const confirmCancel = window.confirm(
+    `Anular o serviço n.º ${selectedService.id}? A viagem não ficará como concluída.`
+  );
+  if (!confirmCancel) return;
+
+  const response = await fetch(`${API_BASE}/supervisor/services/${selectedService.id}/cancel`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    alert(data.message || "Erro ao anular servico.");
+    return;
+  }
+  alert("Serviço anulado com sucesso.");
+  closeServiceDrawer();
+  await loadServices();
+  await loadLiveServicesMap();
+}
+
+async function transferServiceBySupervisor() {
+  if (!supToken || !selectedService) return;
+  const toDriverId = Number(document.getElementById("handoverToDriverId").value);
+  const reason = document.getElementById("handoverReasonSup").value.trim();
+  const handoverLocationText = document.getElementById("handoverLocationSup").value.trim();
+  const toFleetNumberText = document.getElementById("adjustFleetNumber").value.trim();
+
+  if (!Number.isFinite(toDriverId) || toDriverId <= 0) {
+    alert("Selecione o motorista de destino para a transferência.");
+    return;
+  }
+  if (reason.length < 3) {
+    alert("Indique um motivo para a transferência.");
+    return;
+  }
+
+  const response = await fetch(`${API_BASE}/supervisor/services/${selectedService.id}/handover`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({
+      toDriverId,
+      reason,
+      handoverLocationText: handoverLocationText || null,
+      toFleetNumber: toFleetNumberText ? Number(toFleetNumberText) : null,
+    }),
+  });
+  const data = await response.json();
+  if (!response.ok) {
+    alert(data.message || "Erro ao transferir serviço.");
+    return;
+  }
+  alert("Serviço transferido com sucesso.");
+  closeServiceDrawer();
+  await loadServices();
+  await loadLiveServicesMap();
 }
 
 async function loginSupervisor(event) {
@@ -625,6 +752,28 @@ function initServiceFilterMode() {
   });
 }
 
+function clearServiceFilters() {
+  const fieldsToClear = ["fDriverId", "fLineCode", "fStatus", "fFromDate", "fToDate", "fOrigin", "fServiceId"];
+  fieldsToClear.forEach((id) => {
+    const el = document.getElementById(id);
+    if (el) el.value = "";
+  });
+  const onlyCancelledEl = document.getElementById("fOnlyCancelled");
+  if (onlyCancelledEl) onlyCancelledEl.checked = false;
+
+  filterMode = "origin";
+  const originBtn = document.getElementById("filterModeOriginBtn");
+  const serviceBtn = document.getElementById("filterModeServiceBtn");
+  const originInput = document.getElementById("fOrigin");
+  const serviceInput = document.getElementById("fServiceId");
+  originBtn?.classList.add("active");
+  serviceBtn?.classList.remove("active");
+  originInput?.classList.remove("hidden");
+  serviceInput?.classList.add("hidden");
+
+  loadServices();
+}
+
 function resolveLineColorHex(rawColor, fallback = "#2563eb") {
   const c = String(rawColor || "").trim();
   if (/^[0-9a-fA-F]{6}$/.test(c)) return `#${c}`;
@@ -652,6 +801,41 @@ function initSupervisorLiveMap() {
   });
   primary.addTo(supLiveMap);
   supLiveMarkersLayer = L.layerGroup().addTo(supLiveMap);
+  supLiveRoutesLayer = L.layerGroup().addTo(supLiveMap);
+}
+
+function initServiceDetailMap() {
+  if (!serviceRouteMiniMapEl || serviceDetailRouteMap) return;
+  serviceRouteMiniMapEl.style.display = "block";
+  serviceRouteMiniMapEl.style.padding = "0";
+  serviceRouteMiniMapEl.style.height = "220px";
+  serviceDetailRouteMap = L.map(serviceRouteMiniMapEl).setView([38.7223, -9.1393], 12);
+  const primary = L.tileLayer(`${API_BASE}/map-tiles/{z}/{x}/{y}.png`, {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap contributors",
+  });
+  const fallback = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+    maxZoom: 20,
+    attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+  });
+  let tileErrors = 0;
+  primary.on("tileerror", () => {
+    tileErrors += 1;
+    if (tileErrors < 4) return;
+    if (serviceDetailRouteMap.hasLayer(primary)) serviceDetailRouteMap.removeLayer(primary);
+    if (!serviceDetailRouteMap.hasLayer(fallback)) fallback.addTo(serviceDetailRouteMap);
+  });
+  primary.addTo(serviceDetailRouteMap);
+  serviceDetailRouteLayer = L.layerGroup().addTo(serviceDetailRouteMap);
+}
+
+async function loadSupervisorReferenceRoute(serviceId) {
+  const response = await fetch(`${API_BASE}/supervisor/services/${serviceId}/reference-route`, {
+    headers: getAuthHeaders(),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok || !Array.isArray(data.points)) return [];
+  return data.points;
 }
 
 function buildSupervisorBusIcon(fleetNumber, lineColor) {
@@ -701,7 +885,9 @@ async function loadLiveServicesMap() {
   }
 
   supLiveMarkersLayer.clearLayers();
+  if (supLiveRoutesLayer) supLiveRoutesLayer.clearLayers();
   const bounds = [];
+  const routeBounds = [];
   list.forEach((svc) => {
     const lat = Number(svc.lat);
     const lng = Number(svc.lng);
@@ -725,8 +911,26 @@ async function loadLiveServicesMap() {
     supLiveServicesListEl.appendChild(card);
   });
 
-  if (bounds.length) {
-    supLiveMap.fitBounds(bounds, { padding: [20, 20], maxZoom: 15 });
+  if (supLiveRoutesLayer) {
+    for (const svc of list) {
+      try {
+        const points = await loadSupervisorReferenceRoute(svc.id);
+        const latLngs = points
+          .map((p) => [Number(p.lat), Number(p.lng)])
+          .filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+        if (latLngs.length < 2) continue;
+        const lineColor = resolveLineColorHex(svc.route_color, "#f97316");
+        L.polyline(latLngs, { color: lineColor, weight: 3, opacity: 0.65 }).addTo(supLiveRoutesLayer);
+        routeBounds.push(...latLngs);
+      } catch (_e) {
+        // ignore
+      }
+    }
+  }
+
+  const allBounds = [...bounds, ...routeBounds];
+  if (allBounds.length) {
+    supLiveMap.fitBounds(allBounds, { padding: [20, 20], maxZoom: 15 });
   }
 }
 
@@ -885,15 +1089,17 @@ async function loadServices(event) {
     completed: filteredData.filter((s) => s.status === "completed").length,
     inProgress: filteredData.filter((s) => s.status === "in_progress").length,
     waiting: filteredData.filter((s) => s.status === "awaiting_handover").length,
+    cancelled: filteredData.filter((s) => s.status === "cancelled").length,
   };
 
   servicesPieEl.style.background = buildPieBackground([
     { value: counts.completed, color: "#16a34a" },
     { value: counts.inProgress, color: "#ea580c" },
     { value: counts.waiting, color: "#7c3aed" },
+    { value: counts.cancelled, color: "#dc2626" },
   ]);
   servicesStatsTextEl.textContent =
-    `Concluídos: ${counts.completed} | Em curso: ${counts.inProgress} | Aguardam transferência: ${counts.waiting}`;
+    `Concluídos: ${counts.completed} | Em curso: ${counts.inProgress} | Aguardam transferência: ${counts.waiting} | Anulados: ${counts.cancelled}`;
 
   // Second chart kept as operational blocks-like summary.
   const total = filteredData.length;
@@ -1727,6 +1933,20 @@ async function loadRosterToday(options = {}) {
 
 document.getElementById("supLoginForm").addEventListener("submit", loginSupervisor);
 document.getElementById("filtersForm").addEventListener("submit", loadServices);
+const clearFiltersBtn = document.getElementById("clearFiltersBtn");
+if (clearFiltersBtn) {
+  clearFiltersBtn.addEventListener("click", clearServiceFilters);
+}
+const onlyCancelledEl = document.getElementById("fOnlyCancelled");
+if (onlyCancelledEl) {
+  onlyCancelledEl.addEventListener("change", () => {
+    const statusInput = document.getElementById("fStatus");
+    if (onlyCancelledEl.checked && statusInput) {
+      statusInput.value = "";
+    }
+    loadServices();
+  });
+}
 document.getElementById("exportBtn").addEventListener("click", exportCsv);
 document.getElementById("exportExcelBtn").addEventListener("click", exportExcelServices);
 document.getElementById("driverCreateForm").addEventListener("submit", createDriver);
@@ -1750,6 +1970,8 @@ document.getElementById("closeServiceDrawerBtn").addEventListener("click", close
 document.getElementById("serviceDrawerBackdrop").addEventListener("click", closeServiceDrawer);
 document.getElementById("serviceAdjustForm").addEventListener("submit", saveServiceAdjust);
 document.getElementById("forceEndServiceBtn").addEventListener("click", forceEndService);
+document.getElementById("transferServiceBtn").addEventListener("click", transferServiceBySupervisor);
+document.getElementById("cancelServiceBtn").addEventListener("click", cancelServiceBySupervisor);
 document.getElementById("logoutBtn").addEventListener("click", logoutSupervisor);
 const openRosterFromServicesBtn = document.getElementById("openRosterFromServicesBtn");
 if (openRosterFromServicesBtn) {
@@ -1787,6 +2009,7 @@ if (liveServiceFilterSelectEl) {
         : currentLiveServices.filter((svc) => String(svc.id) === selectedServiceId);
 
     supLiveMarkersLayer.clearLayers();
+    if (supLiveRoutesLayer) supLiveRoutesLayer.clearLayers();
     supLiveServicesListEl.innerHTML = "";
     const bounds = [];
     filtered.forEach((svc) => {
@@ -1815,6 +2038,23 @@ if (liveServiceFilterSelectEl) {
       supLiveServicesListEl.innerHTML = "<div>Sem serviços em execução neste momento.</div>";
     } else if (bounds.length) {
       supLiveMap.fitBounds(bounds, { padding: [20, 20], maxZoom: 15 });
+    }
+    if (supLiveRoutesLayer && filtered.length) {
+      (async () => {
+        for (const svc of filtered) {
+          try {
+            const points = await loadSupervisorReferenceRoute(svc.id);
+            const latLngs = points
+              .map((p) => [Number(p.lat), Number(p.lng)])
+              .filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+            if (latLngs.length < 2) continue;
+            const lineColor = resolveLineColorHex(svc.route_color, "#f97316");
+            L.polyline(latLngs, { color: lineColor, weight: 3, opacity: 0.65 }).addTo(supLiveRoutesLayer);
+          } catch (_e) {
+            // ignore
+          }
+        }
+      })();
     }
   });
 }

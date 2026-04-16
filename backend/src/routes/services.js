@@ -39,7 +39,7 @@ async function getActiveSegment(serviceId) {
   return segmentResult.rows[0] || null;
 }
 
-async function closeActiveSegment(serviceId) {
+async function closeActiveSegment(serviceId, finalStatus = "completed") {
   const activeSegment = await getActiveSegment(serviceId);
   if (!activeSegment) return null;
 
@@ -59,11 +59,11 @@ async function closeActiveSegment(serviceId) {
 
   await db.query(
     `UPDATE service_segments
-     SET status = 'completed',
+     SET status = $2,
          ended_at = NOW(),
-         km_segment = $2
+         km_segment = $3
      WHERE id = $1`,
-    [activeSegment.id, kmSegment]
+    [activeSegment.id, finalStatus, kmSegment]
   );
 
   return { ...activeSegment, kmSegment };
@@ -686,6 +686,32 @@ router.get("/:serviceId/reference-route", async (req, res) => {
   }
 });
 
+router.get("/reference-route-preview/by-header", async (req, res) => {
+  const lineCode = String(req.query.lineCode || "").trim();
+  const serviceSchedule = String(req.query.serviceSchedule || "").trim();
+  if (!lineCode || !serviceSchedule) {
+    return res.status(400).json({ message: "Indique lineCode e serviceSchedule." });
+  }
+  try {
+    const bestTrip = await findBestTripForLine(lineCode, serviceSchedule);
+    const tripId = bestTrip?.trip_id || null;
+    if (!tripId) {
+      return res.status(404).json({ message: "Sem rota GTFS para esta linha/horario." });
+    }
+    const shapePoints = await getShapePointsByTripId(tripId);
+    const stops = await getStopsByTripId(tripId);
+    return res.json({
+      tripId,
+      lineCode,
+      serviceSchedule,
+      points: shapePoints,
+      stops,
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao obter rota de referencia." });
+  }
+});
+
 router.post("/:serviceId/handover", async (req, res) => {
   const { serviceId } = req.params;
   const { toMechanicNumber, toFleetNumber, reason, notes, handoverLocationText } = req.body;
@@ -951,6 +977,84 @@ router.post("/:serviceId/end", async (req, res) => {
     return res.json(updated.rows[0]);
   } catch (error) {
     return res.status(500).json({ message: "Erro ao finalizar viagem." });
+  }
+});
+
+router.post("/:serviceId/cancel", async (req, res) => {
+  const { serviceId } = req.params;
+
+  try {
+    const serviceResult = await db.query(
+      `SELECT id, status, planned_service_id
+       FROM services
+       WHERE id = $1 AND driver_id = $2`,
+      [serviceId, req.user.id]
+    );
+
+    if (serviceResult.rowCount === 0) {
+      return res.status(404).json({ message: "Servico nao encontrado." });
+    }
+
+    if (serviceResult.rows[0].status !== "in_progress") {
+      return res.status(409).json({ message: "Apenas servicos em curso podem ser anulados." });
+    }
+
+    await closeActiveSegment(serviceId, "cancelled");
+
+    const pointsResult = await db.query(
+      `SELECT lat, lng, captured_at
+       FROM service_points
+       WHERE service_id = $1
+       ORDER BY captured_at ASC`,
+      [serviceId]
+    );
+
+    const points = pointsResult.rows.map((p) => ({
+      lat: Number(p.lat),
+      lng: Number(p.lng),
+      capturedAt: p.captured_at,
+    }));
+    const totalKm = calculatePathDistance(points);
+    const routeGeoJSON = {
+      type: "Feature",
+      geometry: {
+        type: "LineString",
+        coordinates: points.map((p) => [p.lng, p.lat]),
+      },
+      properties: {
+        points: points.length,
+      },
+    };
+
+    const updated = await db.query(
+      `UPDATE services
+       SET status = 'cancelled',
+           ended_at = NOW(),
+           total_km = $2,
+           route_geojson = $3
+       WHERE id = $1
+       RETURNING id, planned_service_id, gtfs_trip_id, plate_number, service_schedule, line_code, fleet_number,
+                 status, started_at, ended_at, total_km, route_geojson, route_deviation_m, is_off_route`,
+      [serviceId, totalKm, JSON.stringify(routeGeoJSON)]
+    );
+
+    if (serviceResult.rows[0]?.planned_service_id) {
+      await db.query(
+        `UPDATE daily_roster
+         SET status = 'pending'
+         WHERE driver_id = $1
+           AND planned_service_id = $2
+           AND service_date = CURRENT_DATE`,
+        [req.user.id, serviceResult.rows[0].planned_service_id]
+      );
+    }
+
+    return res.json({
+      message: "Viagem anulada com sucesso. Pode selecionar outro servico.",
+      service: updated.rows[0],
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao anular viagem." });
   }
 });
 
