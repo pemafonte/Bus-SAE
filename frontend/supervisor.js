@@ -90,6 +90,7 @@ let supLiveRefreshInterval = null;
 let currentLiveServices = [];
 let serviceDetailRouteMap = null;
 let serviceDetailRouteLayer = null;
+const LIVE_MAP_REFRESH_MS = 5000;
 
 function labelEstadoExecucaoServicoPt(code) {
   const k = String(code || "").toLowerCase();
@@ -939,7 +940,7 @@ function startLiveMapAutoRefresh() {
   supLiveRefreshInterval = setInterval(() => {
     if (!supToken) return;
     loadLiveServicesMap();
-  }, 15000);
+  }, LIVE_MAP_REFRESH_MS);
 }
 
 async function loadConflictAlerts() {

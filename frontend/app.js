@@ -72,6 +72,9 @@ let watchId = null;
 let selectedPlannedServiceId = null;
 let selectedPlannedFleetNumber = "";
 let authenticatedUser = null;
+let gpsPointQueue = [];
+let gpsFlushInProgress = false;
+let gpsSaveFailureWarned = false;
 const AUTH_SESSION_KEY = "auth_session";
 const conflictNotifiedPlannedServiceIds = new Set();
 
@@ -123,6 +126,8 @@ cancelTripBtn.disabled = true;
 
 function clearActiveServiceState() {
   activeServiceId = null;
+  gpsPointQueue = [];
+  gpsSaveFailureWarned = false;
   endTripBtn.disabled = true;
   handoverBtn.disabled = true;
   cancelTripBtn.disabled = true;
@@ -133,6 +138,41 @@ function clearActiveServiceState() {
   if (activeBusMarker) {
     map.removeLayer(activeBusMarker);
     activeBusMarker = null;
+  }
+}
+
+async function flushGpsPointQueue() {
+  if (gpsFlushInProgress || !gpsPointQueue.length || !activeServiceId || !token) return;
+  gpsFlushInProgress = true;
+  try {
+    while (gpsPointQueue.length && activeServiceId && token) {
+      const nextPoint = gpsPointQueue[0];
+      const pointResponse = await fetch(`${API_BASE}/services/${activeServiceId}/points`, {
+        method: "POST",
+        headers: authHeaders(),
+        body: JSON.stringify(nextPoint),
+      });
+      const pointData = await pointResponse.json().catch(() => ({}));
+      if (!pointResponse.ok) {
+        if (!gpsSaveFailureWarned) {
+          gpsSaveFailureWarned = true;
+          alert("A ligação GPS está instável. Vamos continuar a tentar guardar os pontos do percurso.");
+        }
+        break;
+      }
+      gpsPointQueue.shift();
+      gpsSaveFailureWarned = false;
+      if (pointData.routeCheck) {
+        const offRouteText = pointData.routeCheck.isOffRoute ? "Fora da rota" : "Dentro da rota";
+        const deviationText =
+          pointData.routeCheck.deviationMeters == null ? "-" : `${pointData.routeCheck.deviationMeters} m`;
+        const currentSummary = summaryEl.textContent.split("\n").filter((line) => !line.startsWith("Rota:"));
+        currentSummary.push(`Rota: ${offRouteText} | Desvio: ${deviationText}`);
+        setSummary(currentSummary.join("\n"));
+      }
+    }
+  } finally {
+    gpsFlushInProgress = false;
   }
 }
 
@@ -324,6 +364,8 @@ function logoutDriver() {
 
   token = "";
   authenticatedUser = null;
+  gpsPointQueue = [];
+  gpsSaveFailureWarned = false;
   sessionStorage.removeItem(AUTH_SESSION_KEY);
   activeServiceId = null;
   selectedPlannedServiceId = null;
@@ -426,6 +468,8 @@ async function startTrip(event) {
   }
 
   activeServiceId = data.id;
+  gpsPointQueue = [];
+  gpsSaveFailureWarned = false;
   endTripBtn.disabled = false;
   handoverBtn.disabled = false;
   cancelTripBtn.disabled = false;
@@ -530,21 +574,8 @@ function startLocationTracking() {
       map.setView([lat, lng], 15);
 
       if (!activeServiceId || !token) return;
-
-      const pointResponse = await fetch(`${API_BASE}/services/${activeServiceId}/points`, {
-        method: "POST",
-        headers: authHeaders(),
-        body: JSON.stringify({ lat, lng }),
-      });
-      const pointData = await pointResponse.json().catch(() => ({}));
-      if (pointResponse.ok && pointData.routeCheck) {
-        const offRouteText = pointData.routeCheck.isOffRoute ? "Fora da rota" : "Dentro da rota";
-        const deviationText =
-          pointData.routeCheck.deviationMeters == null ? "-" : `${pointData.routeCheck.deviationMeters} m`;
-        const currentSummary = summaryEl.textContent.split("\n").filter((line) => !line.startsWith("Rota:"));
-        currentSummary.push(`Rota: ${offRouteText} | Desvio: ${deviationText}`);
-        setSummary(currentSummary.join("\n"));
-      }
+      gpsPointQueue.push({ lat, lng });
+      await flushGpsPointQueue();
     },
     (error) => {
       console.error(error);
@@ -560,6 +591,14 @@ function startLocationTracking() {
 
 async function endTrip() {
   if (!activeServiceId || !token) return;
+
+  await flushGpsPointQueue();
+  if (gpsPointQueue.length) {
+    alert(
+      "Ainda existem pontos GPS por guardar. Verifique a ligação de dados/GPS e aguarde alguns segundos antes de finalizar."
+    );
+    return;
+  }
 
   const response = await fetch(`${API_BASE}/services/${activeServiceId}/end`, {
     method: "POST",

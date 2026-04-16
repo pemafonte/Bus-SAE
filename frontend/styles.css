@@ -901,6 +901,14 @@ pre {
   background: #fee2e2;
 }
 
+.app-signature {
+  margin: 18px auto 10px;
+  text-align: center;
+  font-size: 12px;
+  color: #6b7280;
+  padding: 4px 10px;
+}
+
 .planned-service-btn {
   text-align: left;
 }
