@@ -41,6 +41,25 @@ function resolveGtfsRouteCandidates(lineCode) {
   }
   const noLeadingZeros = collapsed.replace(/^0+/, "") || "0";
   if (noLeadingZeros !== collapsed) set.add(noLeadingZeros);
+  const digitsOnlyLoose = raw.replace(/\D/g, "");
+  if (digitsOnlyLoose) {
+    set.add(digitsOnlyLoose);
+    const noLeadingZerosDigits = digitsOnlyLoose.replace(/^0+/, "") || "0";
+    set.add(noLeadingZerosDigits);
+    for (let i = 1; i < digitsOnlyLoose.length; i += 1) {
+      set.add(digitsOnlyLoose.slice(i));
+    }
+  }
+  const alnumTokens = raw
+    .split(/[^A-Za-z0-9]+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+  alnumTokens.forEach((token) => {
+    set.add(token);
+    set.add(token.toLowerCase());
+    const tokenDigits = token.replace(/\D/g, "");
+    if (tokenDigits) set.add(tokenDigits.replace(/^0+/, "") || "0");
+  });
   return [...set].filter(Boolean);
 }
 
@@ -128,6 +147,26 @@ async function findBestTripForLine(lineCode, serviceSchedule) {
            OR regexp_replace(TRIM(LOWER(COALESCE(r.route_id, ''))), '[[:space:]]+', '', 'g') = ANY($1::text[])`
         ),
         [normUnique, directionHint]
+      );
+    }
+  }
+
+  if (!tripsResult.rows.length) {
+    const likeCandidates = [...new Set(routeCandidates)]
+      .map((c) => String(c || "").trim())
+      .filter((c) => c.length >= 1);
+    if (likeCandidates.length) {
+      tripsResult = await db.query(
+        baseSql.replace(
+          "%WHERE%",
+          `EXISTS (
+             SELECT 1
+             FROM unnest($1::text[]) AS cand(value)
+             WHERE TRIM(COALESCE(r.route_short_name, '')) ILIKE '%' || cand.value || '%'
+                OR TRIM(COALESCE(r.route_id, '')) ILIKE '%' || cand.value || '%'
+           )`
+        ),
+        [likeCandidates, directionHint]
       );
     }
   }

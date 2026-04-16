@@ -540,7 +540,11 @@ async function loadReferenceRoute(serviceId) {
 async function loadReferenceRoutePreview(lineCode, serviceSchedule) {
   const lc = String(lineCode || "").trim();
   const ss = String(serviceSchedule || "").trim();
-  if (!lc || !ss || !token) return;
+  if (!lc || !ss || !token) {
+    referenceRoutePolyline.setLatLngs([]);
+    gtfsStopsLayer.clearLayers();
+    return;
+  }
   const response = await fetch(
     `${API_BASE}/services/reference-route-preview/by-header?lineCode=${encodeURIComponent(lc)}&serviceSchedule=${encodeURIComponent(ss)}`,
     {
@@ -548,11 +552,33 @@ async function loadReferenceRoutePreview(lineCode, serviceSchedule) {
     }
   );
   const data = await response.json().catch(() => ({}));
-  if (!response.ok || !data.points?.length) return;
+  if (!response.ok || !data.points?.length) {
+    referenceRoutePolyline.setLatLngs([]);
+    gtfsStopsLayer.clearLayers();
+    return;
+  }
   const latLngs = data.points.map((p) => [p.lat, p.lng]);
   referenceRoutePolyline.setLatLngs(latLngs);
   if (routePolyline.getLatLngs().length === 0 && latLngs.length > 1) {
     map.fitBounds(referenceRoutePolyline.getBounds(), { padding: [20, 20] });
+  }
+  gtfsStopsLayer.clearLayers();
+  if (Array.isArray(data.stops) && data.stops.length) {
+    data.stops.forEach((stop) => {
+      if (typeof stop.lat !== "number" || typeof stop.lng !== "number") return;
+      const marker = L.circleMarker([stop.lat, stop.lng], {
+        radius: 5,
+        color: "#1f2937",
+        weight: 1,
+        fillColor: "#facc15",
+        fillOpacity: 0.95,
+      });
+      const timeText = stop.departureTime || stop.arrivalTime || "-";
+      marker.bindPopup(
+        `<strong>Paragem ${stop.sequence ?? "-"}</strong><br/>${stop.stopName || "-"}<br/>Horário: ${timeText}`
+      );
+      gtfsStopsLayer.addLayer(marker);
+    });
   }
 }
 

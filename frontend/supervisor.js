@@ -91,6 +91,7 @@ let currentLiveServices = [];
 let serviceDetailRouteMap = null;
 let serviceDetailRouteLayer = null;
 const LIVE_MAP_REFRESH_MS = 5000;
+let supLiveMapUserAdjustedView = false;
 
 function labelEstadoExecucaoServicoPt(code) {
   const k = String(code || "").toLowerCase();
@@ -803,6 +804,12 @@ function initSupervisorLiveMap() {
   primary.addTo(supLiveMap);
   supLiveMarkersLayer = L.layerGroup().addTo(supLiveMap);
   supLiveRoutesLayer = L.layerGroup().addTo(supLiveMap);
+  supLiveMap.on("zoomstart", () => {
+    supLiveMapUserAdjustedView = true;
+  });
+  supLiveMap.on("dragstart", () => {
+    supLiveMapUserAdjustedView = true;
+  });
 }
 
 function initServiceDetailMap() {
@@ -930,7 +937,7 @@ async function loadLiveServicesMap() {
   }
 
   const allBounds = [...bounds, ...routeBounds];
-  if (allBounds.length) {
+  if (allBounds.length && !supLiveMapUserAdjustedView) {
     supLiveMap.fitBounds(allBounds, { padding: [20, 20], maxZoom: 15 });
   }
 }
