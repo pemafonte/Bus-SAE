@@ -75,6 +75,7 @@ let authenticatedUser = null;
 let gpsPointQueue = [];
 let gpsFlushInProgress = false;
 let gpsSaveFailureWarned = false;
+let activeServiceSyncTimer = null;
 const AUTH_SESSION_KEY = "auth_session";
 const conflictNotifiedPlannedServiceIds = new Set();
 
@@ -124,7 +125,52 @@ let activeBusMarker = null;
 handoverBtn.disabled = true;
 cancelTripBtn.disabled = true;
 
+function stopActiveServiceSync() {
+  if (activeServiceSyncTimer) {
+    clearInterval(activeServiceSyncTimer);
+    activeServiceSyncTimer = null;
+  }
+}
+
+function startActiveServiceSync() {
+  stopActiveServiceSync();
+  activeServiceSyncTimer = setInterval(() => {
+    syncActiveServiceFromServer();
+  }, 45_000);
+}
+
+async function syncActiveServiceFromServer() {
+  if (!token) return;
+  const prevId = activeServiceId;
+  if (!prevId) return;
+  try {
+    const response = await fetch(`${API_BASE}/services/active`, { headers: authHeaders() });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) return;
+    if (data.activeService && Number(data.activeService.id) === Number(prevId)) return;
+    if (!data.activeService) {
+      stopActiveServiceSync();
+      await refreshDriverNotifications();
+      clearActiveServiceState();
+      routePolyline.setLatLngs([]);
+      referenceRoutePolyline.setLatLngs([]);
+      gtfsStopsLayer.clearLayers();
+      setSummary("Sem viagem em curso.");
+      alert(
+        "A viagem já não está ativa (por exemplo, encerramento automático pelo sistema após o horário de escala). Consulte as notificações."
+      );
+      showDriverTab("driverStepSelect");
+      await loadTodayServices();
+      await loadPendingHandovers();
+      await refreshHistory();
+    }
+  } catch (_e) {
+    /* rede: ignorar */
+  }
+}
+
 function clearActiveServiceState() {
+  stopActiveServiceSync();
   activeServiceId = null;
   gpsPointQueue = [];
   gpsSaveFailureWarned = false;
@@ -362,6 +408,7 @@ function logoutDriver() {
   const confirmed = window.confirm("Tem a certeza de que deseja terminar a sessão?");
   if (!confirmed) return;
 
+  stopActiveServiceSync();
   token = "";
   authenticatedUser = null;
   gpsPointQueue = [];
@@ -437,6 +484,7 @@ async function restoreActiveService() {
   }
   await loadReferenceRoute(active.id);
   startLocationTracking();
+  startActiveServiceSync();
   showDriverTab("driverStepMap");
 }
 
@@ -496,6 +544,7 @@ async function startTrip(event) {
 
   await loadReferenceRoute(data.id);
   startLocationTracking();
+  startActiveServiceSync();
   showDriverTab("driverStepMap");
 }
 
@@ -876,6 +925,7 @@ async function loadPendingHandovers() {
       );
       await loadReferenceRoute(item.service_id);
       startLocationTracking();
+      startActiveServiceSync();
       await loadPendingHandovers();
       await refreshHistory();
       alert("Serviço assumido com sucesso.");

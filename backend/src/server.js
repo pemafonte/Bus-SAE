@@ -9,6 +9,7 @@ const supervisorRoutes = require("./routes/supervisor");
 const gtfsRoutes = require("./routes/gtfs");
 const viewerRoutes = require("./routes/viewer");
 const { ensureSystemSupervisor } = require("./bootstrap/systemSupervisor");
+const { startAutoCloseStaleServicesLoop } = require("./jobs/autoCloseStaleServices");
 
 const app = express();
 
@@ -102,6 +103,7 @@ async function startServer() {
 
   app.listen(port, () => {
     console.log(`API ativa em http://localhost:${port}`);
+    startAutoCloseStaleServicesLoop();
   });
 }
 

@@ -2,12 +2,10 @@ const express = require("express");
 const db = require("../db");
 const authMiddleware = require("../middleware/auth");
 const { calculatePathDistance, minDistanceToPolylineMeters } = require("../utils/distance");
-const {
-  parseServiceScheduleStartMinutes,
-  findBestTripForLine,
-  getShapePointsByTripId,
-  getStopsByTripId,
-} = require("../utils/gtfsTripResolve");
+const { findBestTripForLine, getShapePointsByTripId, getStopsByTripId } = require("../utils/gtfsTripResolve");
+const { parseServiceScheduleRangeMinutes, scheduleRangesOverlap } = require("../utils/serviceSchedule");
+const { resolveTotalKmWithPlannedFallback } = require("../utils/plannedKmFallback");
+const { getRosterServiceDateForExecution } = require("../utils/rosterServiceDate");
 
 const router = express.Router();
 router.use(authMiddleware);
@@ -67,28 +65,6 @@ async function closeActiveSegment(serviceId, finalStatus = "completed") {
   );
 
   return { ...activeSegment, kmSegment };
-}
-
-/** Intervalo [start,end) em minutos desde meia-noite; suporta janelas que atravessam meia-noite. */
-function parseServiceScheduleRangeMinutes(serviceSchedule) {
-  const text = String(serviceSchedule || "").trim();
-  if (!text) return null;
-  const rangeMatch = text.match(/(\d{1,2})\s*:\s*(\d{2})\s*-\s*(\d{1,2})\s*:\s*(\d{2})/);
-  if (rangeMatch) {
-    let start = Number(rangeMatch[1]) * 60 + Number(rangeMatch[2]);
-    let end = Number(rangeMatch[3]) * 60 + Number(rangeMatch[4]);
-    if (Number.isNaN(start) || Number.isNaN(end)) return null;
-    if (end <= start) end += 24 * 60;
-    return { start, end };
-  }
-  const start = parseServiceScheduleStartMinutes(text);
-  if (start == null) return null;
-  return { start, end: start + 4 * 60 };
-}
-
-function scheduleRangesOverlap(a, b) {
-  if (!a || !b) return false;
-  return a.start < b.end && b.start < a.end;
 }
 
 router.get("/", async (req, res) => {
@@ -910,7 +886,7 @@ router.post("/:serviceId/end", async (req, res) => {
 
   try {
     const serviceResult = await db.query(
-      `SELECT id, status, planned_service_id FROM services
+      `SELECT id, status, planned_service_id, started_at FROM services
        WHERE id = $1 AND driver_id = $2`,
       [serviceId, req.user.id]
     );
@@ -939,7 +915,11 @@ router.post("/:serviceId/end", async (req, res) => {
       capturedAt: p.captured_at,
     }));
 
-    const totalKm = calculatePathDistance(points);
+    const totalKmGps = calculatePathDistance(points);
+    const totalKm = await resolveTotalKmWithPlannedFallback(
+      totalKmGps,
+      serviceResult.rows[0].planned_service_id
+    );
     const routeGeoJSON = {
       type: "Feature",
       geometry: {
@@ -964,14 +944,28 @@ router.post("/:serviceId/end", async (req, res) => {
     );
 
     if (serviceResult.rows[0]?.planned_service_id) {
-      await db.query(
-        `UPDATE daily_roster
-         SET status = 'completed'
-         WHERE driver_id = $1
-           AND planned_service_id = $2
-           AND service_date = CURRENT_DATE`,
-        [req.user.id, serviceResult.rows[0].planned_service_id]
+      let rosterDay = await getRosterServiceDateForExecution(
+        req.user.id,
+        serviceResult.rows[0].planned_service_id,
+        serviceResult.rows[0].started_at
       );
+      if (!rosterDay) {
+        const rosterDayRes = await db.query(
+          `SELECT ($1::timestamptz AT TIME ZONE 'Europe/Lisbon')::date AS d`,
+          [serviceResult.rows[0].started_at]
+        );
+        rosterDay = rosterDayRes.rows[0]?.d;
+      }
+      if (rosterDay) {
+        await db.query(
+          `UPDATE daily_roster
+           SET status = 'completed'
+           WHERE driver_id = $1
+             AND planned_service_id = $2
+             AND service_date = $3`,
+          [req.user.id, serviceResult.rows[0].planned_service_id, rosterDay]
+        );
+      }
     }
 
     return res.json(updated.rows[0]);

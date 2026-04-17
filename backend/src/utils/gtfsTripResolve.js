@@ -14,11 +14,33 @@ function parseServiceScheduleStartMinutes(serviceSchedule) {
 
 function parseGtfsTimeToMinutes(gtfsTime) {
   if (!gtfsTime || !String(gtfsTime).includes(":")) return null;
-  const [h, m] = String(gtfsTime).split(":");
+  const [h, m] = String(gtfsTime).trim().split(":");
   const hh = Number(h);
   const mm = Number(m);
   if (Number.isNaN(hh) || Number.isNaN(mm)) return null;
   return hh * 60 + mm;
+}
+
+/** Última paragem do trip: minutos desde a meia-noite do «service day» GTFS (pode ultrapassar 24h). */
+async function getTripTerminusMinutes(tripId) {
+  if (!tripId) return null;
+  const result = await db.query(
+    `SELECT st.departure_time, st.arrival_time
+     FROM gtfs_stop_times st
+     WHERE st.trip_id = $1
+     ORDER BY st.stop_sequence DESC NULLS LAST
+     LIMIT 1`,
+    [tripId]
+  );
+  if (!result.rowCount) return null;
+  const row = result.rows[0];
+  const raw =
+    row.departure_time && String(row.departure_time).trim()
+      ? row.departure_time
+      : row.arrival_time && String(row.arrival_time).trim()
+        ? row.arrival_time
+        : null;
+  return parseGtfsTimeToMinutes(raw);
 }
 
 function resolveGtfsRouteCandidates(lineCode) {
@@ -221,6 +243,8 @@ async function getStopsByTripId(tripId) {
 
 module.exports = {
   parseServiceScheduleStartMinutes,
+  parseGtfsTimeToMinutes,
+  getTripTerminusMinutes,
   findBestTripForLine,
   getShapePointsByTripId,
   getStopsByTripId,

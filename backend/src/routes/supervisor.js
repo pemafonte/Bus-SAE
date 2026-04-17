@@ -9,6 +9,7 @@ const { OVERVIEW_TODAY_SQL } = require("../utils/overviewToday");
 const { serviceActivityLisbonDayFilter } = require("../utils/serviceListFilters");
 const { findBestTripForLine, getShapePointsByTripId, getStopsByTripId } = require("../utils/gtfsTripResolve");
 const { matchGpsPointsToGtfsStops } = require("../utils/stopPassageMatch");
+const { resolveTotalKmWithPlannedFallback } = require("../utils/plannedKmFallback");
 
 /** Mudar ao alterar mensagens/lógica do PATCH /roster/:id/reassign (diagnóstico de deploy). */
 const ROSTER_REASSIGN_API_REVISION = "20260412g";
@@ -2310,7 +2311,8 @@ router.post("/services/:serviceId/force-end", async (req, res) => {
       lat: Number(p.lat),
       lng: Number(p.lng),
     }));
-    const totalKm = calculatePathDistance(points);
+    const totalKmGps = calculatePathDistance(points);
+    const totalKm = await resolveTotalKmWithPlannedFallback(totalKmGps, current.rows[0].planned_service_id);
 
     const updated = await db.query(
       `UPDATE services
