@@ -23,18 +23,42 @@ MVP com:
 
 ## 1) Base de dados
 
-Crie base de dados local e execute o schema:
+O ficheiro `database/schema.sql` é **idempotente** (só `CREATE TABLE IF NOT EXISTS` e `ALTER ... ADD COLUMN IF NOT EXISTS`). Pode ser reaplicado **sem apagar** motoristas, escalas nem histórico de serviços.
 
-1. Criar DB `bus_platform`
-2. Executar `database/schema.sql`
+### Desenvolvimento com Docker (recomendado — dados persistentes)
 
-Exemplo (psql):
+Na raiz do projecto:
 
-```sql
-CREATE DATABASE bus_platform;
-\c bus_platform;
-\i database/schema.sql
+```bash
+docker compose up -d
 ```
+
+Isto cria o PostgreSQL com um **volume Docker** (`bus_platform_pgdata`). Os dados mantêm-se entre `git pull`, alterações ao código e reinícios do contentor. **Evite** `docker compose down -v` (o `-v` apaga o volume e perde tudo).
+
+Configure `backend/.env` com:
+
+```env
+DATABASE_URL=postgresql://postgres:postgres@localhost:5432/bus_platform
+```
+
+Aplicar o schema (primeira vez ou após novas colunas/tabelas no repositório):
+
+```bash
+cd backend
+npm run db:apply
+```
+
+### Sem Docker (PostgreSQL já instalado)
+
+1. Criar a base `bus_platform`
+2. `cd backend && npm run db:apply` **ou** em psql: `\i database/schema.sql`
+
+### Produção
+
+- Use uma instância PostgreSQL **dedicada** (servidor ou serviço gerido). O `DATABASE_URL` no `backend/.env` do servidor aponta para essa instância; **não** recrie a base em cada deploy.
+- O deploy por SSH **não** copia o `.env` — a ligação à BD mantém-se.
+- Para backups: `pg_dump` periódico (ex.: diário) para ficheiro fora do servidor de aplicações. No Windows, com `pg_dump` no PATH: `.\scripts\backup-database.ps1`.
+- Nunca execute `DROP DATABASE`, `TRUNCATE` em tabelas de negócio ou `docker compose down -v` contra a BD de produção.
 
 ## 2) Backend
 
@@ -150,6 +174,8 @@ Configure no GitHub **Settings → Secrets and variables → Actions**:
 | `DEPLOY_POST_COMMAND` | *(opcional)* Uma linha a correr na raiz do projecto após `npm ci`, ex.: `pm2 restart bus-api` ou `sudo systemctl restart nome-do-servico` |
 
 No servidor, crie uma vez o ficheiro `backend/.env` de produção (não vai no Git). O rsync **não** sobrescreve `.env`.
+
+Após cada deploy que inclua alterações em `database/schema.sql`, pode correr no servidor (na pasta do projecto) `cd backend && npm run db:apply` para aplicar novas tabelas/colunas **sem** apagar dados existentes.
 
 Repositório local:
 
