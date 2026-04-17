@@ -59,6 +59,12 @@ router.post("/register", async (req, res) => {
   }
 });
 
+/** Mesma lógica que no supervisor: só dígitos para comparar n.º mecanográfico. */
+function mechanicDigits(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  return digits || null;
+}
+
 router.post("/login", async (req, res) => {
   const { username, password } = req.body;
 
@@ -68,12 +74,26 @@ router.post("/login", async (req, res) => {
 
   try {
     const normalizedUsername = String(username).trim();
-    const result = await db.query(
+    let result = await db.query(
       `SELECT id, name, username, email, mechanic_number, role, is_active, password_hash
        FROM users
-       WHERE LOWER(username) = LOWER($1)`,
+       WHERE LOWER(TRIM(username)) = LOWER($1)`,
       [normalizedUsername]
     );
+
+    if (result.rowCount === 0) {
+      const mecDigits = mechanicDigits(normalizedUsername);
+      if (mecDigits) {
+        result = await db.query(
+          `SELECT id, name, username, email, mechanic_number, role, is_active, password_hash
+           FROM users
+           WHERE mechanic_number IS NOT NULL
+             AND NULLIF(regexp_replace(TRIM(mechanic_number), '\\D', '', 'g'), '') IS NOT NULL
+             AND (NULLIF(regexp_replace(TRIM(mechanic_number), '\\D', '', 'g'), ''))::bigint = $1::bigint`,
+          [mecDigits]
+        );
+      }
+    }
 
     if (result.rowCount === 0) {
       return res.status(401).json({ message: "Credenciais invalidas." });

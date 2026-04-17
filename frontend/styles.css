@@ -901,12 +901,20 @@ pre {
   background: #fee2e2;
 }
 
+/* Assinatura (motorista, supervisor, visualização): canto inferior esquerdo, verde */
 .app-signature {
-  margin: 18px auto 10px;
-  text-align: center;
+  position: fixed;
+  bottom: 12px;
+  left: 12px;
+  right: auto;
+  margin: 0;
+  max-width: min(440px, calc(100vw - 24px));
+  text-align: left;
   font-size: 12px;
-  color: #6b7280;
-  padding: 4px 10px;
+  color: #15803d;
+  font-weight: 600;
+  z-index: 15;
+  padding: 8px 12px;
 }
 
 .planned-service-btn {

@@ -22,7 +22,13 @@
         <section class="card login-card-small">
           <h2>Início de sessão</h2>
           <form id="loginForm" class="login-compact-form">
-            <input id="loginUsername" type="text" placeholder="Nome de utilizador" required />
+            <input
+              id="loginUsername"
+              type="text"
+              placeholder="Nome de utilizador ou n.º mecanográfico"
+              required
+              autocomplete="username"
+            />
             <input id="loginPassword" type="password" placeholder="Palavra-passe" required />
             <button type="submit">Entrar</button>
           </form>
