@@ -46,6 +46,10 @@ async function ensurePlannedServiceLocationColumns() {
   );
 }
 
+async function ensureUsersEmailNullable() {
+  await db.query(`ALTER TABLE users ALTER COLUMN email DROP NOT NULL`);
+}
+
 function buildFallbackEmail(username, mechanicNumber) {
   const safeUser = String(username || "user").replace(/[^a-zA-Z0-9._-]/g, "").toLowerCase() || "user";
   const safeMec = String(mechanicNumber || "sem-mec").replace(/[^a-zA-Z0-9._-]/g, "");
@@ -1134,6 +1138,7 @@ router.post("/drivers", async (req, res) => {
     return res.status(400).json({ message: "Preencha nome, username, numero mecanografico e password." });
   }
   try {
+    await ensureUsersEmailNullable();
     const bcrypt = require("bcryptjs");
     const hash = await bcrypt.hash(password, 10);
     const normalizedEmail = String(email || "").trim() || null;
@@ -1339,6 +1344,7 @@ router.post("/drivers/import", async (req, res) => {
   }
 
   const bcrypt = require("bcryptjs");
+  await ensureUsersEmailNullable();
   let inserted = 0;
   let updated = 0;
   const errors = [];
@@ -1433,7 +1439,9 @@ router.post("/drivers/import", async (req, res) => {
       const message =
         error?.code === "23505"
           ? "Conflito de username/email/mecanografico."
-          : "Erro inesperado ao processar a linha.";
+          : error?.code === "23502" && error?.column === "email"
+            ? "Base de dados ainda exige email. Execute a atualizacao que torna email opcional."
+            : `Erro inesperado ao processar a linha${error?.code ? ` (${error.code})` : ""}.`;
       errors.push(`Linha ${line}: ${message}`);
       rowReports.push({
         line,
