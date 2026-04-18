@@ -1135,27 +1135,13 @@ router.post("/drivers", async (req, res) => {
     const bcrypt = require("bcryptjs");
     const hash = await bcrypt.hash(password, 10);
     const normalizedEmail = String(email || "").trim() || null;
-    try {
-      const result = await db.query(
-        `INSERT INTO users (name, username, email, mechanic_number, company_name, is_active, role, password_hash)
-         VALUES ($1, $2, $3, $4, $5, $6, 'driver', $7)
-         RETURNING id, name, username, email, mechanic_number, company_name, is_active, role`,
-        [name, username, normalizedEmail, mechanicNumber, companyName || null, isActive !== false, hash]
-      );
-      return res.status(201).json(result.rows[0]);
-    } catch (innerError) {
-      if (innerError?.code === "23502" && innerError?.column === "email" && !normalizedEmail) {
-        const fallbackEmail = buildFallbackEmail(username, mechanicNumber);
-        const fallbackResult = await db.query(
-          `INSERT INTO users (name, username, email, mechanic_number, company_name, is_active, role, password_hash)
-           VALUES ($1, $2, $3, $4, $5, $6, 'driver', $7)
-           RETURNING id, name, username, email, mechanic_number, company_name, is_active, role`,
-          [name, username, fallbackEmail, mechanicNumber, companyName || null, isActive !== false, hash]
-        );
-        return res.status(201).json(fallbackResult.rows[0]);
-      }
-      throw innerError;
-    }
+    const result = await db.query(
+      `INSERT INTO users (name, username, email, mechanic_number, company_name, is_active, role, password_hash)
+       VALUES ($1, $2, $3, $4, $5, $6, 'driver', $7)
+       RETURNING id, name, username, email, mechanic_number, company_name, is_active, role`,
+      [name, username, normalizedEmail, mechanicNumber, companyName || null, isActive !== false, hash]
+    );
+    return res.status(201).json(result.rows[0]);
   } catch (error) {
     if (error.code === "23505") {
       return res.status(409).json({ message: "Username, email ou numero mecanografico ja existe." });
@@ -1321,7 +1307,7 @@ router.patch("/users/:userId", async (req, res) => {
 });
 
 router.post("/drivers/import", async (req, res) => {
-  const { csvText, fileBase64, defaultCompany } = req.body;
+  const { csvText, fileBase64, fileType, defaultCompany } = req.body;
   if (!csvText && !fileBase64) {
     return res.status(400).json({ message: "Forneca csvText ou ficheiro (base64)." });
   }
@@ -1330,12 +1316,17 @@ router.post("/drivers/import", async (req, res) => {
   if (fileBase64) {
     try {
       const buffer = Buffer.from(fileBase64, "base64");
-      const workbook = XLSX.read(buffer, { type: "buffer" });
-      const firstSheetName = workbook.SheetNames[0];
-      const firstSheet = workbook.Sheets[firstSheetName];
-      rows = normalizeImportRows(XLSX.utils.sheet_to_json(firstSheet, { defval: "" }));
+      const normalizedFileType = String(fileType || "").trim().toLowerCase();
+      if (normalizedFileType === "csv") {
+        rows = parseCsvText(buffer.toString("utf8"));
+      } else {
+        const workbook = XLSX.read(buffer, { type: "buffer" });
+        const firstSheetName = workbook.SheetNames[0];
+        const firstSheet = workbook.Sheets[firstSheetName];
+        rows = normalizeImportRows(XLSX.utils.sheet_to_json(firstSheet, { defval: "" }));
+      }
     } catch (_error) {
-      return res.status(400).json({ message: "Ficheiro Excel invalido para importacao." });
+      return res.status(400).json({ message: "Ficheiro invalido para importacao (use CSV ou Excel)." });
     }
   } else {
     rows = parseCsvText(csvText);
