@@ -1394,7 +1394,7 @@ router.post("/drivers/import", async (req, res) => {
       const existing = await db.query(
         `SELECT id FROM users
          WHERE username = $1 OR mechanic_number = $2
-            OR ($3 IS NOT NULL AND email = $3)
+           OR ($3::text IS NOT NULL AND email = $3::text)
          LIMIT 1`,
         [username, mechanicNumber, email]
       );
