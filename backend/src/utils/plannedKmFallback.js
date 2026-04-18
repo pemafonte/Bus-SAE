@@ -2,18 +2,41 @@ const db = require("../db");
 
 const GPS_KM_FLOOR = 0.01;
 
+/** Realizado <= 5% do planeado equivale a faltar >= 95% dos km de escala → usar kms_carga. */
+const REALIZED_VS_PLANNED_MAX_RATIO = 0.05;
+
 /**
- * Se o GPS não produz quilometragem útil, usa kms_carga do serviço planeado (quando existir).
+ * Define total_km do serviço: GPS quando fiável; caso contrário kms_carga da escala (planned_services).
+ *
+ * Usa kms_carga quando:
+ * - GPS não produz quilometragem útil (< limiar ou inválido), ou
+ * - realizados <= 5% dos programados (faltam >= 95% dos km de escala face ao planeado).
  */
 async function resolveTotalKmWithPlannedFallback(calculatedKm, plannedServiceId) {
   const n = Number(calculatedKm);
-  const gpsWeak = !Number.isFinite(n) || n < GPS_KM_FLOOR;
-  if (!gpsWeak) return n;
-  if (!plannedServiceId) return Number.isFinite(n) && n >= 0 ? n : 0;
-  const { rows } = await db.query(`SELECT kms_carga FROM planned_services WHERE id = $1`, [plannedServiceId]);
-  const planned = rows[0]?.kms_carga;
-  if (planned != null && Number(planned) > 0) return Number(planned);
-  return Number.isFinite(n) && n >= 0 ? n : 0;
+  const gpsKm = Number.isFinite(n) && n >= 0 ? n : null;
+
+  let plannedKm = null;
+  if (plannedServiceId) {
+    const { rows } = await db.query(`SELECT kms_carga FROM planned_services WHERE id = $1`, [plannedServiceId]);
+    const raw = rows[0]?.kms_carga;
+    if (raw != null && Number(raw) > 0) plannedKm = Number(raw);
+  }
+
+  if (plannedKm == null) {
+    return gpsKm != null ? gpsKm : 0;
+  }
+
+  const gpsWeak = gpsKm == null || gpsKm < GPS_KM_FLOOR;
+  const farBelowPlanned = gpsKm != null && gpsKm <= REALIZED_VS_PLANNED_MAX_RATIO * plannedKm;
+
+  if (gpsWeak || farBelowPlanned) return plannedKm;
+
+  return gpsKm;
 }
 
-module.exports = { resolveTotalKmWithPlannedFallback, GPS_KM_FLOOR };
+module.exports = {
+  resolveTotalKmWithPlannedFallback,
+  GPS_KM_FLOOR,
+  REALIZED_VS_PLANNED_MAX_RATIO,
+};
