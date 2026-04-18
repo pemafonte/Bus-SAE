@@ -71,6 +71,8 @@ function parseCsvText(csvText) {
     .filter(Boolean);
   if (lines.length < 2) return [];
 
+  // Remove UTF-8 BOM if present (common when CSV is saved by Excel).
+  lines[0] = lines[0].replace(/^\uFEFF/, "");
   const delimiter = (lines[0].match(/;/g) || []).length > (lines[0].match(/,/g) || []).length ? ";" : ",";
   const headers = lines[0].split(delimiter).map((h) => h.trim().toLowerCase());
   const rows = [];
@@ -1343,13 +1345,29 @@ router.post("/drivers/import", async (req, res) => {
   const rowReports = [];
   for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
     const row = rows[rowIndex];
-    const name = row.name || row.nome;
-    const username = row.username || row.utilizador;
-    const email = String(row.email || "").trim() || null;
-    const mechanicNumber = row.mechanic_number || row.mecanografico || row.numero_mecanografico;
-    const password = row.password || row.senha || "123456";
-    const companyName = row.company_name || row.empresa || defaultCompany || null;
-    const isActive = parseBooleanLike(row.is_active ?? row.ativo, true);
+    const by = rowToHeaderLookup(row);
+    const name = row.name || row.nome || by.name || by.nome || "";
+    const username =
+      row.username ||
+      row.utilizador ||
+      by.username ||
+      by.utilizador ||
+      by.nome_utilizador ||
+      by.nome_de_utilizador ||
+      "";
+    const email = String(row.email || by.email || "").trim() || null;
+    const mechanicNumber =
+      row.mechanic_number ||
+      row.mecanografico ||
+      row.numero_mecanografico ||
+      by.mechanic_number ||
+      by.mecanografico ||
+      by.numero_mecanografico ||
+      by.numero_mecanico ||
+      "";
+    const password = row.password || row.senha || by.password || by.senha || "0000";
+    const companyName = row.company_name || row.empresa || by.company_name || by.empresa || defaultCompany || null;
+    const isActive = parseBooleanLike(row.is_active ?? row.ativo ?? by.is_active ?? by.ativo, true);
     const line = rowIndex + 2;
     const rowKey = username || email || mechanicNumber || `linha_${line}`;
 
