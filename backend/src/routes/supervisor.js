@@ -1362,7 +1362,7 @@ router.post("/drivers/import", async (req, res) => {
       by.nome_de_utilizador ||
       "";
     const email = String(row.email || by.email || "").trim() || null;
-    const mechanicNumber =
+    const mechanicNumberRaw =
       row.mechanic_number ||
       row.mecanografico ||
       row.numero_mecanografico ||
@@ -1371,7 +1371,9 @@ router.post("/drivers/import", async (req, res) => {
       by.numero_mecanografico ||
       by.numero_mecanico ||
       "";
-    const password = row.password || row.senha || by.password || by.senha || "0000";
+    const mechanicNumber = String(mechanicNumberRaw || "").trim();
+    const passwordRaw = row.password || row.senha || by.password || by.senha || "0000";
+    const password = String(passwordRaw || "").trim() || "0000";
     const companyName = row.company_name || row.empresa || by.company_name || by.empresa || defaultCompany || null;
     const isActive = parseBooleanLike(row.is_active ?? row.ativo ?? by.is_active ?? by.ativo, true);
     const line = rowIndex + 2;
