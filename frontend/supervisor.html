@@ -41,6 +41,7 @@
             <button type="button" class="tab-btn" data-tab-target="tabListaMotoristas">Lista de motoristas</button>
             <button type="button" class="tab-btn" data-tab-target="tabIntegracoesGps">Integrações GPS</button>
             <button type="button" class="tab-btn" data-tab-target="tabParagensServico">Paragens (serviço)</button>
+            <button type="button" class="tab-btn" data-tab-target="tabRelatoriosIa">Relatórios IA</button>
           </aside>
 
           <div class="tab-content">
@@ -293,7 +294,7 @@
                 (Flespi/Traccar), não diretamente para esta app, salvo se o vosso stack receber Codec8 na API.
               </li>
               <li>
-                <strong>Frota e chapa</strong>: o IMEI deve estar mapeado aqui com <strong>frota e/ou chapa iguais</strong>
+                <strong>Frota e chapa</strong>: o IMEI deve estar mapeado com <strong>frota igual</strong> (chapa/matrícula opcional)
                 às usadas quando o motorista inicia o serviço na app — a API associa o tracker ao serviço
                 <code>in_progress</code> por esses campos.
               </li>
@@ -378,6 +379,73 @@
                 <tbody id="stopPassageTableBody"></tbody>
               </table>
             </div>
+          </div>
+        </div>
+
+        <div id="tabRelatoriosIa" class="tab-panel">
+          <h2>Relatórios inteligentes de operação</h2>
+          <p class="field-help" style="margin-top: 0">
+            Esta análise cruza horários GTFS, passagens GPS e desempenho por paragem para identificar atrasos, pontos de
+            perda de tempo e oportunidades de melhoria operacional.
+          </p>
+          <div class="ops-layout">
+            <aside class="ops-sidebar">
+              <h3>Filtros do relatório</h3>
+              <form id="reportsForm">
+                <input id="reportFromDate" type="date" />
+                <input id="reportToDate" type="date" />
+                <input id="reportLineCode" type="text" placeholder="Linha (opcional)" />
+                <input id="reportDriverId" type="number" placeholder="ID motorista (opcional)" />
+                <input id="reportRadiusM" type="number" min="40" max="200" value="85" />
+                <input id="reportMaxServices" type="number" min="10" max="400" value="120" />
+                <button type="submit">Gerar relatório</button>
+              </form>
+            </aside>
+            <section class="ops-main">
+              <h3>Resumo operacional</h3>
+              <div id="reportSummaryCards" class="service-cards"></div>
+              <h3>Sugestões de melhoria (IA)</h3>
+              <ul id="reportAiSuggestions" class="handover-list">
+                <li>Gere um relatório para receber sugestões.</li>
+              </ul>
+              <h3>Paragens críticas (top)</h3>
+              <div class="ops-table-wrap">
+                <table class="ops-table">
+                  <thead>
+                    <tr>
+                      <th>Paragem</th>
+                      <th>Amostras</th>
+                      <th>Atraso médio (min)</th>
+                      <th>% atrasos (&gt;3m)</th>
+                      <th>% atraso grave (&gt;8m)</th>
+                      <th>Score crítico</th>
+                    </tr>
+                  </thead>
+                  <tbody id="reportCriticalStopsBody">
+                    <tr><td colspan="6">Sem dados.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <h3>Serviços com maior atraso médio</h3>
+              <div class="ops-table-wrap">
+                <table class="ops-table">
+                  <thead>
+                    <tr>
+                      <th>Serviço</th>
+                      <th>Linha</th>
+                      <th>Motorista</th>
+                      <th>Frota</th>
+                      <th>Paragens (OK/total)</th>
+                      <th>Atraso médio (min)</th>
+                      <th>Pior atraso (min)</th>
+                    </tr>
+                  </thead>
+                  <tbody id="reportServiceRankBody">
+                    <tr><td colspan="7">Sem dados.</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </section>
           </div>
         </div>
           </div>

@@ -68,6 +68,81 @@ function parseBooleanLike(value, fallback = true) {
   return ["1", "true", "sim", "yes", "ativo", "activa", "active"].includes(v);
 }
 
+function lisbonDayKey(dateLike) {
+  const d = new Date(dateLike);
+  if (Number.isNaN(d.getTime())) return null;
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "Europe/Lisbon",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+}
+
+function lisbonMinutesOfDay(dateLike) {
+  const d = new Date(dateLike);
+  if (Number.isNaN(d.getTime())) return null;
+  const parts = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Lisbon",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(d);
+  const hh = Number(parts.find((p) => p.type === "hour")?.value || 0);
+  const mm = Number(parts.find((p) => p.type === "minute")?.value || 0);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm)) return null;
+  return hh * 60 + mm;
+}
+
+function parseGtfsTimeToRelativeMinutes(rawTime) {
+  const match = String(rawTime || "")
+    .trim()
+    .match(/^(\d{1,2}):(\d{2})(?::(\d{2}))?$/);
+  if (!match) return null;
+  const hours = Number(match[1]);
+  const minutes = Number(match[2]);
+  if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
+  return hours * 60 + minutes;
+}
+
+function diffDays(dayA, dayB) {
+  if (!dayA || !dayB) return null;
+  const d1 = new Date(`${dayA}T00:00:00Z`);
+  const d2 = new Date(`${dayB}T00:00:00Z`);
+  if (Number.isNaN(d1.getTime()) || Number.isNaN(d2.getTime())) return null;
+  return Math.round((d1.getTime() - d2.getTime()) / 86400000);
+}
+
+function buildOperationalSuggestions(summary, criticalStops) {
+  const suggestions = [];
+  if ((summary.avg_delay_min || 0) >= 7) {
+    suggestions.push(
+      "Atraso médio elevado: rever tempos de percurso e janelas de partida para alinhar o horário planeado com o tempo real."
+    );
+  }
+  if ((summary.delay_p90_min || 0) >= 12) {
+    suggestions.push(
+      "Variabilidade elevada (P90): definir margens operacionais e reforço de monitorização nos períodos de maior congestão."
+    );
+  }
+  if ((summary.missed_stop_rate_pct || 0) >= 20) {
+    suggestions.push(
+      "Taxa de paragens sem passagem GPS acima do desejável: validar cobertura GPS e cumprimento de paragem operacional."
+    );
+  }
+  if (criticalStops[0] && Number(criticalStops[0].avg_delay_min || 0) >= 10) {
+    suggestions.push(
+      `Paragem crítica principal (${criticalStops[0].stop_name}): avaliar intervenção local (regulação, tempo de paragem ou ajuste de percurso).`
+    );
+  }
+  if (!suggestions.length) {
+    suggestions.push(
+      "Desempenho estável no período analisado. Manter configuração atual e monitorizar tendências semanais para deteção precoce de degradação."
+    );
+  }
+  return suggestions;
+}
+
 function parseCsvText(csvText) {
   const lines = String(csvText || "")
     .split(/\r?\n/)
@@ -1583,7 +1658,15 @@ router.post("/roster/import", async (req, res) => {
       const serviceSchedule =
         String(row.service_schedule || row.horario_servico || "").trim() ||
         (startTime && endTime ? `${startTime}-${endTime}` : "");
-      const plateNumber = String(row.numero_chapa || row.numerochapa || row.chapa || "").trim();
+      const plateNumber = String(
+        row.numero_chapa ||
+          row.numerochapa ||
+          row.matricula ||
+          row.matricula_viatura ||
+          row.plate_number ||
+          row.plateNumber ||
+          ""
+      ).trim();
       const fleetNumberRaw = String(row.numero_frota || row.numerofrota || row.frota || "").trim();
       const fleetNumber = fleetNumberRaw ? Number(fleetNumberRaw) : null;
       const startLocation = pickStartLocationFromRow(row);
@@ -2182,6 +2265,220 @@ router.get("/services/:serviceId/stop-passages", async (req, res) => {
   } catch (error) {
     console.error("stop-passages", error);
     return res.status(500).json({ message: "Erro ao analisar passagem pelas paragens." });
+  }
+});
+
+router.get("/reports/performance", async (req, res) => {
+  const { fromDate, toDate, lineCode, driverId } = req.query;
+  const radiusMeters = Math.min(Math.max(Number(req.query.radiusM) || 85, 40), 200);
+  const maxServices = Math.min(Math.max(Number(req.query.maxServices) || 120, 10), 400);
+  const where = [];
+  const values = [];
+  let idx = 1;
+
+  if (lineCode) {
+    where.push(`s.line_code = $${idx}`);
+    values.push(String(lineCode).trim());
+    idx += 1;
+  }
+  if (driverId) {
+    where.push(`s.driver_id = $${idx}`);
+    values.push(Number(driverId));
+    idx += 1;
+  }
+  const dayFilter = serviceActivityLisbonDayFilter(fromDate, toDate, idx);
+  if (dayFilter) {
+    where.push(dayFilter.sql);
+    dayFilter.values.forEach((v) => values.push(v));
+  }
+  where.push(`s.started_at IS NOT NULL`);
+  where.push(`s.status IN ('in_progress', 'completed', 'cancelled')`);
+  const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
+
+  try {
+    const svcRes = await db.query(
+      `SELECT
+         s.id,
+         s.gtfs_trip_id,
+         s.line_code,
+         s.service_schedule,
+         s.fleet_number,
+         s.started_at,
+         s.ended_at,
+         s.status,
+         u.name AS driver_name
+       FROM services s
+       JOIN users u ON u.id = s.driver_id
+       ${whereSql}
+       ORDER BY s.started_at DESC
+       LIMIT ${maxServices}`,
+      values
+    );
+    const services = svcRes.rows;
+    if (!services.length) {
+      return res.json({
+        summary: {
+          services_analyzed: 0,
+          services_with_reference_stops: 0,
+          total_stops_analyzed: 0,
+          avg_delay_min: 0,
+          delay_p90_min: 0,
+          missed_stop_rate_pct: 0,
+        },
+        critical_stops: [],
+        service_rank: [],
+        ai_suggestions: ["Sem serviços no período selecionado."],
+      });
+    }
+
+    const serviceIds = services.map((s) => Number(s.id)).filter((id) => Number.isFinite(id));
+    const pointsRes = await db.query(
+      `SELECT service_id, lat, lng, captured_at
+       FROM service_points
+       WHERE service_id = ANY($1::int[])
+       ORDER BY service_id ASC, captured_at ASC`,
+      [serviceIds]
+    );
+    const pointsByService = new Map();
+    for (const p of pointsRes.rows) {
+      if (!pointsByService.has(p.service_id)) pointsByService.set(p.service_id, []);
+      pointsByService.get(p.service_id).push(p);
+    }
+
+    const stopsByTrip = new Map();
+    const bestTripByHeader = new Map();
+    const delays = [];
+    const stopAgg = new Map();
+    const serviceRank = [];
+    let servicesWithStops = 0;
+    let totalStops = 0;
+    let totalMatched = 0;
+
+    for (const svc of services) {
+      let tripId = svc.gtfs_trip_id || null;
+      if (!tripId) {
+        const headerKey = `${String(svc.line_code || "").trim()}|${String(svc.service_schedule || "").trim()}`;
+        if (!bestTripByHeader.has(headerKey)) {
+          const best = await findBestTripForLine(svc.line_code, svc.service_schedule);
+          bestTripByHeader.set(headerKey, best?.trip_id || null);
+        }
+        tripId = bestTripByHeader.get(headerKey);
+      }
+      if (!tripId) continue;
+
+      if (!stopsByTrip.has(tripId)) {
+        const stops = await getStopsByTripId(tripId);
+        stopsByTrip.set(tripId, Array.isArray(stops) ? stops : []);
+      }
+      const stops = stopsByTrip.get(tripId) || [];
+      if (!stops.length) continue;
+      servicesWithStops += 1;
+
+      const points = pointsByService.get(svc.id) || [];
+      const matchedRows = matchGpsPointsToGtfsStops(stops, points, {
+        radiusMeters,
+        serviceStartedAt: svc.started_at,
+      });
+      totalStops += matchedRows.total;
+      totalMatched += matchedRows.matched;
+
+      const serviceDay = lisbonDayKey(svc.started_at);
+      const serviceDelaySamples = [];
+      for (const row of matchedRows.rows) {
+        if (!row.passed_near_stop || !row.passed_at) continue;
+        const scheduledRefMin = parseGtfsTimeToRelativeMinutes(row.scheduled_departure || row.scheduled_arrival);
+        if (scheduledRefMin == null) continue;
+
+        const passMin = lisbonMinutesOfDay(row.passed_at);
+        const passDay = lisbonDayKey(row.passed_at);
+        const passDayOffset = diffDays(passDay, serviceDay);
+        if (passMin == null || passDayOffset == null) continue;
+        const passRelativeMin = passDayOffset * 1440 + passMin;
+        const delayMin = passRelativeMin - scheduledRefMin;
+        if (!Number.isFinite(delayMin)) continue;
+        delays.push(delayMin);
+        serviceDelaySamples.push(delayMin);
+
+        const key = `${row.stop_id || ""}|${row.stop_name || ""}`;
+        if (!stopAgg.has(key)) {
+          stopAgg.set(key, {
+            stop_id: row.stop_id || "",
+            stop_name: row.stop_name || "Paragem sem nome",
+            samples: 0,
+            delayed_samples: 0,
+            severe_samples: 0,
+            total_delay_min: 0,
+          });
+        }
+        const acc = stopAgg.get(key);
+        acc.samples += 1;
+        acc.total_delay_min += delayMin;
+        if (delayMin > 3) acc.delayed_samples += 1;
+        if (delayMin > 8) acc.severe_samples += 1;
+      }
+
+      const avgDelay = serviceDelaySamples.length
+        ? serviceDelaySamples.reduce((sum, val) => sum + val, 0) / serviceDelaySamples.length
+        : null;
+      const maxDelay = serviceDelaySamples.length ? Math.max(...serviceDelaySamples) : null;
+      serviceRank.push({
+        service_id: svc.id,
+        line_code: svc.line_code,
+        driver_name: svc.driver_name,
+        fleet_number: svc.fleet_number,
+        status: svc.status,
+        started_at: svc.started_at,
+        ended_at: svc.ended_at,
+        stops_total: matchedRows.total,
+        stops_matched: matchedRows.matched,
+        avg_delay_min: avgDelay == null ? null : Math.round(avgDelay * 10) / 10,
+        max_delay_min: maxDelay == null ? null : Math.round(maxDelay * 10) / 10,
+      });
+    }
+
+    const sortedDelays = [...delays].sort((a, b) => a - b);
+    const avgDelay = sortedDelays.length ? sortedDelays.reduce((sum, val) => sum + val, 0) / sortedDelays.length : 0;
+    const p90Delay = sortedDelays.length ? sortedDelays[Math.floor((sortedDelays.length - 1) * 0.9)] : 0;
+
+    const criticalStops = [...stopAgg.values()]
+      .map((s) => {
+        const avg = s.samples ? s.total_delay_min / s.samples : 0;
+        const delayedPct = s.samples ? (s.delayed_samples / s.samples) * 100 : 0;
+        const severePct = s.samples ? (s.severe_samples / s.samples) * 100 : 0;
+        const score = avg * 0.65 + delayedPct * 0.2 + severePct * 0.15;
+        return {
+          stop_id: s.stop_id,
+          stop_name: s.stop_name,
+          samples: s.samples,
+          avg_delay_min: Math.round(avg * 10) / 10,
+          delayed_rate_pct: Math.round(delayedPct * 10) / 10,
+          severe_delay_rate_pct: Math.round(severePct * 10) / 10,
+          criticality_score: Math.round(score * 10) / 10,
+        };
+      })
+      .sort((a, b) => b.criticality_score - a.criticality_score)
+      .slice(0, 20);
+
+    const missedStopRate = totalStops ? ((totalStops - totalMatched) / totalStops) * 100 : 0;
+    const summary = {
+      services_analyzed: services.length,
+      services_with_reference_stops: servicesWithStops,
+      total_stops_analyzed: totalStops,
+      avg_delay_min: Math.round(avgDelay * 10) / 10,
+      delay_p90_min: Math.round(Number(p90Delay || 0) * 10) / 10,
+      missed_stop_rate_pct: Math.round(missedStopRate * 10) / 10,
+    };
+
+    return res.json({
+      summary,
+      critical_stops: criticalStops,
+      service_rank: serviceRank
+        .sort((a, b) => Number(b.avg_delay_min || -999) - Number(a.avg_delay_min || -999))
+        .slice(0, 30),
+      ai_suggestions: buildOperationalSuggestions(summary, criticalStops),
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao gerar relatório de desempenho operacional." });
   }
 });
 

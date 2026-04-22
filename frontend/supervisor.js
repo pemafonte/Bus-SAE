@@ -84,6 +84,10 @@ const trackerWebhookUrlPreviewEl = document.getElementById("trackerWebhookUrlPre
 const trackerWebhookHeadersPreviewEl = document.getElementById("trackerWebhookHeadersPreview");
 const trackerWebhookPayloadPreviewEl = document.getElementById("trackerWebhookPayloadPreview");
 const trackerWebhookBatchPayloadPreviewEl = document.getElementById("trackerWebhookBatchPayloadPreview");
+const reportSummaryCardsEl = document.getElementById("reportSummaryCards");
+const reportAiSuggestionsEl = document.getElementById("reportAiSuggestions");
+const reportCriticalStopsBodyEl = document.getElementById("reportCriticalStopsBody");
+const reportServiceRankBodyEl = document.getElementById("reportServiceRankBody");
 
 let driversCache = [];
 let usersCache = [];
@@ -99,6 +103,7 @@ let serviceDetailRouteMap = null;
 let serviceDetailRouteLayer = null;
 const LIVE_MAP_REFRESH_MS = 5000;
 let supLiveMapUserAdjustedView = false;
+let reportsLoadedOnce = false;
 
 function labelEstadoExecucaoServicoPt(code) {
   const k = String(code || "").toLowerCase();
@@ -211,6 +216,15 @@ function formatDate(value) {
 function formatDateOnly(value) {
   if (!value) return "-";
   return new Date(value).toLocaleDateString();
+}
+
+function formatNumberPt(value, digits = 1) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return "-";
+  return n.toLocaleString("pt-PT", {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
 }
 
 function formatDateTimePt(iso) {
@@ -729,6 +743,125 @@ function openSupervisorTab(tabId) {
   }
   if (tabId === "tabIntegracoesGps") {
     loadTrackerDevices();
+  }
+  if (tabId === "tabRelatoriosIa" && !reportsLoadedOnce) {
+    loadOperationalReport();
+  }
+}
+
+function buildOperationalReportQuery() {
+  const params = new URLSearchParams();
+  const fromDate = document.getElementById("reportFromDate")?.value || "";
+  const toDate = document.getElementById("reportToDate")?.value || "";
+  const lineCode = document.getElementById("reportLineCode")?.value?.trim() || "";
+  const driverId = document.getElementById("reportDriverId")?.value?.trim() || "";
+  const radiusM = document.getElementById("reportRadiusM")?.value?.trim() || "";
+  const maxServices = document.getElementById("reportMaxServices")?.value?.trim() || "";
+  if (fromDate) params.set("fromDate", fromDate);
+  if (toDate) params.set("toDate", toDate);
+  if (lineCode) params.set("lineCode", lineCode);
+  if (driverId) params.set("driverId", driverId);
+  if (radiusM) params.set("radiusM", radiusM);
+  if (maxServices) params.set("maxServices", maxServices);
+  return params.toString() ? `?${params.toString()}` : "";
+}
+
+function renderOperationalSummary(summary) {
+  if (!reportSummaryCardsEl) return;
+  const cards = [
+    { label: "Serviços analisados", value: summary.services_analyzed ?? 0 },
+    { label: "Serviços com paragens GTFS", value: summary.services_with_reference_stops ?? 0 },
+    { label: "Paragens analisadas", value: summary.total_stops_analyzed ?? 0 },
+    { label: "Atraso médio (min)", value: formatNumberPt(summary.avg_delay_min, 1) },
+    { label: "Atraso P90 (min)", value: formatNumberPt(summary.delay_p90_min, 1) },
+    { label: "Taxa paragens sem passagem", value: `${formatNumberPt(summary.missed_stop_rate_pct, 1)}%` },
+  ];
+  reportSummaryCardsEl.innerHTML = cards
+    .map(
+      (c) => `<article class="service-card-item"><strong>${c.label}</strong><div style="font-size: 20px; margin-top: 6px;">${c.value}</div></article>`
+    )
+    .join("");
+}
+
+function renderAiSuggestions(items) {
+  if (!reportAiSuggestionsEl) return;
+  const rows = Array.isArray(items) ? items : [];
+  if (!rows.length) {
+    reportAiSuggestionsEl.innerHTML = "<li>Sem sugestões para o período selecionado.</li>";
+    return;
+  }
+  reportAiSuggestionsEl.innerHTML = rows.map((s) => `<li>${s}</li>`).join("");
+}
+
+function renderCriticalStops(rows) {
+  if (!reportCriticalStopsBodyEl) return;
+  if (!Array.isArray(rows) || !rows.length) {
+    reportCriticalStopsBodyEl.innerHTML = `<tr><td colspan="6">Sem paragens críticas no período.</td></tr>`;
+    return;
+  }
+  reportCriticalStopsBodyEl.innerHTML = rows
+    .map(
+      (r) => `<tr>
+        <td>${r.stop_name || "-"}</td>
+        <td>${r.samples ?? 0}</td>
+        <td>${formatNumberPt(r.avg_delay_min, 1)}</td>
+        <td>${formatNumberPt(r.delayed_rate_pct, 1)}%</td>
+        <td>${formatNumberPt(r.severe_delay_rate_pct, 1)}%</td>
+        <td>${formatNumberPt(r.criticality_score, 1)}</td>
+      </tr>`
+    )
+    .join("");
+}
+
+function renderServiceRank(rows) {
+  if (!reportServiceRankBodyEl) return;
+  if (!Array.isArray(rows) || !rows.length) {
+    reportServiceRankBodyEl.innerHTML = `<tr><td colspan="7">Sem serviços com atraso para ranking.</td></tr>`;
+    return;
+  }
+  reportServiceRankBodyEl.innerHTML = rows
+    .map(
+      (r) => `<tr>
+        <td>#${r.service_id}</td>
+        <td>${r.line_code || "-"}</td>
+        <td>${r.driver_name || "-"}</td>
+        <td>${r.fleet_number || "-"}</td>
+        <td>${r.stops_matched || 0}/${r.stops_total || 0}</td>
+        <td>${formatNumberPt(r.avg_delay_min, 1)}</td>
+        <td>${formatNumberPt(r.max_delay_min, 1)}</td>
+      </tr>`
+    )
+    .join("");
+}
+
+async function loadOperationalReport() {
+  if (!supToken) return;
+  const query = buildOperationalReportQuery();
+  if (reportSummaryCardsEl) {
+    reportSummaryCardsEl.innerHTML = `<article class="service-card-item">A gerar relatório operacional...</article>`;
+  }
+  try {
+    const response = await fetch(`${API_BASE}/supervisor/reports/performance${query}`, {
+      headers: getAuthHeaders(),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.message || "Erro ao gerar relatório.");
+    }
+    reportsLoadedOnce = true;
+    renderOperationalSummary(data.summary || {});
+    renderAiSuggestions(data.ai_suggestions || []);
+    renderCriticalStops(data.critical_stops || []);
+    renderServiceRank(data.service_rank || []);
+  } catch (error) {
+    if (reportSummaryCardsEl) {
+      reportSummaryCardsEl.innerHTML = `<article class="service-card-item">${
+        error?.message || "Erro ao gerar relatório operacional."
+      }</article>`;
+    }
+    renderAiSuggestions([]);
+    renderCriticalStops([]);
+    renderServiceRank([]);
   }
 }
 
@@ -1875,8 +2008,8 @@ async function saveTrackerDevice(event) {
     alert("Indique um IMEI válido.");
     return;
   }
-  if (!fleetNumber && !plateNumber) {
-    alert("Indique a frota ou a chapa.");
+  if (!fleetNumber) {
+    alert("Indique a frota da viatura.");
     return;
   }
   const response = await fetch(`${API_BASE}/integrations/teltonika/devices`, {
@@ -2285,6 +2418,21 @@ if (rosterDayCardsEl) {
 initTabs();
 initServiceFilterMode();
 renderTrackerWebhookExamples();
+
+(() => {
+  const fromEl = document.getElementById("reportFromDate");
+  const toEl = document.getElementById("reportToDate");
+  if (fromEl && !fromEl.value) fromEl.value = todayISOInLisbon();
+  if (toEl && !toEl.value) toEl.value = todayISOInLisbon();
+})();
+
+const reportsFormEl = document.getElementById("reportsForm");
+if (reportsFormEl) {
+  reportsFormEl.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    await loadOperationalReport();
+  });
+}
 
 if (serviceCardsEl && !serviceCardsEl.dataset.stopPassagesDelegation) {
   serviceCardsEl.dataset.stopPassagesDelegation = "1";

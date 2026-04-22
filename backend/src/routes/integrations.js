@@ -113,7 +113,31 @@ async function resolveDeviceMapping(event) {
     [event.imei]
   );
   if (byImei.rowCount && !byImei.rows[0].is_active) return null;
-  if (byImei.rowCount) return byImei.rows[0];
+  if (byImei.rowCount) {
+    const current = byImei.rows[0];
+    const incomingFleet = String(event.fleetNumber || "").trim() || null;
+    const incomingPlate = String(event.plateNumber || "").trim() || null;
+    const currentFleet = String(current.fleet_number || "").trim() || null;
+    const currentPlate = String(current.plate_number || "").trim() || null;
+
+    const fleetChanged = incomingFleet && incomingFleet !== currentFleet;
+    const plateChanged = incomingPlate && incomingPlate !== currentPlate;
+
+    if (fleetChanged || plateChanged) {
+      const updated = await db.query(
+        `UPDATE tracker_devices
+         SET fleet_number = COALESCE($2, fleet_number),
+             plate_number = COALESCE($3, plate_number),
+             updated_at = NOW()
+         WHERE imei = $1
+         RETURNING imei, fleet_number, plate_number, is_active`,
+        [event.imei, incomingFleet, incomingPlate]
+      );
+      return updated.rows[0] || current;
+    }
+
+    return current;
+  }
 
   if (!event.fleetNumber && !event.plateNumber) return null;
   await db.query(
@@ -137,18 +161,25 @@ async function resolveActiveServiceForDevice(device) {
   const fleetNumber = String(device?.fleet_number || "").trim();
   const plateNumber = String(device?.plate_number || "").trim();
   if (!fleetNumber && !plateNumber) return null;
-  const result = await db.query(
-    `SELECT id, gtfs_trip_id
-     FROM services
-     WHERE status = 'in_progress'
-       AND (
-         ($1 <> '' AND LOWER(TRIM(fleet_number)) = LOWER(TRIM($1)))
-         OR ($2 <> '' AND LOWER(TRIM(plate_number)) = LOWER(TRIM($2)))
-       )
-     ORDER BY started_at DESC
-     LIMIT 1`,
-    [fleetNumber, plateNumber]
-  );
+  const result = fleetNumber
+    ? await db.query(
+        `SELECT id, gtfs_trip_id
+         FROM services
+         WHERE status = 'in_progress'
+           AND LOWER(TRIM(fleet_number)) = LOWER(TRIM($1))
+         ORDER BY started_at DESC
+         LIMIT 1`,
+        [fleetNumber]
+      )
+    : await db.query(
+        `SELECT id, gtfs_trip_id
+         FROM services
+         WHERE status = 'in_progress'
+           AND LOWER(TRIM(plate_number)) = LOWER(TRIM($1))
+         ORDER BY started_at DESC
+         LIMIT 1`,
+        [plateNumber]
+      );
   return result.rows[0] || null;
 }
 
@@ -210,8 +241,8 @@ router.post("/teltonika/devices", authMiddleware, requireRoles("supervisor", "ad
   const plateNumber = String(req.body?.plateNumber || "").trim() || null;
   const isActive = req.body?.isActive !== false;
   if (!imei) return res.status(400).json({ message: "IMEI inválido." });
-  if (!fleetNumber && !plateNumber) {
-    return res.status(400).json({ message: "Indique fleetNumber ou plateNumber." });
+  if (!fleetNumber) {
+    return res.status(400).json({ message: "fleetNumber é obrigatório para integração por viatura/frota." });
   }
   try {
     await ensureTrackerTables();
