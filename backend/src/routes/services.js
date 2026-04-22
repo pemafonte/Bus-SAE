@@ -350,14 +350,64 @@ async function ensureOpsMessagesTable() {
   );
 }
 
-function getDriverMessagePresets() {
-  return [
-    { code: "delay_traffic", label: "Atraso por trânsito intenso" },
-    { code: "breakdown", label: "Avaria na viatura" },
-    { code: "accident", label: "Acidente no percurso" },
-    { code: "route_blocked", label: "Via cortada/desvio necessário" },
-    { code: "request_support", label: "Preciso de apoio operacional" },
-  ];
+const BUILTIN_DRIVER_MESSAGE_PRESETS = [
+  { code: "delay_traffic", label: "Atraso por trânsito intenso" },
+  { code: "breakdown", label: "Avaria na viatura" },
+  { code: "accident", label: "Acidente no percurso" },
+  { code: "route_blocked", label: "Via cortada/desvio necessário" },
+  { code: "request_support", label: "Preciso de apoio operacional" },
+];
+
+async function ensureOpsMessagePresetsTable() {
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS ops_message_presets (
+      id BIGSERIAL PRIMARY KEY,
+      scope VARCHAR(20) NOT NULL,
+      code VARCHAR(60) NOT NULL,
+      label VARCHAR(200) NOT NULL,
+      default_message_text TEXT,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_by_user_id INT REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (scope, code)
+    )`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_ops_message_presets_scope_active
+     ON ops_message_presets(scope, is_active)`
+  );
+}
+
+function mergeMessagePresets(builtin, dbRows) {
+  const byCode = new Map();
+  builtin.forEach((p) => {
+    if (!p?.code) return;
+    byCode.set(p.code, { ...p, source: "builtin" });
+  });
+  (Array.isArray(dbRows) ? dbRows : []).forEach((row) => {
+    if (!row?.code) return;
+    byCode.set(row.code, {
+      id: row.id,
+      code: row.code,
+      label: row.label,
+      defaultText: row.default_message_text,
+      isActive: row.is_active,
+      source: "custom",
+    });
+  });
+  return [...byCode.values()].sort((a, b) => String(a.label || "").localeCompare(String(b.label || ""), "pt"));
+}
+
+async function listDriverMessagePresetsMerged() {
+  await ensureOpsMessagePresetsTable();
+  const custom = await db.query(
+    `SELECT id, code, label, default_message_text, is_active
+     FROM ops_message_presets
+     WHERE scope = 'driver' AND is_active = TRUE
+     ORDER BY label ASC`
+  );
+  return mergeMessagePresets(BUILTIN_DRIVER_MESSAGE_PRESETS, custom.rows);
 }
 
 async function resolveSupervisorRecipient(preferredId) {
@@ -386,7 +436,12 @@ async function resolveSupervisorRecipient(preferredId) {
 }
 
 router.get("/message-presets", async (_req, res) => {
-  return res.json(getDriverMessagePresets());
+  try {
+    const list = await listDriverMessagePresetsMerged();
+    return res.json(list);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar predefinidas de mensagem (motorista)." });
+  }
 });
 
 router.get("/messages", async (req, res) => {

@@ -101,6 +101,15 @@ const refreshOpsMessagesBtnEl = document.getElementById("refreshOpsMessagesBtn")
 const supAlertSoundTypeEl = document.getElementById("supAlertSoundType");
 const supAlertSoundVolumeEl = document.getElementById("supAlertSoundVolume");
 const testSupAlertSoundBtnEl = document.getElementById("testSupAlertSoundBtn");
+const supPresetFormEl = document.getElementById("supPresetForm");
+const supPresetScopeEl = document.getElementById("supPresetScope");
+const supPresetCodeEl = document.getElementById("supPresetCode");
+const supPresetLabelEl = document.getElementById("supPresetLabel");
+const supPresetDefaultTextEl = document.getElementById("supPresetDefaultText");
+const supPresetIsActiveEl = document.getElementById("supPresetIsActive");
+const supPresetListEl = document.getElementById("supPresetList");
+const supPresetListScopeEl = document.getElementById("supPresetListScope");
+const refreshSupPresetListBtnEl = document.getElementById("refreshSupPresetListBtn");
 
 let driversCache = [];
 let usersCache = [];
@@ -874,10 +883,13 @@ function openSupervisorTab(tabId) {
   if (tabId === "tabIntegracoesGps") {
     loadTrackerDevices();
   }
-  if (tabId === "tabMensagensTransito") {
+  if (tabId === "tabMensagensComunicacao") {
     loadOpsMessagePresets();
     loadOpsThreads();
     if (selectedOpsDriverId) loadOpsMessages(selectedOpsDriverId);
+  }
+  if (tabId === "tabMensagensPresets") {
+    loadSupPresetList();
   }
   if (tabId === "tabRelatoriosIa" && !reportsLoadedOnce) {
     loadOperationalReport();
@@ -1326,7 +1338,7 @@ async function loadConflictAlerts() {
 async function loadOpsMessagePresets() {
   if (!supToken || !supMessagePresetEl) return;
   try {
-    const response = await fetch(`${API_BASE}/supervisor/message-presets`, {
+    const response = await fetch(`${API_BASE}/supervisor/message-presets?scope=supervisor`, {
       headers: getAuthHeaders(),
     });
     const data = await response.json().catch(() => []);
@@ -1336,10 +1348,114 @@ async function loadOpsMessagePresets() {
       const option = document.createElement("option");
       option.value = item.code || "";
       option.textContent = item.label || item.code || "Preset";
+      const def = item.defaultText != null && String(item.defaultText).trim() ? String(item.defaultText) : String(item.label || "");
+      option.dataset.defaultText = def;
       supMessagePresetEl.appendChild(option);
     });
+    supMessagePresetEl.onchange = () => {
+      const value = supMessagePresetEl.value;
+      if (!value) return;
+      const opt = supMessagePresetEl.selectedOptions?.[0];
+      const def = opt?.dataset?.defaultText;
+      if (def && supMessageTextEl) {
+        supMessageTextEl.value = def;
+      }
+    };
   } catch (_error) {
     // ignore
+  }
+}
+
+async function loadSupPresetList() {
+  if (!supToken || !supPresetListEl) return;
+  const scope = String(supPresetListScopeEl?.value || "supervisor");
+  supPresetListEl.innerHTML = "<li>A carregar…</li>";
+  try {
+    const response = await fetch(`${API_BASE}/supervisor/message-presets/manage?scope=${encodeURIComponent(scope)}`, {
+      headers: getAuthHeaders(),
+    });
+    const data = await response.json().catch(() => ([]));
+    if (!response.ok) {
+      supPresetListEl.innerHTML = `<li>${data.message || "Erro ao listar predefinidas."}</li>`;
+      return;
+    }
+    const rows = Array.isArray(data) ? data : [];
+    supPresetListEl.innerHTML = "";
+    if (!rows.length) {
+      supPresetListEl.innerHTML = "<li>Sem predefinidas personalizadas.</li>";
+      return;
+    }
+    rows.forEach((row) => {
+      const li = document.createElement("li");
+      const active = row.is_active;
+      li.innerHTML = `<div><strong>${row.label || "-"}</strong> <code>${row.code || "-"}</code> — ${
+        active ? "ativa" : "inativa"
+      }</div>
+        <div class="ops-message-meta">${row.default_message_text || ""}</div>
+        <div>
+          <button type="button" class="toggle-btn" data-preset-id="${row.id}" data-preset-next-active="${active ? 0 : 1}">
+            ${active ? "Desativar" : "Reativar"}
+          </button>
+          <button type="button" class="danger-btn" data-preset-delete-id="${row.id}">Apagar</button>
+        </div>`;
+      li.querySelector("[data-preset-id]")?.addEventListener("click", async (e) => {
+        const id = Number(e.currentTarget.getAttribute("data-preset-id"));
+        const next = e.currentTarget.getAttribute("data-preset-next-active") === "1";
+        await setSupPresetActive(id, next);
+      });
+      li.querySelector("[data-preset-delete-id]")?.addEventListener("click", async (e) => {
+        const id = Number(e.currentTarget.getAttribute("data-preset-delete-id"));
+        const ok = window.confirm("Remover definitivamente esta predefinida?");
+        if (!ok) return;
+        await deleteSupPreset(id);
+      });
+      supPresetListEl.appendChild(li);
+    });
+  } catch (_error) {
+    supPresetListEl.innerHTML = "<li>Erro de ligação ao listar predefinidas.</li>";
+  }
+}
+
+async function setSupPresetActive(presetId, isActive) {
+  if (!supToken) return;
+  try {
+    const response = await fetch(`${API_BASE}/supervisor/message-presets/${presetId}`, {
+      method: "PATCH",
+      headers: getAuthHeaders(),
+      body: JSON.stringify({ isActive }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      alert(data.message || "Erro ao atualizar predefinida.");
+      return;
+    }
+    await loadSupPresetList();
+    if (String(supPresetScopeEl?.value || "") === "supervisor") {
+      await loadOpsMessagePresets();
+    }
+  } catch (_error) {
+    alert("Erro de ligação ao atualizar predefinida.");
+  }
+}
+
+async function deleteSupPreset(presetId) {
+  if (!supToken) return;
+  try {
+    const response = await fetch(`${API_BASE}/supervisor/message-presets/${presetId}`, {
+      method: "DELETE",
+      headers: getAuthHeaders(),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      alert(data.message || "Erro ao remover predefinida.");
+      return;
+    }
+    await loadSupPresetList();
+    if (String(supPresetScopeEl?.value || "") === "supervisor") {
+      await loadOpsMessagePresets();
+    }
+  } catch (_error) {
+    alert("Erro de ligação ao remover predefinida.");
   }
 }
 
@@ -2728,6 +2844,47 @@ if (reportsFormEl) {
 }
 if (supMessageFormEl) {
   supMessageFormEl.addEventListener("submit", sendSupervisorMessage);
+}
+if (supPresetFormEl) {
+  supPresetFormEl.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    if (!supToken) return;
+    const scope = String(supPresetScopeEl?.value || "supervisor");
+    const code = String(supPresetCodeEl?.value || "").trim() || null;
+    const label = String(supPresetLabelEl?.value || "").trim();
+    const defaultText = String(supPresetDefaultTextEl?.value || "").trim() || label;
+    if (!label) {
+      alert("Indique o rótulo da predefinida.");
+      return;
+    }
+    try {
+      const response = await fetch(`${API_BASE}/supervisor/message-presets`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({ scope, code, label, defaultText, isActive: supPresetIsActiveEl?.checked !== false }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert(data.message || "Erro ao guardar predefinida.");
+        return;
+      }
+      supPresetFormEl.reset();
+      if (supPresetIsActiveEl) supPresetIsActiveEl.checked = true;
+      await loadSupPresetList();
+      if (scope === "supervisor") {
+        await loadOpsMessagePresets();
+      }
+      alert("Predefinida guardada.");
+    } catch (_error) {
+      alert("Erro de ligação ao guardar predefinida.");
+    }
+  });
+}
+if (supPresetListScopeEl) {
+  supPresetListScopeEl.addEventListener("change", loadSupPresetList);
+}
+if (refreshSupPresetListBtnEl) {
+  refreshSupPresetListBtnEl.addEventListener("click", loadSupPresetList);
 }
 if (refreshOpsThreadsBtnEl) {
   refreshOpsThreadsBtnEl.addEventListener("click", loadOpsThreads);

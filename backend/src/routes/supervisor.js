@@ -848,18 +848,227 @@ async function ensureOpsMessagesTable() {
   );
 }
 
-function getSupervisorMessagePresets() {
-  return [
-    { code: "ack_received", label: "Recebido. Continue em segurança." },
-    { code: "reroute", label: "Siga pelo desvio indicado pela central." },
-    { code: "hold_position", label: "Aguarde instruções na posição atual." },
-    { code: "priority_support", label: "Apoio em deslocação para o local." },
-    { code: "normal_resume", label: "Situação normalizada. Retome o percurso." },
-  ];
+const BUILTIN_SUPERVISOR_MESSAGE_PRESETS = [
+  { code: "ack_received", label: "Recebido. Continue em segurança." },
+  { code: "reroute", label: "Siga pelo desvio indicado pela central." },
+  { code: "hold_position", label: "Aguarde instruções na posição atual." },
+  { code: "priority_support", label: "Apoio em deslocação para o local." },
+  { code: "normal_resume", label: "Situação normalizada. Retome o percurso." },
+];
+
+const BUILTIN_DRIVER_MESSAGE_PRESETS = [
+  { code: "delay_traffic", label: "Atraso por trânsito intenso" },
+  { code: "breakdown", label: "Avaria na viatura" },
+  { code: "accident", label: "Acidente no percurso" },
+  { code: "route_blocked", label: "Via cortada/desvio necessário" },
+  { code: "request_support", label: "Preciso de apoio operacional" },
+];
+
+async function ensureOpsMessagePresetsTable() {
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS ops_message_presets (
+      id BIGSERIAL PRIMARY KEY,
+      scope VARCHAR(20) NOT NULL,
+      code VARCHAR(60) NOT NULL,
+      label VARCHAR(200) NOT NULL,
+      default_message_text TEXT,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      created_by_user_id INT REFERENCES users(id) ON DELETE SET NULL,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      UNIQUE (scope, code)
+    )`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_ops_message_presets_scope_active
+     ON ops_message_presets(scope, is_active)`
+  );
 }
 
-router.get("/message-presets", async (_req, res) => {
-  return res.json(getSupervisorMessagePresets());
+function mergeMessagePresets(builtin, dbRows) {
+  const byCode = new Map();
+  builtin.forEach((p) => {
+    if (!p?.code) return;
+    byCode.set(p.code, { ...p, source: "builtin" });
+  });
+  (Array.isArray(dbRows) ? dbRows : []).forEach((row) => {
+    if (!row?.code) return;
+    byCode.set(row.code, {
+      id: row.id,
+      code: row.code,
+      label: row.label,
+      defaultText: row.default_message_text,
+      isActive: row.is_active,
+      source: "custom",
+    });
+  });
+  return [...byCode.values()].sort((a, b) => String(a.label || "").localeCompare(String(b.label || ""), "pt"));
+}
+
+function normalizePresetCodeInput(raw) {
+  const s = String(raw || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_]+/g, "_")
+    .replace(/^_+|_+$/g, "");
+  return s || null;
+}
+
+function makeUniquePresetCodeFromLabel(label) {
+  const base = normalizePresetCodeInput(label.replace(/\s+/g, "_")) || "preset";
+  return `${base}_${Date.now()}`;
+}
+
+async function listMessagePresetsForScope(scope) {
+  if (scope === "supervisor") {
+    const custom = await db.query(
+      `SELECT id, code, label, default_message_text, is_active
+       FROM ops_message_presets
+       WHERE scope = 'supervisor' AND is_active = TRUE
+       ORDER BY label ASC`
+    );
+    return mergeMessagePresets(BUILTIN_SUPERVISOR_MESSAGE_PRESETS, custom.rows);
+  }
+  if (scope === "driver") {
+    const custom = await db.query(
+      `SELECT id, code, label, default_message_text, is_active
+       FROM ops_message_presets
+       WHERE scope = 'driver' AND is_active = TRUE
+       ORDER BY label ASC`
+    );
+    return mergeMessagePresets(BUILTIN_DRIVER_MESSAGE_PRESETS, custom.rows);
+  }
+  return [];
+}
+
+router.get("/message-presets", async (req, res) => {
+  try {
+    await ensureOpsMessagePresetsTable();
+    const scope = String(req.query.scope || "supervisor").trim().toLowerCase();
+    if (scope !== "supervisor" && scope !== "driver") {
+      return res.status(400).json({ message: "Indique scope=supervisor ou driver." });
+    }
+    const list = await listMessagePresetsForScope(scope);
+    return res.json(list);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar predefinidas de mensagem." });
+  }
+});
+
+router.get("/message-presets/manage", async (req, res) => {
+  try {
+    await ensureOpsMessagePresetsTable();
+    const scope = String(req.query.scope || "supervisor").trim().toLowerCase();
+    if (scope !== "supervisor" && scope !== "driver") {
+      return res.status(400).json({ message: "Indique scope=supervisor ou driver." });
+    }
+    const result = await db.query(
+      `SELECT id, scope, code, label, default_message_text, is_active, created_at, updated_at
+       FROM ops_message_presets
+       WHERE scope = $1
+       ORDER BY is_active DESC, label ASC`,
+      [scope]
+    );
+    return res.json(result.rows);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar predefinidas (gestão)." });
+  }
+});
+
+router.post("/message-presets", async (req, res) => {
+  try {
+    await ensureOpsMessagePresetsTable();
+    const scope = String(req.body?.scope || "").trim().toLowerCase();
+    if (scope !== "supervisor" && scope !== "driver") {
+      return res.status(400).json({ message: "scope inválido (use supervisor ou driver)." });
+    }
+    const label = String(req.body?.label || "").trim();
+    if (label.length < 2) {
+      return res.status(400).json({ message: "Indique um rótulo com pelo menos 2 caracteres." });
+    }
+    const defaultText = String(req.body?.defaultText || "").trim() || label;
+    const isActive = req.body?.isActive !== false;
+    let code = normalizePresetCodeInput(req.body?.code) || makeUniquePresetCodeFromLabel(label);
+    if (code.length > 60) {
+      return res.status(400).json({ message: "Código demasiado longo (máx. 60 caracteres)." });
+    }
+    const builtinSet = new Set(
+      (scope === "supervisor" ? BUILTIN_SUPERVISOR_MESSAGE_PRESETS : BUILTIN_DRIVER_MESSAGE_PRESETS).map((p) => p.code)
+    );
+    if (builtinSet.has(code)) {
+      return res.status(409).json({ message: "Esse código está reservado (predefinida de fábrica). Escolha outro." });
+    }
+    const inserted = await db.query(
+      `INSERT INTO ops_message_presets (scope, code, label, default_message_text, is_active, created_by_user_id, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+       ON CONFLICT (scope, code) DO UPDATE
+       SET label = EXCLUDED.label,
+           default_message_text = EXCLUDED.default_message_text,
+           is_active = EXCLUDED.is_active,
+           created_by_user_id = COALESCE(ops_message_presets.created_by_user_id, EXCLUDED.created_by_user_id),
+           updated_at = NOW()
+       RETURNING id, scope, code, label, default_message_text, is_active, created_at, updated_at`,
+      [scope, code, label, defaultText, isActive, req.user.id]
+    );
+    return res.status(201).json({ preset: inserted.rows[0] });
+  } catch (error) {
+    if (String(error?.code) === "23505") {
+      return res.status(409).json({ message: "Já existe uma predefinida com esse código para este contexto." });
+    }
+    return res.status(500).json({ message: "Erro ao criar predefinida." });
+  }
+});
+
+router.patch("/message-presets/:presetId", async (req, res) => {
+  try {
+    await ensureOpsMessagePresetsTable();
+    const presetId = Number(req.params.presetId);
+    if (!Number.isFinite(presetId) || presetId <= 0) {
+      return res.status(400).json({ message: "Identificador inválido." });
+    }
+    const label = String(req.body?.label || "").trim();
+    const defaultText = String(req.body?.defaultText || "").trim();
+    if (label && label.length < 2) {
+      return res.status(400).json({ message: "Rótulo inválido." });
+    }
+    if (req.body?.isActive === undefined && !label && !defaultText) {
+      return res.status(400).json({ message: "Nada a atualizar." });
+    }
+    const updated = await db.query(
+      `UPDATE ops_message_presets
+       SET
+         label = COALESCE(NULLIF($2::text, ''), label),
+         default_message_text = COALESCE(NULLIF($3::text, ''), default_message_text),
+         is_active = COALESCE($4::boolean, is_active),
+         updated_at = NOW()
+       WHERE id = $1
+       RETURNING id, scope, code, label, default_message_text, is_active, created_at, updated_at`,
+      [presetId, label || null, defaultText || null, typeof req.body?.isActive === "boolean" ? req.body.isActive : null]
+    );
+    if (!updated.rowCount) {
+      return res.status(404).json({ message: "Predefinida não encontrada." });
+    }
+    return res.json({ preset: updated.rows[0] });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao atualizar predefinida." });
+  }
+});
+
+router.delete("/message-presets/:presetId", async (req, res) => {
+  try {
+    await ensureOpsMessagePresetsTable();
+    const presetId = Number(req.params.presetId);
+    if (!Number.isFinite(presetId) || presetId <= 0) {
+      return res.status(400).json({ message: "Identificador inválido." });
+    }
+    const result = await db.query(`DELETE FROM ops_message_presets WHERE id = $1 RETURNING id`, [presetId]);
+    if (!result.rowCount) {
+      return res.status(404).json({ message: "Predefinida não encontrada." });
+    }
+    return res.json({ ok: true, id: result.rows[0].id });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao remover predefinida." });
+  }
 });
 
 router.get("/messages/threads", async (_req, res) => {

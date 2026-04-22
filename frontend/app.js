@@ -597,8 +597,21 @@ async function loadDriverMessagePresets() {
       const option = document.createElement("option");
       option.value = item.code || "";
       option.textContent = item.label || item.code || "Preset";
+      const def =
+        item.defaultText != null && String(item.defaultText).trim()
+          ? String(item.defaultText)
+          : String(item.label || "");
+      option.dataset.defaultText = def;
       driverMessagePresetEl.appendChild(option);
     });
+    driverMessagePresetEl.onchange = () => {
+      if (!driverMessageTextEl) return;
+      const value = driverMessagePresetEl.value;
+      if (!value) return;
+      const opt = driverMessagePresetEl.selectedOptions?.[0];
+      const def = opt?.dataset?.defaultText;
+      if (def) driverMessageTextEl.value = def;
+    };
   } catch (_error) {
     // ignore
   }

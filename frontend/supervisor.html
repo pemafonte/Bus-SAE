@@ -40,7 +40,8 @@
             <button type="button" class="tab-btn" data-tab-target="tabExportarMotoristas">Exportar dados</button>
             <button type="button" class="tab-btn" data-tab-target="tabListaMotoristas">Lista de motoristas</button>
             <button type="button" class="tab-btn" data-tab-target="tabIntegracoesGps">Integrações GPS</button>
-            <button type="button" class="tab-btn" data-tab-target="tabMensagensTransito">Mensagens/Trânsito</button>
+            <button type="button" class="tab-btn" data-tab-target="tabMensagensComunicacao">Mensagens</button>
+            <button type="button" class="tab-btn" data-tab-target="tabMensagensPresets">Pré-definidas</button>
             <button type="button" class="tab-btn" data-tab-target="tabParagensServico">Paragens (serviço)</button>
             <button type="button" class="tab-btn" data-tab-target="tabRelatoriosIa">Relatórios IA</button>
           </aside>
@@ -353,7 +354,7 @@
           </section>
         </div>
 
-        <div id="tabMensagensTransito" class="tab-panel">
+        <div id="tabMensagensComunicacao" class="tab-panel">
           <h2>Mensagens operacionais e alertas de trânsito</h2>
           <p class="field-help" style="margin-top: 0">
             Comunicação bidirecional entre supervisão e motoristas. Mensagens marcadas como alerta de trânsito ficam destacadas.
@@ -397,6 +398,45 @@
               </section>
             </section>
           </div>
+        </div>
+
+        <div id="tabMensagensPresets" class="tab-panel">
+          <h2>Mensagens pré-definidas</h2>
+          <p class="field-help" style="margin-top: 0">
+            Crie textos rápidos para envio ao motorista (supervisor) e textos que o motorista pode escolher ao falar com a
+            central. As de fábrica podem ser sobrescritas ao criar uma predefinida com o mesmo código.
+          </p>
+          <section class="card">
+            <h3>Nova predefinida</h3>
+            <form id="supPresetForm">
+              <label for="supPresetScope">Contexto</label>
+              <select id="supPresetScope" required>
+                <option value="supervisor">Mensagem do supervisor para o motorista</option>
+                <option value="driver">Mensagem do motorista para a central</option>
+              </select>
+              <label for="supPresetCode">Código (opcional, único por contexto)</label>
+              <input id="supPresetCode" type="text" placeholder="ex.: reforco_seguranca" />
+              <label for="supPresetLabel">Rótulo (menu)</label>
+              <input id="supPresetLabel" type="text" required placeholder="Texto mostrado na lista" />
+              <label for="supPresetDefaultText">Texto predefinido (corpo da mensagem)</label>
+              <textarea id="supPresetDefaultText" rows="3" placeholder="Mensagem sugerida ao escolher esta opção"></textarea>
+              <label class="inline-checkbox">
+                <input id="supPresetIsActive" type="checkbox" checked />
+                Ativa
+              </label>
+              <button type="submit">Guardar</button>
+            </form>
+          </section>
+          <section class="card" style="margin-top: 12px">
+            <h3>Lista (gestão)</h3>
+            <label for="supPresetListScope">Filtrar</label>
+            <select id="supPresetListScope">
+              <option value="supervisor">Supervisor → motorista</option>
+              <option value="driver">Motorista → central</option>
+            </select>
+            <button type="button" id="refreshSupPresetListBtn">Atualizar lista</button>
+            <ul id="supPresetList"></ul>
+          </section>
         </div>
 
         <div id="tabParagensServico" class="tab-panel">
