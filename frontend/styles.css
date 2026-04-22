@@ -161,6 +161,65 @@ body::after {
   background: #eff6ff;
 }
 
+.driver-map-status-top {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+}
+
+.driver-delay-box {
+  min-width: 180px;
+  text-align: right;
+}
+
+.driver-delay-box strong {
+  display: block;
+  font-size: 26px;
+  line-height: 1.1;
+}
+
+.driver-delay-box strong.delay-positive {
+  color: #dc2626;
+}
+
+.driver-delay-box strong.delay-negative {
+  color: #0f766e;
+}
+
+.driver-delay-box strong.delay-neutral {
+  color: #1d4ed8;
+}
+
+.driver-ops-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+#mapTodayServicesList,
+#mapStopsTimeline {
+  max-height: 280px;
+  overflow: auto;
+  margin: 0;
+  padding: 0 0 0 18px;
+}
+
+#mapTodayServicesList li,
+#mapStopsTimeline li {
+  margin: 6px 0;
+  line-height: 1.3;
+}
+
+#mapStopsTimeline li.stop-passed {
+  opacity: 0.6;
+}
+
+#mapStopsTimeline li.stop-next {
+  font-weight: 700;
+  color: #ea580c;
+}
+
 .tab-panel {
   display: none;
 }

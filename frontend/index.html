@@ -79,6 +79,19 @@
 
               <section id="driverStepMap" class="tab-panel">
                 <h2>Percurso e operações</h2>
+                <section class="card">
+                  <div class="driver-map-status-top">
+                    <div>
+                      <strong>Estado da viagem</strong>
+                      <div id="driverMapLiveState">Sem viagem em execução.</div>
+                    </div>
+                    <div class="driver-delay-box">
+                      <small>Atraso próxima paragem</small>
+                      <strong id="driverNextStopDelay">--</strong>
+                    </div>
+                  </div>
+                  <div id="driverNextStopInfo" class="field-help">Sem dados de próxima paragem.</div>
+                </section>
                 <div id="map"></div>
                 <div class="map-legend" aria-label="Legenda do mapa do motorista">
                   <span class="map-legend-item">
@@ -94,6 +107,19 @@
                 <section class="card">
                   <h3>Resumo do serviço</h3>
                   <pre id="serviceSummary">Sem viagem em curso.</pre>
+                </section>
+
+                <section class="card">
+                  <div class="driver-ops-grid">
+                    <div>
+                      <h3>Serviços do dia</h3>
+                      <ul id="mapTodayServicesList"></ul>
+                    </div>
+                    <div>
+                      <h3>Linha de paragens (GTFS)</h3>
+                      <ol id="mapStopsTimeline"></ol>
+                    </div>
+                  </div>
                 </section>
 
                 <section class="card">

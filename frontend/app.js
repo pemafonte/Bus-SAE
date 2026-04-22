@@ -66,6 +66,45 @@ function scheduleRangesOverlap(a, b) {
   return a.start < b.end && b.start < a.end;
 }
 
+function parseGtfsTimeToParts(gtfsTime) {
+  const text = String(gtfsTime || "").trim();
+  if (!text.includes(":")) return null;
+  const chunks = text.split(":");
+  if (chunks.length < 2) return null;
+  const hh = Number(chunks[0]);
+  const mm = Number(chunks[1]);
+  const ss = Number(chunks[2] || 0);
+  if (!Number.isFinite(hh) || !Number.isFinite(mm) || !Number.isFinite(ss)) return null;
+  return { hh, mm, ss };
+}
+
+function toStopScheduledDate(stop, baseStartedAt) {
+  const raw = stop?.departureTime || stop?.arrivalTime;
+  const parsed = parseGtfsTimeToParts(raw);
+  if (!parsed || !baseStartedAt) return null;
+  const base = new Date(baseStartedAt);
+  if (Number.isNaN(base.getTime())) return null;
+  const d = new Date(base);
+  d.setHours(0, 0, 0, 0);
+  const dayOffset = Math.floor(parsed.hh / 24);
+  const hourInDay = parsed.hh % 24;
+  d.setDate(d.getDate() + dayOffset);
+  d.setHours(hourInDay, parsed.mm, parsed.ss, 0);
+  return d;
+}
+
+function distanceMeters(aLat, aLng, bLat, bLng) {
+  const r = 6371000;
+  const dLat = ((bLat - aLat) * Math.PI) / 180;
+  const dLng = ((bLng - aLng) * Math.PI) / 180;
+  const lat1 = (aLat * Math.PI) / 180;
+  const lat2 = (bLat * Math.PI) / 180;
+  const h =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1) * Math.cos(lat2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  return 2 * r * Math.asin(Math.sqrt(h));
+}
+
 let token = "";
 let activeServiceId = null;
 let watchId = null;
@@ -80,6 +119,10 @@ let driverMessagesRefreshTimer = null;
 let driverAlertsPollTimer = null;
 let driverAlertBaselineReady = false;
 let lastDriverAlertSignature = "";
+let todayServicesCache = [];
+let activeReferenceStops = [];
+let activeStopProgressIndex = 0;
+let activeServiceStartedAt = null;
 const AUTH_SESSION_KEY = "auth_session";
 const GPS_QUEUE_STORAGE_KEY = "gps_point_queue_v1";
 const GPS_BATCH_SIZE = 50;
@@ -109,6 +152,11 @@ const driverMessagesListEl = document.getElementById("driverMessagesList");
 const driverAlertSoundTypeEl = document.getElementById("driverAlertSoundType");
 const driverAlertSoundVolumeEl = document.getElementById("driverAlertSoundVolume");
 const testDriverAlertSoundBtnEl = document.getElementById("testDriverAlertSoundBtn");
+const driverNextStopDelayEl = document.getElementById("driverNextStopDelay");
+const driverNextStopInfoEl = document.getElementById("driverNextStopInfo");
+const driverMapLiveStateEl = document.getElementById("driverMapLiveState");
+const mapTodayServicesListEl = document.getElementById("mapTodayServicesList");
+const mapStopsTimelineEl = document.getElementById("mapStopsTimeline");
 
 const map = L.map("map").setView([38.7223, -9.1393], 12);
 
@@ -215,6 +263,12 @@ function clearActiveServiceState() {
     map.removeLayer(activeBusMarker);
     activeBusMarker = null;
   }
+  activeReferenceStops = [];
+  activeStopProgressIndex = 0;
+  activeServiceStartedAt = null;
+  renderStopsTimeline(0);
+  resetNextStopDelayUi();
+  if (driverMapLiveStateEl) driverMapLiveStateEl.textContent = "Sem viagem em execução.";
 }
 
 function persistGpsQueue() {
@@ -640,6 +694,108 @@ function setSummary(text) {
   summaryEl.textContent = text;
 }
 
+function renderMapTodayServicesPanel() {
+  if (!mapTodayServicesListEl) return;
+  mapTodayServicesListEl.innerHTML = "";
+  if (!todayServicesCache.length) {
+    const li = document.createElement("li");
+    li.textContent = "Sem serviços carregados.";
+    mapTodayServicesListEl.appendChild(li);
+    return;
+  }
+  todayServicesCache.forEach((item) => {
+    const li = document.createElement("li");
+    const isActive = Number(activeServiceId) === Number(item.current_service_id || item.service_id || item.id);
+    li.innerHTML = `<strong>${item.service_code || "-"}</strong> | Linha ${item.line_code || "-"} | ${item.service_schedule || "-"}${
+      isActive ? " | EM EXECUCAO" : ""
+    }`;
+    mapTodayServicesListEl.appendChild(li);
+  });
+}
+
+function renderStopsTimeline(nextIndex = 0) {
+  if (!mapStopsTimelineEl) return;
+  mapStopsTimelineEl.innerHTML = "";
+  if (!activeReferenceStops.length) {
+    const li = document.createElement("li");
+    li.textContent = "Sem paragens GTFS para este serviço.";
+    mapStopsTimelineEl.appendChild(li);
+    return;
+  }
+  activeReferenceStops.forEach((stop, index) => {
+    const li = document.createElement("li");
+    if (index < nextIndex) li.classList.add("stop-passed");
+    if (index === nextIndex) li.classList.add("stop-next");
+    const hhmm = String(stop.departureTime || stop.arrivalTime || "-");
+    li.textContent = `#${stop.sequence ?? index + 1} ${stop.stopName || "-"} (${hhmm})`;
+    mapStopsTimelineEl.appendChild(li);
+  });
+}
+
+function resetNextStopDelayUi() {
+  if (driverNextStopDelayEl) {
+    driverNextStopDelayEl.textContent = "--";
+    driverNextStopDelayEl.classList.remove("delay-positive", "delay-negative", "delay-neutral");
+  }
+  if (driverNextStopInfoEl) {
+    driverNextStopInfoEl.textContent = "Sem dados de próxima paragem.";
+  }
+}
+
+function updateNextStopDelayFromPosition(lat, lng) {
+  if (!Array.isArray(activeReferenceStops) || !activeReferenceStops.length || !activeServiceStartedAt) {
+    resetNextStopDelayUi();
+    return;
+  }
+
+  while (activeStopProgressIndex < activeReferenceStops.length) {
+    const candidate = activeReferenceStops[activeStopProgressIndex];
+    const dist = distanceMeters(lat, lng, Number(candidate.lat), Number(candidate.lng));
+    if (Number.isFinite(dist) && dist <= 80) {
+      activeStopProgressIndex += 1;
+      continue;
+    }
+    break;
+  }
+  if (activeStopProgressIndex >= activeReferenceStops.length) {
+    if (driverNextStopDelayEl) {
+      driverNextStopDelayEl.textContent = "0 min";
+      driverNextStopDelayEl.classList.remove("delay-positive", "delay-negative");
+      driverNextStopDelayEl.classList.add("delay-neutral");
+    }
+    if (driverNextStopInfoEl) driverNextStopInfoEl.textContent = "Paragens concluídas para este trajeto.";
+    renderStopsTimeline(activeReferenceStops.length);
+    return;
+  }
+
+  const nextStop = activeReferenceStops[activeStopProgressIndex];
+  const scheduledDate = toStopScheduledDate(nextStop, activeServiceStartedAt);
+  if (!scheduledDate) {
+    resetNextStopDelayUi();
+    return;
+  }
+  const now = new Date();
+  const diffMin = Math.round((now.getTime() - scheduledDate.getTime()) / 60000);
+  if (driverNextStopDelayEl) {
+    driverNextStopDelayEl.classList.remove("delay-positive", "delay-negative", "delay-neutral");
+    if (diffMin > 0) {
+      driverNextStopDelayEl.textContent = `${diffMin} min`;
+      driverNextStopDelayEl.classList.add("delay-positive");
+    } else if (diffMin < 0) {
+      driverNextStopDelayEl.textContent = `${Math.abs(diffMin)} min adiantado`;
+      driverNextStopDelayEl.classList.add("delay-negative");
+    } else {
+      driverNextStopDelayEl.textContent = "0 min";
+      driverNextStopDelayEl.classList.add("delay-neutral");
+    }
+  }
+  if (driverNextStopInfoEl) {
+    const planned = scheduledDate.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    driverNextStopInfoEl.textContent = `Próxima paragem: ${nextStop.stopName || "-"} (${planned})`;
+  }
+  renderStopsTimeline(activeStopProgressIndex);
+}
+
 function updateFleetWarning() {
   const currentValue = fleetNumberInput.value.trim();
   const hasPlanned = selectedPlannedServiceId && selectedPlannedFleetNumber;
@@ -794,6 +950,10 @@ async function restoreActiveService() {
       `Estado: ${labelEstadoExecucaoServicoPt(active.status)}`,
     ].join("\n")
   );
+  activeServiceStartedAt = active.started_at || null;
+  if (driverMapLiveStateEl) {
+    driverMapLiveStateEl.textContent = `Serviço ${active.id} | Linha ${active.line_code || "-"} | Frota ${active.fleet_number || "-"}`;
+  }
   if (navigator.geolocation) {
     navigator.geolocation.getCurrentPosition(
       (position) => {
@@ -863,6 +1023,10 @@ async function startTrip(event) {
       `Estado: ${labelEstadoExecucaoServicoPt(data.status)}`,
     ].join("\n")
   );
+  activeServiceStartedAt = data.started_at || null;
+  if (driverMapLiveStateEl) {
+    driverMapLiveStateEl.textContent = `Serviço ${data.id} | Linha ${data.line_code || "-"} | Frota ${data.fleet_number || "-"}`;
+  }
 
   await loadReferenceRoute(data.id);
   startLocationTracking();
@@ -879,6 +1043,10 @@ async function loadReferenceRoute(serviceId) {
   if (!response.ok || !data.points?.length) {
     referenceRoutePolyline.setLatLngs([]);
     gtfsStopsLayer.clearLayers();
+    activeReferenceStops = [];
+    activeStopProgressIndex = 0;
+    renderStopsTimeline(0);
+    resetNextStopDelayUi();
     return;
   }
 
@@ -889,6 +1057,8 @@ async function loadReferenceRoute(serviceId) {
   }
 
   gtfsStopsLayer.clearLayers();
+  activeReferenceStops = Array.isArray(data.stops) ? data.stops : [];
+  activeStopProgressIndex = 0;
   if (Array.isArray(data.stops) && data.stops.length) {
     data.stops.forEach((stop) => {
       if (typeof stop.lat !== "number" || typeof stop.lng !== "number") return;
@@ -906,6 +1076,7 @@ async function loadReferenceRoute(serviceId) {
       gtfsStopsLayer.addLayer(marker);
     });
   }
+  renderStopsTimeline(activeStopProgressIndex);
 }
 
 async function loadReferenceRoutePreview(lineCode, serviceSchedule) {
@@ -974,6 +1145,7 @@ function startLocationTracking() {
       routePolyline.addLatLng([lat, lng]);
       updateActiveBusMarker(lat, lng, fleetNumberInput.value.trim() || selectedPlannedFleetNumber);
       map.setView([lat, lng], 15);
+      updateNextStopDelayFromPosition(lat, lng);
 
       if (!activeServiceId || !token) return;
       enqueueGpsPoint({
@@ -1099,12 +1271,15 @@ async function loadTodayServices() {
     alert(data.message || "Erro ao carregar os serviços de hoje.");
     return;
   }
+  todayServicesCache = Array.isArray(data) ? data : [];
+  renderMapTodayServicesPanel();
 
   todayServicesList.innerHTML = "";
   if (!data.length) {
     const li = document.createElement("li");
     li.textContent = "Sem serviços previstos para hoje.";
     todayServicesList.appendChild(li);
+    renderMapTodayServicesPanel();
     return;
   }
 
@@ -1258,6 +1433,12 @@ async function loadPendingHandovers() {
           `Estado: ${labelEstadoExecucaoServicoPt(resumeData.service.status)}`,
         ].join("\n")
       );
+      activeServiceStartedAt = resumeData.service.started_at || null;
+      if (driverMapLiveStateEl) {
+        driverMapLiveStateEl.textContent = `Serviço ${resumeData.service.id} | Linha ${resumeData.service.line_code || "-"} | Frota ${
+          resumeData.service.fleet_number || "-"
+        }`;
+      }
       await loadReferenceRoute(item.service_id);
       startLocationTracking();
       startActiveServiceSync();
