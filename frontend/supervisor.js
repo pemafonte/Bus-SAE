@@ -1012,6 +1012,41 @@ async function loadOperationalReport() {
   }
 }
 
+async function downloadOperationalReportExcel(queryString) {
+  if (!supToken) return;
+  const url = `${API_BASE}/supervisor/reports/performance.xlsx${queryString || ""}`;
+  try {
+    const response = await fetch(url, { headers: getAuthHeaders() });
+    if (!response.ok) {
+      const errText = await response.text();
+      let message = "Erro ao exportar o relatório.";
+      try {
+        const j = JSON.parse(errText);
+        message = j.message || message;
+      } catch (_e) {
+        // ignore
+      }
+      alert(message);
+      return;
+    }
+    const blob = await response.blob();
+    const cd = response.headers.get("Content-Disposition") || "";
+    const match = cd.match(/filename="([^"]+)"/i);
+    const fallback = `relatorio-ia${queryString || ""}.xlsx`.replace(/[?&=]/g, "_");
+    const filename = match ? match[1] : fallback;
+    const objectUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objectUrl;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(objectUrl);
+  } catch (error) {
+    alert(error?.message || "Erro ao descarregar o ficheiro Excel.");
+  }
+}
+
 function initTabs() {
   const tabButtons = document.querySelectorAll(".tab-btn");
   tabButtons.forEach((btn) => {
@@ -2840,6 +2875,33 @@ if (reportsFormEl) {
   reportsFormEl.addEventListener("submit", async (event) => {
     event.preventDefault();
     await loadOperationalReport();
+  });
+}
+const exportReportExcelBtn = document.getElementById("exportReportExcelBtn");
+if (exportReportExcelBtn) {
+  exportReportExcelBtn.addEventListener("click", () => {
+    if (!supToken) {
+      alert("Sessão inválida.");
+      return;
+    }
+    const query = buildOperationalReportQuery();
+    void downloadOperationalReportExcel(query);
+  });
+}
+const exportReportExcelTodayBtn = document.getElementById("exportReportExcelTodayBtn");
+if (exportReportExcelTodayBtn) {
+  exportReportExcelTodayBtn.addEventListener("click", () => {
+    if (!supToken) {
+      alert("Sessão inválida.");
+      return;
+    }
+    const fromDateEl = document.getElementById("reportFromDate");
+    const toDateEl = document.getElementById("reportToDate");
+    const today = todayISOInLisbon();
+    if (fromDateEl) fromDateEl.value = today;
+    if (toDateEl) toDateEl.value = today;
+    const query = buildOperationalReportQuery();
+    void downloadOperationalReportExcel(query);
   });
 }
 if (supMessageFormEl) {

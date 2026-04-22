@@ -2700,10 +2700,10 @@ router.get("/services/:serviceId/stop-passages", async (req, res) => {
   }
 });
 
-router.get("/reports/performance", async (req, res) => {
-  const { fromDate, toDate, lineCode, driverId } = req.query;
-  const radiusMeters = Math.min(Math.max(Number(req.query.radiusM) || 85, 40), 200);
-  const maxServices = Math.min(Math.max(Number(req.query.maxServices) || 120, 10), 400);
+async function computeOperationalPerformanceReport(query) {
+  const { fromDate, toDate, lineCode, driverId } = query || {};
+  const radiusMeters = Math.min(Math.max(Number(query?.radiusM) || 85, 40), 200);
+  const maxServices = Math.min(Math.max(Number(query?.maxServices) || 120, 10), 400);
   const where = [];
   const values = [];
   let idx = 1;
@@ -2727,190 +2727,223 @@ router.get("/reports/performance", async (req, res) => {
   where.push(`s.status IN ('in_progress', 'completed', 'cancelled')`);
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
-  try {
-    const svcRes = await db.query(
-      `SELECT
-         s.id,
-         s.gtfs_trip_id,
-         s.line_code,
-         s.service_schedule,
-         s.fleet_number,
-         s.started_at,
-         s.ended_at,
-         s.status,
-         u.name AS driver_name
-       FROM services s
-       JOIN users u ON u.id = s.driver_id
-       ${whereSql}
-       ORDER BY s.started_at DESC
-       LIMIT ${maxServices}`,
-      values
-    );
-    const services = svcRes.rows;
-    if (!services.length) {
-      return res.json({
-        summary: {
-          services_analyzed: 0,
-          services_with_reference_stops: 0,
-          total_stops_analyzed: 0,
-          avg_delay_min: 0,
-          delay_p90_min: 0,
-          missed_stop_rate_pct: 0,
-        },
-        critical_stops: [],
-        service_rank: [],
-        ai_suggestions: ["Sem serviços no período selecionado."],
-      });
-    }
-
-    const serviceIds = services.map((s) => Number(s.id)).filter((id) => Number.isFinite(id));
-    const pointsRes = await db.query(
-      `SELECT service_id, lat, lng, captured_at
-       FROM service_points
-       WHERE service_id = ANY($1::int[])
-       ORDER BY service_id ASC, captured_at ASC`,
-      [serviceIds]
-    );
-    const pointsByService = new Map();
-    for (const p of pointsRes.rows) {
-      if (!pointsByService.has(p.service_id)) pointsByService.set(p.service_id, []);
-      pointsByService.get(p.service_id).push(p);
-    }
-
-    const stopsByTrip = new Map();
-    const bestTripByHeader = new Map();
-    const delays = [];
-    const stopAgg = new Map();
-    const serviceRank = [];
-    let servicesWithStops = 0;
-    let totalStops = 0;
-    let totalMatched = 0;
-
-    for (const svc of services) {
-      let tripId = svc.gtfs_trip_id || null;
-      if (!tripId) {
-        const headerKey = `${String(svc.line_code || "").trim()}|${String(svc.service_schedule || "").trim()}`;
-        if (!bestTripByHeader.has(headerKey)) {
-          const best = await findBestTripForLine(svc.line_code, svc.service_schedule);
-          bestTripByHeader.set(headerKey, best?.trip_id || null);
-        }
-        tripId = bestTripByHeader.get(headerKey);
-      }
-      if (!tripId) continue;
-
-      if (!stopsByTrip.has(tripId)) {
-        const stops = await getStopsByTripId(tripId);
-        stopsByTrip.set(tripId, Array.isArray(stops) ? stops : []);
-      }
-      const stops = stopsByTrip.get(tripId) || [];
-      if (!stops.length) continue;
-      servicesWithStops += 1;
-
-      const points = pointsByService.get(svc.id) || [];
-      const matchedRows = matchGpsPointsToGtfsStops(stops, points, {
-        radiusMeters,
-        serviceStartedAt: svc.started_at,
-      });
-      totalStops += matchedRows.total;
-      totalMatched += matchedRows.matched;
-
-      const serviceDay = lisbonDayKey(svc.started_at);
-      const serviceDelaySamples = [];
-      for (const row of matchedRows.rows) {
-        if (!row.passed_near_stop || !row.passed_at) continue;
-        const scheduledRefMin = parseGtfsTimeToRelativeMinutes(row.scheduled_departure || row.scheduled_arrival);
-        if (scheduledRefMin == null) continue;
-
-        const passMin = lisbonMinutesOfDay(row.passed_at);
-        const passDay = lisbonDayKey(row.passed_at);
-        const passDayOffset = diffDays(passDay, serviceDay);
-        if (passMin == null || passDayOffset == null) continue;
-        const passRelativeMin = passDayOffset * 1440 + passMin;
-        const delayMin = passRelativeMin - scheduledRefMin;
-        if (!Number.isFinite(delayMin)) continue;
-        delays.push(delayMin);
-        serviceDelaySamples.push(delayMin);
-
-        const key = `${row.stop_id || ""}|${row.stop_name || ""}`;
-        if (!stopAgg.has(key)) {
-          stopAgg.set(key, {
-            stop_id: row.stop_id || "",
-            stop_name: row.stop_name || "Paragem sem nome",
-            samples: 0,
-            delayed_samples: 0,
-            severe_samples: 0,
-            total_delay_min: 0,
-          });
-        }
-        const acc = stopAgg.get(key);
-        acc.samples += 1;
-        acc.total_delay_min += delayMin;
-        if (delayMin > 3) acc.delayed_samples += 1;
-        if (delayMin > 8) acc.severe_samples += 1;
-      }
-
-      const avgDelay = serviceDelaySamples.length
-        ? serviceDelaySamples.reduce((sum, val) => sum + val, 0) / serviceDelaySamples.length
-        : null;
-      const maxDelay = serviceDelaySamples.length ? Math.max(...serviceDelaySamples) : null;
-      serviceRank.push({
-        service_id: svc.id,
-        line_code: svc.line_code,
-        driver_name: svc.driver_name,
-        fleet_number: svc.fleet_number,
-        status: svc.status,
-        started_at: svc.started_at,
-        ended_at: svc.ended_at,
-        stops_total: matchedRows.total,
-        stops_matched: matchedRows.matched,
-        avg_delay_min: avgDelay == null ? null : Math.round(avgDelay * 10) / 10,
-        max_delay_min: maxDelay == null ? null : Math.round(maxDelay * 10) / 10,
-      });
-    }
-
-    const sortedDelays = [...delays].sort((a, b) => a - b);
-    const avgDelay = sortedDelays.length ? sortedDelays.reduce((sum, val) => sum + val, 0) / sortedDelays.length : 0;
-    const p90Delay = sortedDelays.length ? sortedDelays[Math.floor((sortedDelays.length - 1) * 0.9)] : 0;
-
-    const criticalStops = [...stopAgg.values()]
-      .map((s) => {
-        const avg = s.samples ? s.total_delay_min / s.samples : 0;
-        const delayedPct = s.samples ? (s.delayed_samples / s.samples) * 100 : 0;
-        const severePct = s.samples ? (s.severe_samples / s.samples) * 100 : 0;
-        const score = avg * 0.65 + delayedPct * 0.2 + severePct * 0.15;
-        return {
-          stop_id: s.stop_id,
-          stop_name: s.stop_name,
-          samples: s.samples,
-          avg_delay_min: Math.round(avg * 10) / 10,
-          delayed_rate_pct: Math.round(delayedPct * 10) / 10,
-          severe_delay_rate_pct: Math.round(severePct * 10) / 10,
-          criticality_score: Math.round(score * 10) / 10,
-        };
-      })
-      .sort((a, b) => b.criticality_score - a.criticality_score)
-      .slice(0, 20);
-
-    const missedStopRate = totalStops ? ((totalStops - totalMatched) / totalStops) * 100 : 0;
-    const summary = {
-      services_analyzed: services.length,
-      services_with_reference_stops: servicesWithStops,
-      total_stops_analyzed: totalStops,
-      avg_delay_min: Math.round(avgDelay * 10) / 10,
-      delay_p90_min: Math.round(Number(p90Delay || 0) * 10) / 10,
-      missed_stop_rate_pct: Math.round(missedStopRate * 10) / 10,
+  const svcRes = await db.query(
+    `SELECT
+       s.id,
+       s.gtfs_trip_id,
+       s.line_code,
+       s.service_schedule,
+       s.fleet_number,
+       s.started_at,
+       s.ended_at,
+       s.status,
+       u.name AS driver_name
+     FROM services s
+     JOIN users u ON u.id = s.driver_id
+     ${whereSql}
+     ORDER BY s.started_at DESC
+     LIMIT ${maxServices}`,
+    values
+  );
+  const services = svcRes.rows;
+  if (!services.length) {
+    return {
+      summary: {
+        services_analyzed: 0,
+        services_with_reference_stops: 0,
+        total_stops_analyzed: 0,
+        avg_delay_min: 0,
+        delay_p90_min: 0,
+        missed_stop_rate_pct: 0,
+      },
+      critical_stops: [],
+      service_rank: [],
+      ai_suggestions: ["Sem serviços no período selecionado."],
     };
+  }
 
-    return res.json({
-      summary,
-      critical_stops: criticalStops,
-      service_rank: serviceRank
-        .sort((a, b) => Number(b.avg_delay_min || -999) - Number(a.avg_delay_min || -999))
-        .slice(0, 30),
-      ai_suggestions: buildOperationalSuggestions(summary, criticalStops),
+  const serviceIds = services.map((s) => Number(s.id)).filter((id) => Number.isFinite(id));
+  const pointsRes = await db.query(
+    `SELECT service_id, lat, lng, captured_at
+     FROM service_points
+     WHERE service_id = ANY($1::int[])
+     ORDER BY service_id ASC, captured_at ASC`,
+    [serviceIds]
+  );
+  const pointsByService = new Map();
+  for (const p of pointsRes.rows) {
+    if (!pointsByService.has(p.service_id)) pointsByService.set(p.service_id, []);
+    pointsByService.get(p.service_id).push(p);
+  }
+
+  const stopsByTrip = new Map();
+  const bestTripByHeader = new Map();
+  const delays = [];
+  const stopAgg = new Map();
+  const serviceRank = [];
+  let servicesWithStops = 0;
+  let totalStops = 0;
+  let totalMatched = 0;
+
+  for (const svc of services) {
+    let tripId = svc.gtfs_trip_id || null;
+    if (!tripId) {
+      const headerKey = `${String(svc.line_code || "").trim()}|${String(svc.service_schedule || "").trim()}`;
+      if (!bestTripByHeader.has(headerKey)) {
+        const best = await findBestTripForLine(svc.line_code, svc.service_schedule);
+        bestTripByHeader.set(headerKey, best?.trip_id || null);
+      }
+      tripId = bestTripByHeader.get(headerKey);
+    }
+    if (!tripId) continue;
+
+    if (!stopsByTrip.has(tripId)) {
+      const stops = await getStopsByTripId(tripId);
+      stopsByTrip.set(tripId, Array.isArray(stops) ? stops : []);
+    }
+    const stops = stopsByTrip.get(tripId) || [];
+    if (!stops.length) continue;
+    servicesWithStops += 1;
+
+    const points = pointsByService.get(svc.id) || [];
+    const matchedRows = matchGpsPointsToGtfsStops(stops, points, {
+      radiusMeters,
+      serviceStartedAt: svc.started_at,
     });
+    totalStops += matchedRows.total;
+    totalMatched += matchedRows.matched;
+
+    const serviceDay = lisbonDayKey(svc.started_at);
+    const serviceDelaySamples = [];
+    for (const row of matchedRows.rows) {
+      if (!row.passed_near_stop || !row.passed_at) continue;
+      const scheduledRefMin = parseGtfsTimeToRelativeMinutes(row.scheduled_departure || row.scheduled_arrival);
+      if (scheduledRefMin == null) continue;
+
+      const passMin = lisbonMinutesOfDay(row.passed_at);
+      const passDay = lisbonDayKey(row.passed_at);
+      const passDayOffset = diffDays(passDay, serviceDay);
+      if (passMin == null || passDayOffset == null) continue;
+      const passRelativeMin = passDayOffset * 1440 + passMin;
+      const delayMin = passRelativeMin - scheduledRefMin;
+      if (!Number.isFinite(delayMin)) continue;
+      delays.push(delayMin);
+      serviceDelaySamples.push(delayMin);
+
+      const key = `${row.stop_id || ""}|${row.stop_name || ""}`;
+      if (!stopAgg.has(key)) {
+        stopAgg.set(key, {
+          stop_id: row.stop_id || "",
+          stop_name: row.stop_name || "Paragem sem nome",
+          samples: 0,
+          delayed_samples: 0,
+          severe_samples: 0,
+          total_delay_min: 0,
+        });
+      }
+      const acc = stopAgg.get(key);
+      acc.samples += 1;
+      acc.total_delay_min += delayMin;
+      if (delayMin > 3) acc.delayed_samples += 1;
+      if (delayMin > 8) acc.severe_samples += 1;
+    }
+
+    const avgDelay = serviceDelaySamples.length
+      ? serviceDelaySamples.reduce((sum, val) => sum + val, 0) / serviceDelaySamples.length
+      : null;
+    const maxDelay = serviceDelaySamples.length ? Math.max(...serviceDelaySamples) : null;
+    serviceRank.push({
+      service_id: svc.id,
+      line_code: svc.line_code,
+      driver_name: svc.driver_name,
+      fleet_number: svc.fleet_number,
+      status: svc.status,
+      started_at: svc.started_at,
+      ended_at: svc.ended_at,
+      stops_total: matchedRows.total,
+      stops_matched: matchedRows.matched,
+      avg_delay_min: avgDelay == null ? null : Math.round(avgDelay * 10) / 10,
+      max_delay_min: maxDelay == null ? null : Math.round(maxDelay * 10) / 10,
+    });
+  }
+
+  const sortedDelays = [...delays].sort((a, b) => a - b);
+  const avgDelay = sortedDelays.length ? sortedDelays.reduce((sum, val) => sum + val, 0) / sortedDelays.length : 0;
+  const p90Delay = sortedDelays.length ? sortedDelays[Math.floor((sortedDelays.length - 1) * 0.9)] : 0;
+
+  const criticalStops = [...stopAgg.values()]
+    .map((s) => {
+      const av = s.samples ? s.total_delay_min / s.samples : 0;
+      const delayedPct = s.samples ? (s.delayed_samples / s.samples) * 100 : 0;
+      const severePct = s.samples ? (s.severe_samples / s.samples) * 100 : 0;
+      const score = av * 0.65 + delayedPct * 0.2 + severePct * 0.15;
+      return {
+        stop_id: s.stop_id,
+        stop_name: s.stop_name,
+        samples: s.samples,
+        avg_delay_min: Math.round(av * 10) / 10,
+        delayed_rate_pct: Math.round(delayedPct * 10) / 10,
+        severe_delay_rate_pct: Math.round(severePct * 10) / 10,
+        criticality_score: Math.round(score * 10) / 10,
+      };
+    })
+    .sort((a, b) => b.criticality_score - a.criticality_score)
+    .slice(0, 20);
+
+  const missedStopRate = totalStops ? ((totalStops - totalMatched) / totalStops) * 100 : 0;
+  const summary = {
+    services_analyzed: services.length,
+    services_with_reference_stops: servicesWithStops,
+    total_stops_analyzed: totalStops,
+    avg_delay_min: Math.round(avgDelay * 10) / 10,
+    delay_p90_min: Math.round(Number(p90Delay || 0) * 10) / 10,
+    missed_stop_rate_pct: Math.round(missedStopRate * 10) / 10,
+  };
+
+  return {
+    summary,
+    critical_stops: criticalStops,
+    service_rank: serviceRank
+      .sort((a, b) => Number(b.avg_delay_min || -999) - Number(a.avg_delay_min || -999))
+      .slice(0, 30),
+    ai_suggestions: buildOperationalSuggestions(summary, criticalStops),
+  };
+}
+
+router.get("/reports/performance", async (req, res) => {
+  try {
+    const data = await computeOperationalPerformanceReport(req.query);
+    return res.json(data);
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao gerar relatório de desempenho operacional." });
+  }
+});
+
+router.get("/reports/performance.xlsx", async (req, res) => {
+  try {
+    const data = await computeOperationalPerformanceReport(req.query);
+    const wb = XLSX.utils.book_new();
+    const summarySheet = XLSX.utils.json_to_sheet([data.summary || {}]);
+    XLSX.utils.book_append_sheet(wb, summarySheet, "Resumo");
+    const crit = Array.isArray(data.critical_stops) ? data.critical_stops : [];
+    const critSheet = XLSX.utils.json_to_sheet(crit.length ? crit : [{ info: "Sem paragens críticas no período." }]);
+    XLSX.utils.book_append_sheet(wb, critSheet, "Paragens criticas");
+    const rank = Array.isArray(data.service_rank) ? data.service_rank : [];
+    const rankSheet = XLSX.utils.json_to_sheet(rank.length ? rank : [{ info: "Sem ranking no período." }]);
+    XLSX.utils.book_append_sheet(wb, rankSheet, "Servicos atraso");
+    const sugg = Array.isArray(data.ai_suggestions) ? data.ai_suggestions : [];
+    const suggRows = sugg.map((text, i) => ({ ordem: i + 1, sugestao: text }));
+    const suggSheet = XLSX.utils.json_to_sheet(suggRows.length ? suggRows : [{ sugestao: "Sem sugestões." }]);
+    XLSX.utils.book_append_sheet(wb, suggSheet, "Sugestoes IA");
+    const buf = XLSX.write(wb, { bookType: "xlsx", type: "buffer" });
+    const from = String(req.query.fromDate || "").trim() || "inicio";
+    const to = String(req.query.toDate || "").trim() || "fim";
+    const fileName = `relatorio-ia_${from}_a_${to}.xlsx`;
+    res.setHeader("Content-Disposition", `attachment; filename="${fileName}"`);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    return res.status(200).send(buf);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao exportar relatório operacional (Excel)." });
   }
 });
 
