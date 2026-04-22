@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="pt">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Guia Teltonika - Integracao completa</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="supervisor-page">
+    <main class="container">
+      <h1>Guia completo de integracao Teltonika</h1>
+      <p class="field-help" style="margin-top: 0">
+        Este guia mostra como ligar trackers Teltonika a esta aplicacao por webhook HTTP e por TCP direto (Codec8), incluindo checklist de rede, testes externos e migracao de servidor.
+      </p>
+
+      <section class="card">
+        <h2>1) Visao geral da arquitetura</h2>
+        <ol class="tracker-checklist-ol">
+          <li><strong>App/API</strong>: recebe eventos GPS e associa ao servico em curso pela frota/viatura mapeada ao IMEI.</li>
+          <li><strong>Modo A - Webhook HTTP</strong>: gateway (Flespi/Traccar) encaminha JSON para <code>/integrations/teltonika/events</code>.</li>
+          <li><strong>Modo B - TCP direto</strong>: tracker liga por TCP, envia IMEI + Codec8 e recebe ACK.</li>
+          <li><strong>Persistencia</strong>: os pontos entram em <code>service_points</code> com <code>point_source='tracker'</code>.</li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2>2) Variaveis de ambiente (backend/.env)</h2>
+        <pre>TELTONIKA_WEBHOOK_TOKEN=defina_um_token_forte
+TELTONIKA_TCP_PORT=5027
+TELTONIKA_TCP_DEBUG=true
+PORT=4000</pre>
+        <p class="field-help">
+          <strong>Notas:</strong> sem <code>TELTONIKA_TCP_PORT</code> o servidor TCP nao sobe. Em producao, pode deixar <code>TELTONIKA_TCP_DEBUG=false</code> para reduzir logs.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>3) Preparacao de rede para ambiente externo</h2>
+        <ol class="tracker-checklist-ol">
+          <li>Garanta que o servidor e alcancavel externamente (IP publico ou dominio).</li>
+          <li>Abra a porta HTTP/HTTPS da API para webhook (ex.: 443 via reverse proxy).</li>
+          <li>Abra a porta TCP configurada em <code>TELTONIKA_TCP_PORT</code> (ex.: 5027).</li>
+          <li>Se existir NAT, configure port forwarding para o host da API.</li>
+          <li>Valide firewall local e firewall cloud (Security Group/NSG).</li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2>4) Configuracao por webhook HTTP (gateway)</h2>
+        <p>Use este modo quando os trackers enviam para Flespi/Traccar e o gateway chama a API.</p>
+        <pre>POST /integrations/teltonika/events
+Authorization: Bearer &lt;TELTONIKA_WEBHOOK_TOKEN&gt;
+Content-Type: application/json
+
+{
+  "imei": "356307042441013",
+  "lat": 38.7223,
+  "lng": -9.1393,
+  "timestamp": "2026-04-22T10:00:00Z",
+  "speed": 28,
+  "heading": 180,
+  "fleetNumber": "BUS-101"
+}</pre>
+      </section>
+
+      <section class="card">
+        <h2>5) Configuracao por TCP direto (Codec8)</h2>
+        <ol class="tracker-checklist-ol">
+          <li>No configurador Teltonika, defina servidor IP/DNS e porta TCP da API.</li>
+          <li>O dispositivo envia IMEI no handshake; servidor responde 0x01 quando aceite.</li>
+          <li>Em seguida o dispositivo envia AVL Codec8; servidor responde ACK (4 bytes, numero de records aceites).</li>
+          <li>Se ACK for 0, verifique logs e mapeamento IMEI/frota na app.</li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2>6) Mapeamento obrigatorio para gravar pontos</h2>
+        <ol class="tracker-checklist-ol">
+          <li>Na aba "Integracoes GPS", registe o IMEI com a mesma <strong>frota</strong> usada no inicio do servico.</li>
+          <li>Garanta que existe um servico <code>in_progress</code> para essa frota.</li>
+          <li>Sem mapeamento ativo ou sem servico em curso, os eventos serao rejeitados.</li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2>7) Testes externos (checklist rapido)</h2>
+        <ol class="tracker-checklist-ol">
+          <li>Teste conectividade: <code>GET /health</code> a partir de uma rede externa.</li>
+          <li>Teste webhook com curl/Postman e valide <code>accepted &gt; 0</code>.</li>
+          <li>Teste TCP com tracker real e confirme ACK positivo.</li>
+          <li>No supervisor, confirme que surgem pontos GPS no servico em curso.</li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2>8) Migracao para novo servidor (implicacoes)</h2>
+        <p>
+          <strong>Sim, ha implicacoes operacionais</strong>, mas o desenvolvimento feito continua valido. Ao migrar, precisa atualizar endpoints e conectividade:
+        </p>
+        <ol class="tracker-checklist-ol">
+          <li>Atualizar DNS/IP/porta configurados nos trackers e/ou no gateway.</li>
+          <li>Atualizar firewall/NAT no novo ambiente.</li>
+          <li>Copiar variaveis <code>.env</code> (token e porta TCP) para o novo servidor.</li>
+          <li>Garantir que a base de dados e dados de mapeamento IMEI foram migrados.</li>
+          <li>Repetir testes de ponta-a-ponta apos cutover.</li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2>9) Recomendacoes para evitar retrabalho</h2>
+        <ul>
+          <li>Use dominio estavel (ex.: <code>gps-api.seudominio.pt</code>) para nao reprogramar trackers a cada troca de IP.</li>
+          <li>Mantenha a porta TCP final o mais estavel possivel entre ambientes.</li>
+          <li>Versione e documente o ficheiro <code>.env</code> por ambiente.</li>
+          <li>Rode teste de validacao apos cada deploy com payload de referencia.</li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <h2>10) Links uteis</h2>
+        <p>
+          <a href="/frontend/supervisor.html">Abrir Painel do Supervisor</a><br />
+          <a href="/frontend/index.html">Abrir App de Motoristas</a><br />
+          <a href="/health">Health check da API</a>
+        </p>
+      </section>
+    </main>
+    <footer class="app-signature">Direitos Reservados pela RDL, Product powered by Pedro Fonte.</footer>
+  </body>
+</html>

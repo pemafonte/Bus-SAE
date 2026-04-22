@@ -9,6 +9,7 @@ const supervisorRoutes = require("./routes/supervisor");
 const gtfsRoutes = require("./routes/gtfs");
 const viewerRoutes = require("./routes/viewer");
 const integrationsRoutes = require("./routes/integrations");
+const { startTeltonikaTcpServer } = require("./tcp/teltonikaServer");
 const { ensureSystemSupervisor } = require("./bootstrap/systemSupervisor");
 const { startAutoCloseStaleServicesLoop } = require("./jobs/autoCloseStaleServices");
 
@@ -87,7 +88,7 @@ app.use("/services", serviceRoutes);
 app.use("/supervisor", supervisorRoutes);
 app.use("/gtfs", gtfsRoutes);
 app.use("/viewer", viewerRoutes);
-app.use("/integrations", integrationsRoutes);
+app.use("/integrations", integrationsRoutes.router);
 
 app.use((err, _req, res, _next) => {
   console.error(err);
@@ -106,6 +107,7 @@ async function startServer() {
   app.listen(port, () => {
     console.log(`API ativa em http://localhost:${port}`);
     startAutoCloseStaleServicesLoop();
+    startTeltonikaTcpServer();
   });
 }
 

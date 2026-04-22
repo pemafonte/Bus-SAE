@@ -105,6 +105,224 @@ function normalizeTrackerEvent(raw) {
   };
 }
 
+function toSignedInt32(value) {
+  return value > 0x7fffffff ? value - 0x100000000 : value;
+}
+
+function decodeCodec8AvlRecords(payloadBuffer) {
+  const packet = Buffer.isBuffer(payloadBuffer) ? payloadBuffer : Buffer.from(payloadBuffer || []);
+  if (packet.length < 16) throw new Error("Pacote Codec8 demasiado curto.");
+
+  const preamble = packet.readUInt32BE(0);
+  if (preamble !== 0) throw new Error("Preamble inválido no pacote Codec8.");
+
+  const dataFieldLength = packet.readUInt32BE(4);
+  const expectedTotalLength = 8 + dataFieldLength + 4;
+  if (packet.length < expectedTotalLength) {
+    throw new Error("Pacote Codec8 incompleto para o tamanho declarado.");
+  }
+
+  const data = packet.subarray(8, 8 + dataFieldLength);
+  if (data.length < 3) throw new Error("Campo de dados Codec8 inválido.");
+
+  let offset = 0;
+  const codecId = data.readUInt8(offset);
+  offset += 1;
+  if (codecId !== 0x08) throw new Error("Codec não suportado. Esperado Codec8 (0x08).");
+
+  const recordCount1 = data.readUInt8(offset);
+  offset += 1;
+  const records = [];
+
+  for (let i = 0; i < recordCount1; i += 1) {
+    if (offset + 8 + 1 + 15 > data.length) {
+      throw new Error("Record Codec8 truncado.");
+    }
+
+    const timestampMs = Number(data.readBigUInt64BE(offset));
+    offset += 8;
+    const priority = data.readUInt8(offset);
+    offset += 1;
+
+    const lngRaw = toSignedInt32(data.readUInt32BE(offset));
+    offset += 4;
+    const latRaw = toSignedInt32(data.readUInt32BE(offset));
+    offset += 4;
+    const altitude = data.readInt16BE(offset);
+    offset += 2;
+    const angle = data.readUInt16BE(offset);
+    offset += 2;
+    const satellites = data.readUInt8(offset);
+    offset += 1;
+    const speed = data.readUInt16BE(offset);
+    offset += 2;
+
+    if (offset + 2 > data.length) throw new Error("Bloco IO Codec8 truncado.");
+    const eventIoId = data.readUInt8(offset);
+    offset += 1;
+    const totalIo = data.readUInt8(offset);
+    offset += 1;
+
+    const ioValues = {};
+    const parseIoGroup = (valueSize) => {
+      if (offset + 1 > data.length) throw new Error("Contador IO Codec8 truncado.");
+      const count = data.readUInt8(offset);
+      offset += 1;
+      for (let j = 0; j < count; j += 1) {
+        if (offset + 1 + valueSize > data.length) throw new Error("Elemento IO Codec8 truncado.");
+        const id = data.readUInt8(offset);
+        offset += 1;
+        let value;
+        if (valueSize === 1) value = data.readUInt8(offset);
+        else if (valueSize === 2) value = data.readUInt16BE(offset);
+        else if (valueSize === 4) value = data.readUInt32BE(offset);
+        else value = Number(data.readBigUInt64BE(offset));
+        offset += valueSize;
+        ioValues[id] = value;
+      }
+      return count;
+    };
+
+    const n1 = parseIoGroup(1);
+    const n2 = parseIoGroup(2);
+    const n4 = parseIoGroup(4);
+    const n8 = parseIoGroup(8);
+    const groupedTotal = n1 + n2 + n4 + n8;
+    if (groupedTotal !== totalIo) {
+      // Alguns gateways enviam total inconsistente; mantemos parsing tolerante.
+    }
+
+    records.push({
+      timestampMs,
+      priority,
+      lat: latRaw / 10000000,
+      lng: lngRaw / 10000000,
+      altitude,
+      angle,
+      satellites,
+      speedKmh: speed,
+      eventIoId,
+      ioValues,
+    });
+  }
+
+  if (offset + 1 > data.length) throw new Error("Contador final de records em falta.");
+  const recordCount2 = data.readUInt8(offset);
+  offset += 1;
+  if (recordCount1 !== recordCount2) {
+    throw new Error("Número de records Codec8 inconsistente.");
+  }
+  if (offset !== data.length) {
+    throw new Error("Dados extra inesperados no campo Codec8.");
+  }
+
+  return records;
+}
+
+function parseCodec8Input(req) {
+  const contentType = String(req.headers["content-type"] || "").toLowerCase();
+  const imei = normalizeImei(req.query?.imei || req.headers["x-device-imei"] || req.body?.imei);
+  if (!imei) {
+    return { ok: false, error: "IMEI obrigatório (query ?imei=..., header x-device-imei ou body.imei)." };
+  }
+
+  let payloadBuffer = null;
+  if (Buffer.isBuffer(req.body) && req.body.length) {
+    payloadBuffer = req.body;
+  } else if (typeof req.body?.payloadHex === "string") {
+    const cleanHex = req.body.payloadHex.replace(/\s+/g, "");
+    if (!/^[0-9a-fA-F]+$/.test(cleanHex) || cleanHex.length % 2 !== 0) {
+      return { ok: false, error: "payloadHex inválido." };
+    }
+    payloadBuffer = Buffer.from(cleanHex, "hex");
+  } else if (typeof req.body?.payloadBase64 === "string") {
+    try {
+      payloadBuffer = Buffer.from(req.body.payloadBase64, "base64");
+    } catch (_error) {
+      return { ok: false, error: "payloadBase64 inválido." };
+    }
+  } else if (typeof req.body === "string" && req.body.trim()) {
+    const compact = req.body.trim();
+    if (contentType.includes("text/plain") && /^[0-9a-fA-F]+$/.test(compact) && compact.length % 2 === 0) {
+      payloadBuffer = Buffer.from(compact, "hex");
+    }
+  }
+
+  if (!payloadBuffer || !payloadBuffer.length) {
+    return {
+      ok: false,
+      error: "Payload Codec8 em falta. Envie binary (application/octet-stream), payloadHex ou payloadBase64.",
+    };
+  }
+
+  let records;
+  try {
+    records = decodeCodec8AvlRecords(payloadBuffer);
+  } catch (error) {
+    return { ok: false, error: `Codec8 inválido: ${error.message}` };
+  }
+
+  const events = records.map((record) => ({
+    imei,
+    lat: record.lat,
+    lng: record.lng,
+    capturedAt: Number.isFinite(record.timestampMs) ? new Date(record.timestampMs).toISOString() : null,
+    speedKmh: record.speedKmh,
+    headingDeg: record.angle,
+    satellites: record.satellites,
+    priority: record.priority,
+    altitudeM: record.altitude,
+    codec: "codec8",
+    source: "tracker",
+  }));
+
+  return { ok: true, events, recordsCount: records.length };
+}
+
+async function processTeltonikaEvents(incomingEvents) {
+  await ensureTrackerTables();
+  await ensureServicePointsQualityColumns();
+
+  let accepted = 0;
+  const rejected = [];
+
+  for (let i = 0; i < incomingEvents.length; i += 1) {
+    const normalized = normalizeTrackerEvent(incomingEvents[i]);
+    if (!normalized.ok) {
+      rejected.push({ index: i, message: normalized.error });
+      continue;
+    }
+
+    const mapping = await resolveDeviceMapping(normalized.event);
+    if (!mapping) {
+      rejected.push({ index: i, message: "Sem mapeamento ativo para o IMEI recebido." });
+      continue;
+    }
+
+    const service = await resolveActiveServiceForDevice(mapping);
+    if (!service) {
+      rejected.push({ index: i, message: "Sem serviço em curso para a viatura do tracker." });
+      continue;
+    }
+
+    const activeSegment = await getActiveSegment(service.id);
+    if (!activeSegment) {
+      rejected.push({ index: i, message: "Serviço sem segmento ativo." });
+      continue;
+    }
+
+    await insertTrackerPoint(service.id, activeSegment.id, normalized.event);
+    await updateRouteDeviation(service.id, service.gtfs_trip_id, normalized.event);
+    accepted += 1;
+  }
+
+  return {
+    accepted,
+    rejectedCount: rejected.length,
+    rejected,
+  };
+}
+
 async function resolveDeviceMapping(event) {
   const byImei = await db.query(
     `SELECT imei, fleet_number, plate_number, is_active
@@ -270,51 +488,48 @@ router.post("/teltonika/events", trackerAuth, async (req, res) => {
   }
 
   try {
-    await ensureTrackerTables();
-    await ensureServicePointsQualityColumns();
-
-    let accepted = 0;
-    const rejected = [];
-
-    for (let i = 0; i < incomingEvents.length; i += 1) {
-      const normalized = normalizeTrackerEvent(incomingEvents[i]);
-      if (!normalized.ok) {
-        rejected.push({ index: i, message: normalized.error });
-        continue;
-      }
-
-      const mapping = await resolveDeviceMapping(normalized.event);
-      if (!mapping) {
-        rejected.push({ index: i, message: "Sem mapeamento ativo para o IMEI recebido." });
-        continue;
-      }
-
-      const service = await resolveActiveServiceForDevice(mapping);
-      if (!service) {
-        rejected.push({ index: i, message: "Sem serviço em curso para a viatura do tracker." });
-        continue;
-      }
-
-      const activeSegment = await getActiveSegment(service.id);
-      if (!activeSegment) {
-        rejected.push({ index: i, message: "Serviço sem segmento ativo." });
-        continue;
-      }
-
-      await insertTrackerPoint(service.id, activeSegment.id, normalized.event);
-      await updateRouteDeviation(service.id, service.gtfs_trip_id, normalized.event);
-      accepted += 1;
-    }
+    const result = await processTeltonikaEvents(incomingEvents);
 
     return res.status(202).json({
       message: "Eventos Teltonika processados.",
-      accepted,
-      rejectedCount: rejected.length,
-      rejected,
+      accepted: result.accepted,
+      rejectedCount: result.rejectedCount,
+      rejected: result.rejected,
     });
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao processar eventos Teltonika." });
   }
 });
 
-module.exports = router;
+router.post(
+  "/teltonika/codec8",
+  trackerAuth,
+  express.raw({ type: ["application/octet-stream", "application/teltonika-codec8"], limit: "1mb" }),
+  async (req, res) => {
+    const parsed = parseCodec8Input(req);
+    if (!parsed.ok) return res.status(400).json({ message: parsed.error });
+    if (!parsed.events.length) {
+      return res.status(400).json({ message: "Pacote Codec8 sem records." });
+    }
+
+    try {
+      const result = await processTeltonikaEvents(parsed.events);
+      return res.status(202).json({
+        message: "Pacote Codec8 processado.",
+        records: parsed.recordsCount,
+        accepted: result.accepted,
+        rejectedCount: result.rejectedCount,
+        rejected: result.rejected,
+      });
+    } catch (_error) {
+      return res.status(500).json({ message: "Erro ao processar pacote Codec8." });
+    }
+  }
+);
+
+module.exports = {
+  router,
+  normalizeImei,
+  decodeCodec8AvlRecords,
+  processTeltonikaEvents,
+};
