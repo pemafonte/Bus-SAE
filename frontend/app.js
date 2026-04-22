@@ -76,6 +76,10 @@ let gpsPointQueue = [];
 let gpsFlushInProgress = false;
 let gpsSaveFailureWarned = false;
 let activeServiceSyncTimer = null;
+let driverMessagesRefreshTimer = null;
+let driverAlertsPollTimer = null;
+let driverAlertBaselineReady = false;
+let lastDriverAlertSignature = "";
 const AUTH_SESSION_KEY = "auth_session";
 const GPS_QUEUE_STORAGE_KEY = "gps_point_queue_v1";
 const GPS_BATCH_SIZE = 50;
@@ -96,6 +100,15 @@ const fleetNumberInput = document.getElementById("fleetNumber");
 const fleetWarningEl = document.getElementById("fleetWarning");
 const driverTabsEl = document.getElementById("driverTabs");
 const driverNotificationsBarEl = document.getElementById("driverNotificationsBar");
+const driverMessageFormEl = document.getElementById("driverMessageForm");
+const driverMessagePresetEl = document.getElementById("driverMessagePreset");
+const driverMessageTextEl = document.getElementById("driverMessageText");
+const driverMessageTrafficAlertEl = document.getElementById("driverMessageTrafficAlert");
+const refreshDriverMessagesBtnEl = document.getElementById("refreshDriverMessagesBtn");
+const driverMessagesListEl = document.getElementById("driverMessagesList");
+const driverAlertSoundTypeEl = document.getElementById("driverAlertSoundType");
+const driverAlertSoundVolumeEl = document.getElementById("driverAlertSoundVolume");
+const testDriverAlertSoundBtnEl = document.getElementById("testDriverAlertSoundBtn");
 
 const map = L.map("map").setView([38.7223, -9.1393], 12);
 
@@ -139,6 +152,20 @@ function startActiveServiceSync() {
   activeServiceSyncTimer = setInterval(() => {
     syncActiveServiceFromServer();
   }, 45_000);
+}
+
+function stopDriverMessagesRefresh() {
+  if (driverMessagesRefreshTimer) {
+    clearInterval(driverMessagesRefreshTimer);
+    driverMessagesRefreshTimer = null;
+  }
+}
+
+function startDriverMessagesRefresh() {
+  stopDriverMessagesRefresh();
+  driverMessagesRefreshTimer = setInterval(() => {
+    refreshDriverMessages();
+  }, 20_000);
 }
 
 async function syncActiveServiceFromServer() {
@@ -325,6 +352,9 @@ function showDriverTab(tabId) {
   if (tabId === "driverStepSelect") {
     refreshDriverNotifications();
   }
+  if (tabId === "driverStepComms") {
+    refreshDriverMessages();
+  }
 }
 
 function initDriverTabs() {
@@ -342,6 +372,110 @@ function authHeaders() {
     "Content-Type": "application/json",
     Authorization: `Bearer ${token}`,
   };
+}
+
+const DRIVER_ALERT_SOUND_SETTINGS_KEY = "driver_alert_sound_settings_v1";
+
+function loadDriverAlertSoundSettings() {
+  try {
+    const raw = localStorage.getItem(DRIVER_ALERT_SOUND_SETTINGS_KEY);
+    const parsed = raw ? JSON.parse(raw) : null;
+    return {
+      type: parsed?.type || "beep",
+      volume: Number.isFinite(Number(parsed?.volume)) ? Number(parsed.volume) : 70,
+    };
+  } catch (_error) {
+    return { type: "beep", volume: 70 };
+  }
+}
+
+function saveDriverAlertSoundSettings(settings) {
+  localStorage.setItem(DRIVER_ALERT_SOUND_SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function getDriverAlertSoundSettings() {
+  return {
+    type: String(driverAlertSoundTypeEl?.value || "beep"),
+    volume: Number(driverAlertSoundVolumeEl?.value || 70),
+  };
+}
+
+function playPatternTone(ctx, startAt, frequency, duration, volume, waveType) {
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+  osc.type = waveType;
+  osc.frequency.value = frequency;
+  gain.gain.setValueAtTime(volume, startAt);
+  gain.gain.exponentialRampToValueAtTime(0.0001, startAt + duration);
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+  osc.start(startAt);
+  osc.stop(startAt + duration);
+}
+
+function playDriverAlertSound() {
+  const settings = getDriverAlertSoundSettings();
+  const AudioCtx = window.AudioContext || window.webkitAudioContext;
+  if (!AudioCtx) return;
+  const ctx = new AudioCtx();
+  const now = ctx.currentTime;
+  const volume = Math.max(0, Math.min(1, settings.volume / 100)) * 0.25;
+  if (settings.type === "urgent") {
+    playPatternTone(ctx, now, 820, 0.11, volume, "sawtooth");
+    playPatternTone(ctx, now + 0.16, 740, 0.11, volume, "sawtooth");
+    playPatternTone(ctx, now + 0.32, 920, 0.13, volume, "sawtooth");
+  } else if (settings.type === "chime") {
+    playPatternTone(ctx, now, 660, 0.12, volume, "triangle");
+    playPatternTone(ctx, now + 0.15, 880, 0.18, volume, "triangle");
+  } else {
+    playPatternTone(ctx, now, 880, 0.15, volume, "square");
+  }
+}
+
+function applyDriverAlertSoundSettingsToUi() {
+  const settings = loadDriverAlertSoundSettings();
+  if (driverAlertSoundTypeEl) driverAlertSoundTypeEl.value = settings.type;
+  if (driverAlertSoundVolumeEl) driverAlertSoundVolumeEl.value = String(settings.volume);
+}
+
+function updateDriverAlertSignature() {
+  if (!token) return;
+  Promise.allSettled([
+    fetch(`${API_BASE}/services/notifications`, { headers: authHeaders() }).then((r) => r.json().then((d) => ({ ok: r.ok, d }))),
+    fetch(`${API_BASE}/services/messages`, { headers: authHeaders() }).then((r) => r.json().then((d) => ({ ok: r.ok, d }))),
+    fetch(`${API_BASE}/services/pending-handover`, { headers: authHeaders() }).then((r) => r.json().then((d) => ({ ok: r.ok, d }))),
+  ]).then((results) => {
+    const notif = results[0]?.status === "fulfilled" && results[0].value.ok ? results[0].value.d : [];
+    const msgs = results[1]?.status === "fulfilled" && results[1].value.ok ? results[1].value.d : [];
+    const handovers = results[2]?.status === "fulfilled" && results[2].value.ok ? results[2].value.d : [];
+    const unreadNotif = (Array.isArray(notif) ? notif : []).filter((n) => !n.read_at).map((n) => n.id).sort((a, b) => a - b);
+    const unreadMsgs = (Array.isArray(msgs) ? msgs : [])
+      .filter((m) => !m.read_at && Number(m.to_user_id) === Number(authenticatedUser?.id))
+      .map((m) => `${m.id}:${m.is_traffic_alert ? 1 : 0}`)
+      .sort();
+    const pendingHandovers = (Array.isArray(handovers) ? handovers : []).map((h) => h.handover_id || h.id).sort((a, b) => a - b);
+    const signature = JSON.stringify({ unreadNotif, unreadMsgs, pendingHandovers });
+    if (driverAlertBaselineReady && signature !== lastDriverAlertSignature) {
+      playDriverAlertSound();
+    }
+    lastDriverAlertSignature = signature;
+    if (!driverAlertBaselineReady) driverAlertBaselineReady = true;
+  });
+}
+
+function startDriverAlertsPolling() {
+  stopDriverAlertsPolling();
+  updateDriverAlertSignature();
+  driverAlertsPollTimer = setInterval(() => {
+    updateDriverAlertSignature();
+  }, 15_000);
+}
+
+function stopDriverAlertsPolling() {
+  if (driverAlertsPollTimer) {
+    clearInterval(driverAlertsPollTimer);
+    driverAlertsPollTimer = null;
+  }
 }
 
 function renderDriverNotificationsBar(list) {
@@ -393,6 +527,112 @@ async function refreshDriverNotifications() {
     renderDriverNotificationsBar(list);
   } catch (_e) {
     // ignore offline errors
+  }
+}
+
+async function loadDriverMessagePresets() {
+  if (!token || !driverMessagePresetEl) return;
+  try {
+    const response = await fetch(`${API_BASE}/services/message-presets`, {
+      headers: authHeaders(),
+    });
+    const data = await response.json().catch(() => []);
+    if (!response.ok || !Array.isArray(data)) return;
+    driverMessagePresetEl.innerHTML = '<option value="">-- Nenhuma (escrever manualmente) --</option>';
+    data.forEach((item) => {
+      const option = document.createElement("option");
+      option.value = item.code || "";
+      option.textContent = item.label || item.code || "Preset";
+      driverMessagePresetEl.appendChild(option);
+    });
+  } catch (_error) {
+    // ignore
+  }
+}
+
+function buildDriverMessageItem(message) {
+  const li = document.createElement("li");
+  li.className = "ops-message-item";
+  if (message.is_traffic_alert) li.classList.add("traffic-alert");
+  const meta = document.createElement("div");
+  meta.className = "ops-message-meta";
+  const direction = Number(message.from_user_id) === Number(authenticatedUser?.id) ? "Enviada" : "Recebida";
+  const createdText = message.created_at ? new Date(message.created_at).toLocaleString() : "-";
+  const trafficText = message.is_traffic_alert ? " | ALERTA TRANSITO" : "";
+  meta.textContent = `${direction} ${createdText}${trafficText}`;
+  const author = document.createElement("strong");
+  author.textContent = `${message.from_name || "Utilizador"} -> ${message.to_name || "Utilizador"}`;
+  const body = document.createElement("p");
+  body.textContent = message.message_text || "";
+  li.appendChild(meta);
+  li.appendChild(author);
+  li.appendChild(body);
+  return li;
+}
+
+async function refreshDriverMessages() {
+  if (!token || !driverMessagesListEl) return;
+  try {
+    const response = await fetch(`${API_BASE}/services/messages`, {
+      headers: authHeaders(),
+    });
+    const data = await response.json().catch(() => []);
+    if (!response.ok) return;
+    const list = Array.isArray(data) ? data : [];
+    driverMessagesListEl.innerHTML = "";
+    if (!list.length) {
+      const li = document.createElement("li");
+      li.textContent = "Sem mensagens operacionais.";
+      driverMessagesListEl.appendChild(li);
+      return;
+    }
+    const chronological = [...list].reverse();
+    for (const item of chronological) {
+      driverMessagesListEl.appendChild(buildDriverMessageItem(item));
+      if (!item.read_at && Number(item.to_user_id) === Number(authenticatedUser?.id)) {
+        fetch(`${API_BASE}/services/messages/${item.id}/read`, {
+          method: "PATCH",
+          headers: authHeaders(),
+        }).catch(() => {});
+      }
+    }
+  } catch (_error) {
+    // ignore
+  }
+}
+
+async function sendDriverMessage(event) {
+  event.preventDefault();
+  if (!token || !driverMessageTextEl) return;
+  const message = driverMessageTextEl.value.trim();
+  if (!message) {
+    alert("Escreva a mensagem para enviar.");
+    return;
+  }
+  const payload = {
+    message,
+    presetCode: driverMessagePresetEl?.value || null,
+    isTrafficAlert: driverMessageTrafficAlertEl?.checked === true,
+    relatedServiceId: activeServiceId || null,
+  };
+  try {
+    const response = await fetch(`${API_BASE}/services/messages`, {
+      method: "POST",
+      headers: authHeaders(),
+      body: JSON.stringify(payload),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      alert(data.message || "Erro ao enviar mensagem.");
+      return;
+    }
+    driverMessageTextEl.value = "";
+    if (driverMessagePresetEl) driverMessagePresetEl.value = "";
+    if (driverMessageTrafficAlertEl) driverMessageTrafficAlertEl.checked = false;
+    await refreshDriverMessages();
+    alert("Mensagem enviada ao supervisor.");
+  } catch (_error) {
+    alert("Nao foi possivel enviar a mensagem.");
   }
 }
 
@@ -467,6 +707,11 @@ async function login(event) {
   await loadPendingHandovers();
   await refreshHistory();
   await refreshDriverNotifications();
+  await loadDriverMessagePresets();
+  await refreshDriverMessages();
+  startDriverMessagesRefresh();
+  driverAlertBaselineReady = false;
+  startDriverAlertsPolling();
   showDriverTab("driverStepSelect");
 }
 
@@ -475,6 +720,8 @@ function logoutDriver() {
   if (!confirmed) return;
 
   stopActiveServiceSync();
+  stopDriverMessagesRefresh();
+  stopDriverAlertsPolling();
   token = "";
   authenticatedUser = null;
   gpsPointQueue = [];
@@ -511,6 +758,11 @@ function logoutDriver() {
     driverNotificationsBarEl.innerHTML = "";
     driverNotificationsBarEl.classList.add("hidden");
   }
+  if (driverMessagesListEl) {
+    driverMessagesListEl.innerHTML = "";
+  }
+  lastDriverAlertSignature = "";
+  driverAlertBaselineReady = false;
 }
 
 async function restoreActiveService() {
@@ -1161,6 +1413,17 @@ document.getElementById("refreshTodayServicesBtn").addEventListener("click", asy
 });
 document.getElementById("refreshPendingHandoversBtn").addEventListener("click", loadPendingHandovers);
 document.getElementById("handoverForm").addEventListener("submit", transferService);
+if (driverMessageFormEl) driverMessageFormEl.addEventListener("submit", sendDriverMessage);
+if (refreshDriverMessagesBtnEl) refreshDriverMessagesBtnEl.addEventListener("click", refreshDriverMessages);
+if (driverAlertSoundTypeEl) {
+  driverAlertSoundTypeEl.addEventListener("change", () => saveDriverAlertSoundSettings(getDriverAlertSoundSettings()));
+}
+if (driverAlertSoundVolumeEl) {
+  driverAlertSoundVolumeEl.addEventListener("input", () => saveDriverAlertSoundSettings(getDriverAlertSoundSettings()));
+}
+if (testDriverAlertSoundBtnEl) {
+  testDriverAlertSoundBtnEl.addEventListener("click", playDriverAlertSound);
+}
 fleetNumberInput.addEventListener("input", updateFleetWarning);
 document.getElementById("lineCode").addEventListener("change", () => {
   loadReferenceRoutePreview(document.getElementById("lineCode").value, document.getElementById("serviceSchedule").value);
@@ -1174,7 +1437,10 @@ document.getElementById("logoutBtn").addEventListener("click", logoutDriver);
 initDriverTabs();
 window.addEventListener("online", () => {
   flushGpsPointQueue();
+  updateDriverAlertSignature();
 });
+
+applyDriverAlertSoundSettingsToUi();
 
 (() => {
   const raw = sessionStorage.getItem(AUTH_SESSION_KEY);

@@ -43,6 +43,7 @@
               <button type="button" class="tab-btn active" data-driver-tab-target="driverStepSelect">1. Escolher serviço</button>
               <button type="button" class="tab-btn" data-driver-tab-target="driverStepStart">2. Iniciar viagem</button>
               <button type="button" class="tab-btn" data-driver-tab-target="driverStepMap">3. Mapa e operações</button>
+              <button type="button" class="tab-btn" data-driver-tab-target="driverStepComms">Mensagens e trânsito</button>
               <button type="button" class="tab-btn" data-driver-tab-target="driverStepHistory">Histórico</button>
             </nav>
             <div class="tab-content">
@@ -122,6 +123,47 @@
                     <input id="handoverLocationText" type="text" placeholder="Ex: Paragem Central - Plataforma 2" />
                     <button type="submit" id="handoverBtn">Transferir serviço</button>
                   </form>
+                </section>
+              </section>
+
+              <section id="driverStepComms" class="tab-panel">
+                <h2>Mensagens com supervisão</h2>
+                <p class="field-help" style="margin-top: 0">
+                  Envie mensagens pré-definidas ou personalizadas para supervisor/admin e acompanhe alertas de trânsito.
+                </p>
+                <section class="card">
+                  <h3>Enviar mensagem</h3>
+                  <form id="driverMessageForm">
+                    <label for="driverMessagePreset">Mensagem pré-definida</label>
+                    <select id="driverMessagePreset">
+                      <option value="">-- Nenhuma (escrever manualmente) --</option>
+                    </select>
+                    <label for="driverMessageText">Mensagem</label>
+                    <textarea id="driverMessageText" rows="4" placeholder="Descreva a situação" required></textarea>
+                    <label class="inline-checkbox">
+                      <input id="driverMessageTrafficAlert" type="checkbox" />
+                      Marcar como alerta de trânsito
+                    </label>
+                    <button type="submit">Enviar ao supervisor</button>
+                  </form>
+                </section>
+                <section class="card">
+                  <h3>Mensagens recebidas e enviadas</h3>
+                  <div class="ops-layout" style="margin-bottom: 8px">
+                    <div class="ops-main">
+                      <label for="driverAlertSoundType">Tipo de som</label>
+                      <select id="driverAlertSoundType">
+                        <option value="beep">Beep</option>
+                        <option value="chime">Chime</option>
+                        <option value="urgent">Urgente</option>
+                      </select>
+                      <label for="driverAlertSoundVolume">Volume</label>
+                      <input id="driverAlertSoundVolume" type="range" min="0" max="100" value="70" />
+                      <button id="testDriverAlertSoundBtn" type="button">Testar som</button>
+                    </div>
+                  </div>
+                  <button id="refreshDriverMessagesBtn" type="button">Atualizar mensagens</button>
+                  <ul id="driverMessagesList"></ul>
                 </section>
               </section>
 

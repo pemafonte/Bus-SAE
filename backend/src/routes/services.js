@@ -326,6 +326,170 @@ async function ensureSupervisorConflictAlertsTable() {
   );
 }
 
+async function ensureOpsMessagesTable() {
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS ops_messages (
+      id BIGSERIAL PRIMARY KEY,
+      from_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      to_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      message_text TEXT NOT NULL,
+      preset_code VARCHAR(60),
+      is_traffic_alert BOOLEAN NOT NULL DEFAULT FALSE,
+      related_service_id BIGINT REFERENCES services(id) ON DELETE SET NULL,
+      read_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_ops_messages_to_user_created
+     ON ops_messages(to_user_id, created_at DESC)`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_ops_messages_users_created
+     ON ops_messages(from_user_id, to_user_id, created_at DESC)`
+  );
+}
+
+function getDriverMessagePresets() {
+  return [
+    { code: "delay_traffic", label: "Atraso por trânsito intenso" },
+    { code: "breakdown", label: "Avaria na viatura" },
+    { code: "accident", label: "Acidente no percurso" },
+    { code: "route_blocked", label: "Via cortada/desvio necessário" },
+    { code: "request_support", label: "Preciso de apoio operacional" },
+  ];
+}
+
+async function resolveSupervisorRecipient(preferredId) {
+  const preferred = Number(preferredId);
+  if (Number.isFinite(preferred) && preferred > 0) {
+    const byId = await db.query(
+      `SELECT id, name, role
+       FROM users
+       WHERE id = $1
+         AND is_active = TRUE
+         AND LOWER(TRIM(role::text)) IN ('supervisor', 'admin')
+       LIMIT 1`,
+      [preferred]
+    );
+    if (byId.rowCount) return byId.rows[0];
+  }
+  const fallback = await db.query(
+    `SELECT id, name, role
+     FROM users
+     WHERE is_active = TRUE
+       AND LOWER(TRIM(role::text)) IN ('supervisor', 'admin')
+     ORDER BY CASE WHEN LOWER(TRIM(role::text)) = 'admin' THEN 0 ELSE 1 END, id ASC
+     LIMIT 1`
+  );
+  return fallback.rows[0] || null;
+}
+
+router.get("/message-presets", async (_req, res) => {
+  return res.json(getDriverMessagePresets());
+});
+
+router.get("/messages", async (req, res) => {
+  try {
+    await ensureOpsMessagesTable();
+    const sinceId = Number(req.query.sinceId);
+    const useSince = Number.isFinite(sinceId) && sinceId > 0;
+    const result = await db.query(
+      `SELECT
+         m.id,
+         m.from_user_id,
+         m.to_user_id,
+         m.message_text,
+         m.preset_code,
+         m.is_traffic_alert,
+         m.related_service_id,
+         m.read_at,
+         m.created_at,
+         fu.name AS from_name,
+         fu.role::text AS from_role,
+         tu.name AS to_name,
+         tu.role::text AS to_role
+       FROM ops_messages m
+       JOIN users fu ON fu.id = m.from_user_id
+       JOIN users tu ON tu.id = m.to_user_id
+       WHERE (m.from_user_id = $1 OR m.to_user_id = $1)
+         AND ($2::bigint IS NULL OR m.id > $2::bigint)
+       ORDER BY m.created_at DESC
+       LIMIT 200`,
+      [req.user.id, useSince ? sinceId : null]
+    );
+    return res.json(result.rows);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar mensagens operacionais." });
+  }
+});
+
+router.post("/messages", async (req, res) => {
+  try {
+    await ensureOpsMessagesTable();
+    const role = String(req.user?.role || "").trim().toLowerCase();
+    if (role !== "driver") {
+      return res.status(403).json({ message: "Apenas motoristas podem usar este endpoint." });
+    }
+
+    const messageText = String(req.body?.message || "").trim();
+    const presetCode = String(req.body?.presetCode || "").trim() || null;
+    const isTrafficAlert = req.body?.isTrafficAlert === true;
+    const relatedServiceIdRaw = Number(req.body?.relatedServiceId);
+    const relatedServiceId = Number.isFinite(relatedServiceIdRaw) && relatedServiceIdRaw > 0 ? relatedServiceIdRaw : null;
+    if (!messageText) {
+      return res.status(400).json({ message: "Mensagem obrigatória." });
+    }
+
+    const recipient = await resolveSupervisorRecipient(req.body?.toUserId);
+    if (!recipient) {
+      return res.status(404).json({ message: "Sem supervisor/admin ativo para receber a mensagem." });
+    }
+
+    const inserted = await db.query(
+      `INSERT INTO ops_messages (
+         from_user_id, to_user_id, message_text, preset_code, is_traffic_alert, related_service_id
+       )
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, created_at`,
+      [req.user.id, recipient.id, messageText, presetCode, isTrafficAlert, relatedServiceId]
+    );
+    return res.status(201).json({
+      message: "Mensagem enviada ao supervisor.",
+      id: inserted.rows[0].id,
+      createdAt: inserted.rows[0].created_at,
+      toUser: { id: recipient.id, name: recipient.name, role: recipient.role },
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao enviar mensagem operacional." });
+  }
+});
+
+router.patch("/messages/:messageId/read", async (req, res) => {
+  try {
+    await ensureOpsMessagesTable();
+    const messageId = Number(req.params.messageId);
+    if (!Number.isFinite(messageId) || messageId <= 0) {
+      return res.status(400).json({ message: "Identificador de mensagem inválido." });
+    }
+    const updated = await db.query(
+      `UPDATE ops_messages
+       SET read_at = NOW()
+       WHERE id = $1
+         AND to_user_id = $2
+         AND read_at IS NULL
+       RETURNING id`,
+      [messageId, req.user.id]
+    );
+    if (!updated.rowCount) {
+      return res.status(404).json({ message: "Mensagem não encontrada." });
+    }
+    return res.json({ ok: true, id: updated.rows[0].id });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao marcar mensagem como lida." });
+  }
+});
+
 router.get("/notifications", async (req, res) => {
   try {
     await ensureDriverNotificationsTable();

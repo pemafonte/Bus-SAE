@@ -824,6 +824,201 @@ async function ensureSupervisorConflictAlertsTable() {
   );
 }
 
+async function ensureOpsMessagesTable() {
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS ops_messages (
+      id BIGSERIAL PRIMARY KEY,
+      from_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      to_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      message_text TEXT NOT NULL,
+      preset_code VARCHAR(60),
+      is_traffic_alert BOOLEAN NOT NULL DEFAULT FALSE,
+      related_service_id BIGINT REFERENCES services(id) ON DELETE SET NULL,
+      read_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_ops_messages_to_user_created
+     ON ops_messages(to_user_id, created_at DESC)`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_ops_messages_users_created
+     ON ops_messages(from_user_id, to_user_id, created_at DESC)`
+  );
+}
+
+function getSupervisorMessagePresets() {
+  return [
+    { code: "ack_received", label: "Recebido. Continue em segurança." },
+    { code: "reroute", label: "Siga pelo desvio indicado pela central." },
+    { code: "hold_position", label: "Aguarde instruções na posição atual." },
+    { code: "priority_support", label: "Apoio em deslocação para o local." },
+    { code: "normal_resume", label: "Situação normalizada. Retome o percurso." },
+  ];
+}
+
+router.get("/message-presets", async (_req, res) => {
+  return res.json(getSupervisorMessagePresets());
+});
+
+router.get("/messages/threads", async (_req, res) => {
+  try {
+    await ensureOpsMessagesTable();
+    const result = await db.query(
+      `SELECT
+         u.id AS driver_id,
+         u.name AS driver_name,
+         u.mechanic_number,
+         MAX(m.created_at) AS last_message_at,
+         COUNT(*) FILTER (
+           WHERE m.to_user_id = $1
+             AND LOWER(TRIM(fu.role::text)) = 'driver'
+             AND m.read_at IS NULL
+         ) AS unread_from_driver
+       FROM ops_messages m
+       JOIN users fu ON fu.id = m.from_user_id
+       JOIN users u ON u.id = CASE WHEN m.from_user_id = $1 THEN m.to_user_id ELSE m.from_user_id END
+       WHERE (m.from_user_id = $1 OR m.to_user_id = $1)
+         AND LOWER(TRIM(u.role::text)) = 'driver'
+       GROUP BY u.id, u.name, u.mechanic_number
+       ORDER BY MAX(m.created_at) DESC
+       LIMIT 200`,
+      [_req.user.id]
+    );
+    return res.json(result.rows);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar conversas com motoristas." });
+  }
+});
+
+router.get("/messages", async (req, res) => {
+  try {
+    await ensureOpsMessagesTable();
+    const driverId = Number(req.query.driverId);
+    if (!Number.isFinite(driverId) || driverId <= 0) {
+      return res.status(400).json({ message: "Indique driverId válido." });
+    }
+    const driverCheck = await db.query(
+      `SELECT id, name, mechanic_number
+       FROM users
+       WHERE id = $1
+         AND LOWER(TRIM(role::text)) = 'driver'
+       LIMIT 1`,
+      [driverId]
+    );
+    if (!driverCheck.rowCount) {
+      return res.status(404).json({ message: "Motorista não encontrado." });
+    }
+
+    const result = await db.query(
+      `SELECT
+         m.id,
+         m.from_user_id,
+         m.to_user_id,
+         m.message_text,
+         m.preset_code,
+         m.is_traffic_alert,
+         m.related_service_id,
+         m.read_at,
+         m.created_at,
+         fu.name AS from_name,
+         fu.role::text AS from_role,
+         tu.name AS to_name,
+         tu.role::text AS to_role
+       FROM ops_messages m
+       JOIN users fu ON fu.id = m.from_user_id
+       JOIN users tu ON tu.id = m.to_user_id
+       WHERE (
+         (m.from_user_id = $1 AND m.to_user_id = $2)
+         OR (m.from_user_id = $2 AND m.to_user_id = $1)
+       )
+       ORDER BY m.created_at DESC
+       LIMIT 300`,
+      [req.user.id, driverId]
+    );
+    return res.json({
+      driver: driverCheck.rows[0],
+      messages: result.rows,
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar mensagens com o motorista." });
+  }
+});
+
+router.post("/messages", async (req, res) => {
+  try {
+    await ensureOpsMessagesTable();
+    const driverId = Number(req.body?.driverId);
+    const messageText = String(req.body?.message || "").trim();
+    const presetCode = String(req.body?.presetCode || "").trim() || null;
+    const isTrafficAlert = req.body?.isTrafficAlert === true;
+    const relatedServiceIdRaw = Number(req.body?.relatedServiceId);
+    const relatedServiceId = Number.isFinite(relatedServiceIdRaw) && relatedServiceIdRaw > 0 ? relatedServiceIdRaw : null;
+
+    if (!Number.isFinite(driverId) || driverId <= 0) {
+      return res.status(400).json({ message: "driverId inválido." });
+    }
+    if (!messageText) {
+      return res.status(400).json({ message: "Mensagem obrigatória." });
+    }
+    const driverCheck = await db.query(
+      `SELECT id, name
+       FROM users
+       WHERE id = $1
+         AND is_active = TRUE
+         AND LOWER(TRIM(role::text)) = 'driver'
+       LIMIT 1`,
+      [driverId]
+    );
+    if (!driverCheck.rowCount) {
+      return res.status(404).json({ message: "Motorista não encontrado/ativo." });
+    }
+
+    const inserted = await db.query(
+      `INSERT INTO ops_messages (
+         from_user_id, to_user_id, message_text, preset_code, is_traffic_alert, related_service_id
+       )
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING id, created_at`,
+      [req.user.id, driverId, messageText, presetCode, isTrafficAlert, relatedServiceId]
+    );
+    return res.status(201).json({
+      message: "Mensagem enviada ao motorista.",
+      id: inserted.rows[0].id,
+      createdAt: inserted.rows[0].created_at,
+      driver: driverCheck.rows[0],
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao enviar mensagem ao motorista." });
+  }
+});
+
+router.patch("/messages/:messageId/read", async (req, res) => {
+  try {
+    await ensureOpsMessagesTable();
+    const messageId = Number(req.params.messageId);
+    if (!Number.isFinite(messageId) || messageId <= 0) {
+      return res.status(400).json({ message: "Identificador inválido." });
+    }
+    const updated = await db.query(
+      `UPDATE ops_messages
+       SET read_at = NOW()
+       WHERE id = $1
+         AND to_user_id = $2
+         AND read_at IS NULL
+       RETURNING id`,
+      [messageId, req.user.id]
+    );
+    if (!updated.rowCount) {
+      return res.status(404).json({ message: "Mensagem não encontrada." });
+    }
+    return res.json({ ok: true, id: updated.rows[0].id });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao marcar mensagem como lida." });
+  }
+});
+
 router.get("/conflict-alerts", async (_req, res) => {
   try {
     await ensureSupervisorConflictAlertsTable();
@@ -852,6 +1047,34 @@ router.get("/conflict-alerts", async (_req, res) => {
     return res.json(result.rows);
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao listar alertas de conflito." });
+  }
+});
+
+router.get("/handover-alerts", async (_req, res) => {
+  try {
+    const result = await db.query(
+      `SELECT
+         h.id,
+         h.service_id,
+         h.reason,
+         h.notes,
+         h.status,
+         h.created_at,
+         fu.id AS from_driver_id,
+         fu.name AS from_driver_name,
+         fu.mechanic_number AS from_driver_mechanic_number,
+         tu.id AS to_driver_id,
+         tu.name AS to_driver_name
+       FROM service_handover_events h
+       JOIN users fu ON fu.id = h.from_driver_id
+       LEFT JOIN users tu ON tu.id = h.to_driver_id
+       WHERE LOWER(TRIM(h.status::text)) = 'pending'
+       ORDER BY h.created_at DESC
+       LIMIT 200`
+    );
+    return res.json(result.rows);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar alertas de handover." });
   }
 });
 

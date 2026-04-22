@@ -40,6 +40,7 @@
             <button type="button" class="tab-btn" data-tab-target="tabExportarMotoristas">Exportar dados</button>
             <button type="button" class="tab-btn" data-tab-target="tabListaMotoristas">Lista de motoristas</button>
             <button type="button" class="tab-btn" data-tab-target="tabIntegracoesGps">Integrações GPS</button>
+            <button type="button" class="tab-btn" data-tab-target="tabMensagensTransito">Mensagens/Trânsito</button>
             <button type="button" class="tab-btn" data-tab-target="tabParagensServico">Paragens (serviço)</button>
             <button type="button" class="tab-btn" data-tab-target="tabRelatoriosIa">Relatórios IA</button>
           </aside>
@@ -350,6 +351,52 @@
             <textarea id="trackerWebhookBatchPayloadPreview" rows="14" readonly></textarea>
             <button type="button" id="copyTrackerWebhookConfigBtn">Copiar URL, headers e ambos os exemplos</button>
           </section>
+        </div>
+
+        <div id="tabMensagensTransito" class="tab-panel">
+          <h2>Mensagens operacionais e alertas de trânsito</h2>
+          <p class="field-help" style="margin-top: 0">
+            Comunicação bidirecional entre supervisão e motoristas. Mensagens marcadas como alerta de trânsito ficam destacadas.
+          </p>
+          <div class="ops-layout">
+            <aside class="ops-sidebar">
+              <h3>Motoristas com conversa</h3>
+              <button type="button" id="refreshOpsThreadsBtn">Atualizar conversas</button>
+              <ul id="opsThreadsList"></ul>
+            </aside>
+            <section class="ops-main">
+              <h3 id="opsConversationTitle">Selecione um motorista</h3>
+              <form id="supMessageForm">
+                <label for="supMessagePreset">Mensagem pré-definida</label>
+                <select id="supMessagePreset">
+                  <option value="">-- Nenhuma (escrever manualmente) --</option>
+                </select>
+                <label for="supMessageText">Mensagem</label>
+                <textarea id="supMessageText" rows="4" placeholder="Escreva a instrução para o motorista" required></textarea>
+                <label for="supMessageRelatedServiceId">ID do serviço (opcional)</label>
+                <input id="supMessageRelatedServiceId" type="number" min="1" placeholder="Ex.: 1234" />
+                <label class="inline-checkbox">
+                  <input id="supMessageTrafficAlert" type="checkbox" />
+                  Marcar como alerta de trânsito
+                </label>
+                <button type="submit" id="supMessageSendBtn">Enviar mensagem ao motorista</button>
+              </form>
+              <section class="card" style="margin-top: 12px">
+                <h3>Histórico da conversa</h3>
+                <label for="supAlertSoundType">Tipo de som</label>
+                <select id="supAlertSoundType">
+                  <option value="beep">Beep</option>
+                  <option value="chime">Chime</option>
+                  <option value="urgent">Urgente</option>
+                </select>
+                <label for="supAlertSoundVolume">Volume</label>
+                <input id="supAlertSoundVolume" type="range" min="0" max="100" value="70" />
+                <button type="button" id="testSupAlertSoundBtn">Testar som</button>
+                <button type="button" id="refreshOpsMessagesBtn">Atualizar mensagens</button>
+                <ul id="opsMessagesList"></ul>
+              </section>
+            </section>
+          </div>
         </div>
 
         <div id="tabParagensServico" class="tab-panel">
