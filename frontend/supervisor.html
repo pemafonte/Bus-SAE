@@ -39,6 +39,7 @@
             <button type="button" class="tab-btn" data-tab-target="tabImportarMotoristas">Importar dados</button>
             <button type="button" class="tab-btn" data-tab-target="tabExportarMotoristas">Exportar dados</button>
             <button type="button" class="tab-btn" data-tab-target="tabListaMotoristas">Lista de motoristas</button>
+            <button type="button" class="tab-btn" data-tab-target="tabIntegracoesGps">Integrações GPS</button>
             <button type="button" class="tab-btn" data-tab-target="tabParagensServico">Paragens (serviço)</button>
           </aside>
 
@@ -268,6 +269,81 @@
           <h2>Lista de utilizadores</h2>
           <button id="refreshDriversBtn">Atualizar utilizadores</button>
           <ul id="driversList"></ul>
+        </div>
+
+        <div id="tabIntegracoesGps" class="tab-panel">
+          <h2>Integrações GPS (Teltonika)</h2>
+          <p class="field-help" style="margin-top: 0">
+            O telemóvel do motorista não precisa de estar ligado ao Teltonika. O motorista inicia o serviço na app e os
+            pontos do tracker entram na API pelo webhook.
+          </p>
+          <section class="card tracker-production-checklist">
+            <h3>Checklist produção (Teltonika + Flespi/Traccar + API)</h3>
+            <ol class="tracker-checklist-ol">
+              <li>
+                <strong>Backend</strong>: definir <code>TELTONIKA_WEBHOOK_TOKEN</code> no <code>backend/.env</code> (valor
+                forte, único por ambiente). Reiniciar a API após alterar.
+              </li>
+              <li>
+                <strong>Rede</strong>: o servidor da API deve ser acessível a partir do gateway (IP público, domínio,
+                firewall, HTTPS em produção). Testar <code>GET /health</code> a partir de fora da LAN se aplicável.
+              </li>
+              <li>
+                <strong>Teltonika (viatura)</strong>: APN da operadora correto; servidor aponta para o <em>gateway</em>
+                (Flespi/Traccar), não diretamente para esta app, salvo se o vosso stack receber Codec8 na API.
+              </li>
+              <li>
+                <strong>Frota e chapa</strong>: o IMEI deve estar mapeado aqui com <strong>frota e/ou chapa iguais</strong>
+                às usadas quando o motorista inicia o serviço na app — a API associa o tracker ao serviço
+                <code>in_progress</code> por esses campos.
+              </li>
+              <li>
+                <strong>Webhook no gateway</strong>: método <code>POST</code>, URL
+                <code>…/integrations/teltonika/events</code>, header
+                <code>Authorization: Bearer &lt;mesmo token do .env&gt;</code>, corpo JSON (ver exemplos abaixo).
+              </li>
+              <li>
+                <strong>Fuso horário</strong>: enviar <code>timestamp</code> em ISO UTC (ex. com sufixo Z) sempre que
+                possível.
+              </li>
+              <li>
+                <strong>Teste operacional</strong>: com serviço iniciado na app para essa frota, enviar um ponto de teste;
+                confirmar no detalhe do serviço que surgem pontos e que <code>point_source</code> no tracker é aceite.
+              </li>
+              <li>
+                <strong>Segurança</strong>: não partilhar o token em email em claro; rotação periódica se suspeita de
+                fuga.
+              </li>
+            </ol>
+          </section>
+          <form id="trackerDeviceForm">
+            <input id="trackerImei" type="text" placeholder="IMEI (só dígitos)" required />
+            <input id="trackerFleetNumber" type="text" placeholder="Frota (ex.: BUS-01)" />
+            <input id="trackerPlateNumber" type="text" placeholder="Chapa (ex.: AA-00-BB)" />
+            <select id="trackerIsActive">
+              <option value="true">Ativo</option>
+              <option value="false">Inativo</option>
+            </select>
+            <button type="submit">Guardar dispositivo</button>
+          </form>
+          <button type="button" id="refreshTrackerDevicesBtn">Atualizar dispositivos</button>
+          <ul id="trackerDevicesList"></ul>
+          <section class="card" style="margin-top: 12px">
+            <h3>Configuração webhook (Flespi/Traccar)</h3>
+            <p class="field-help">
+              Use estes valores no integrador que recebe Teltonika e encaminha para esta API. O token deve ser igual ao
+              configurado em <code>TELTONIKA_WEBHOOK_TOKEN</code> no backend.
+            </p>
+            <label for="trackerWebhookUrlPreview">URL webhook</label>
+            <input id="trackerWebhookUrlPreview" type="text" readonly />
+            <label for="trackerWebhookHeadersPreview">Headers (exemplo)</label>
+            <textarea id="trackerWebhookHeadersPreview" rows="4" readonly></textarea>
+            <label for="trackerWebhookPayloadPreview">Payload JSON — um evento (exemplo)</label>
+            <textarea id="trackerWebhookPayloadPreview" rows="12" readonly></textarea>
+            <label for="trackerWebhookBatchPayloadPreview">Payload JSON — vários eventos (exemplo <code>events</code>)</label>
+            <textarea id="trackerWebhookBatchPayloadPreview" rows="14" readonly></textarea>
+            <button type="button" id="copyTrackerWebhookConfigBtn">Copiar URL, headers e ambos os exemplos</button>
+          </section>
         </div>
 
         <div id="tabParagensServico" class="tab-panel">

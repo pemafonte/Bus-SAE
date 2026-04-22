@@ -110,6 +110,9 @@ cd c:\Projetos\Cursor_projetos
 - `GET /supervisor/drivers/import-template.xlsx` (supervisor/admin)
 - `GET /supervisor/drivers/export.csv?company=` (supervisor/admin)
 - `GET /supervisor/drivers/export.xlsx?company=` (supervisor/admin)
+- `GET /integrations/teltonika/devices` (supervisor/admin)
+- `POST /integrations/teltonika/devices` (supervisor/admin)
+- `POST /integrations/teltonika/events` (token integração)
 
 ## Fluxo de utilizacao
 

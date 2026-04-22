@@ -348,6 +348,34 @@ body::after {
   gap: 10px;
 }
 
+#trackerDevicesList {
+  list-style: none;
+  padding-left: 0;
+  margin: 10px 0 0;
+  display: grid;
+  gap: 10px;
+}
+
+.tracker-production-checklist {
+  margin-bottom: 12px;
+}
+
+.tracker-checklist-ol {
+  margin: 0;
+  padding-left: 1.35rem;
+  font-size: 13px;
+  line-height: 1.55;
+  color: #1f2937;
+}
+
+.tracker-checklist-ol li {
+  margin-bottom: 10px;
+}
+
+.tracker-checklist-ol li strong {
+  color: #0f172a;
+}
+
 .user-row-item {
   background: #ffffff;
   border: 1px solid #d1d5db;

@@ -9,6 +9,7 @@ const { getRosterServiceDateForExecution } = require("../utils/rosterServiceDate
 
 const router = express.Router();
 router.use(authMiddleware);
+let servicePointsQualityColumnsEnsured = false;
 
 async function ensurePlannedServiceLocationColumns() {
   await db.query(
@@ -23,6 +24,113 @@ async function ensurePlannedServiceLocationColumns() {
     `ALTER TABLE planned_services
        ADD COLUMN IF NOT EXISTS kms_carga NUMERIC(12,3)`
   );
+}
+
+async function ensureServicePointsQualityColumns() {
+  if (servicePointsQualityColumnsEnsured) return;
+  await db.query(
+    `ALTER TABLE service_points
+       ADD COLUMN IF NOT EXISTS accuracy_m NUMERIC(8,2)`
+  );
+  await db.query(
+    `ALTER TABLE service_points
+       ADD COLUMN IF NOT EXISTS speed_kmh NUMERIC(8,2)`
+  );
+  await db.query(
+    `ALTER TABLE service_points
+       ADD COLUMN IF NOT EXISTS heading_deg NUMERIC(6,2)`
+  );
+  await db.query(
+    `ALTER TABLE service_points
+       ADD COLUMN IF NOT EXISTS point_source VARCHAR(20) NOT NULL DEFAULT 'mobile'`
+  );
+  servicePointsQualityColumnsEnsured = true;
+}
+
+function normalizeIncomingPoint(rawPoint) {
+  const lat = Number(rawPoint?.lat);
+  const lng = Number(rawPoint?.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return { ok: false, error: "Latitude e longitude invalidas." };
+  }
+
+  const normalizedSource = String(rawPoint?.source || "mobile")
+    .trim()
+    .toLowerCase();
+  if (!["mobile", "tracker"].includes(normalizedSource)) {
+    return { ok: false, error: "Origem de ponto invalida. Use mobile ou tracker." };
+  }
+
+  const normalizedAccuracyM = Number(rawPoint?.accuracyM);
+  const normalizedSpeedKmh = Number(rawPoint?.speedKmh);
+  const normalizedHeadingDeg = Number(rawPoint?.headingDeg);
+  const accuracyValue = Number.isFinite(normalizedAccuracyM) ? normalizedAccuracyM : null;
+  const speedValue = Number.isFinite(normalizedSpeedKmh) ? normalizedSpeedKmh : null;
+  const headingValue = Number.isFinite(normalizedHeadingDeg) ? normalizedHeadingDeg : null;
+
+  if (accuracyValue !== null && accuracyValue < 0) {
+    return { ok: false, error: "accuracyM invalido." };
+  }
+  if (speedValue !== null && speedValue < 0) {
+    return { ok: false, error: "speedKmh invalido." };
+  }
+  if (headingValue !== null && (headingValue < 0 || headingValue > 360)) {
+    return { ok: false, error: "headingDeg invalido. Use 0..360." };
+  }
+
+  return {
+    ok: true,
+    point: {
+      lat,
+      lng,
+      capturedAt: rawPoint?.capturedAt || null,
+      source: normalizedSource,
+      accuracyM: accuracyValue,
+      speedKmh: speedValue,
+      headingDeg: headingValue,
+    },
+  };
+}
+
+async function insertServicePoint(serviceId, serviceSegmentId, point) {
+  await db.query(
+    `INSERT INTO service_points (
+       service_id, service_segment_id, lat, lng, captured_at,
+       accuracy_m, speed_kmh, heading_deg, point_source
+     )
+     VALUES ($1, $2, $3, $4, COALESCE($5::timestamptz, NOW()), $6, $7, $8, $9)`,
+    [
+      serviceId,
+      serviceSegmentId,
+      point.lat,
+      point.lng,
+      point.capturedAt || null,
+      point.accuracyM,
+      point.speedKmh,
+      point.headingDeg,
+      point.source,
+    ]
+  );
+}
+
+async function updateServiceRouteCheck(serviceId, gtfsTripId, point) {
+  let deviationMeters = null;
+  let isOffRoute = false;
+  if (gtfsTripId) {
+    const shapePoints = await getShapePointsByTripId(gtfsTripId);
+    if (shapePoints.length >= 2) {
+      deviationMeters = minDistanceToPolylineMeters({ lat: point.lat, lng: point.lng }, shapePoints);
+      isOffRoute = deviationMeters > 150;
+      await db.query(
+        `UPDATE services
+         SET route_deviation_m = $2,
+             is_off_route = $3
+         WHERE id = $1`,
+        [serviceId, deviationMeters, isOffRoute]
+      );
+    }
+  }
+  return { deviationMeters, isOffRoute };
 }
 
 async function getActiveSegment(serviceId) {
@@ -42,7 +150,7 @@ async function closeActiveSegment(serviceId, finalStatus = "completed") {
   if (!activeSegment) return null;
 
   const pointsResult = await db.query(
-    `SELECT lat, lng
+    `SELECT lat, lng, captured_at, accuracy_m, speed_kmh
      FROM service_points
      WHERE service_segment_id = $1
      ORDER BY captured_at ASC`,
@@ -52,6 +160,9 @@ async function closeActiveSegment(serviceId, finalStatus = "completed") {
   const points = pointsResult.rows.map((p) => ({
     lat: Number(p.lat),
     lng: Number(p.lng),
+    capturedAt: p.captured_at,
+    accuracyM: p.accuracy_m == null ? null : Number(p.accuracy_m),
+    speedKmh: p.speed_kmh == null ? null : Number(p.speed_kmh),
   }));
   const kmSegment = calculatePathDistance(points);
 
@@ -562,13 +673,13 @@ router.post("/start", async (req, res) => {
 
 router.post("/:serviceId/points", async (req, res) => {
   const { serviceId } = req.params;
-  const { lat, lng, capturedAt } = req.body;
-
-  if (typeof lat !== "number" || typeof lng !== "number") {
-    return res.status(400).json({ message: "Latitude e longitude invalidas." });
+  const normalized = normalizeIncomingPoint(req.body);
+  if (!normalized.ok) {
+    return res.status(400).json({ message: normalized.error });
   }
 
   try {
+    await ensureServicePointsQualityColumns();
     const ownerCheck = await db.query(
       `SELECT id, status, gtfs_trip_id FROM services
        WHERE id = $1 AND driver_id = $2 AND status = 'in_progress'`,
@@ -584,39 +695,88 @@ router.post("/:serviceId/points", async (req, res) => {
       return res.status(409).json({ message: "Servico sem segmento ativo." });
     }
 
-    await db.query(
-      `INSERT INTO service_points (service_id, service_segment_id, lat, lng, captured_at)
-       VALUES ($1, $2, $3, $4, COALESCE($5::timestamptz, NOW()))`,
-      [serviceId, activeSegment.id, lat, lng, capturedAt || null]
-    );
-
-    let deviationMeters = null;
-    let isOffRoute = false;
-    if (ownerCheck.rows[0].gtfs_trip_id) {
-      const shapePoints = await getShapePointsByTripId(ownerCheck.rows[0].gtfs_trip_id);
-      if (shapePoints.length >= 2) {
-        deviationMeters = minDistanceToPolylineMeters({ lat, lng }, shapePoints);
-        isOffRoute = deviationMeters > 150;
-        await db.query(
-          `UPDATE services
-           SET route_deviation_m = $2,
-               is_off_route = $3
-           WHERE id = $1`,
-          [serviceId, deviationMeters, isOffRoute]
-        );
-      }
-    }
+    await insertServicePoint(serviceId, activeSegment.id, normalized.point);
+    const routeCheck = await updateServiceRouteCheck(serviceId, ownerCheck.rows[0].gtfs_trip_id, normalized.point);
 
     return res.status(201).json({
       message: "Ponto registado.",
+      acceptedPoint: {
+        source: normalized.point.source,
+        accuracyM: normalized.point.accuracyM,
+        speedKmh: normalized.point.speedKmh,
+        headingDeg: normalized.point.headingDeg,
+      },
       routeCheck: {
-        deviationMeters,
-        isOffRoute,
+        deviationMeters: routeCheck.deviationMeters,
+        isOffRoute: routeCheck.isOffRoute,
         thresholdMeters: 150,
       },
     });
   } catch (error) {
     return res.status(500).json({ message: "Erro ao guardar ponto GPS." });
+  }
+});
+
+router.post("/:serviceId/points/batch", async (req, res) => {
+  const { serviceId } = req.params;
+  const points = Array.isArray(req.body?.points) ? req.body.points : null;
+  if (!points || points.length === 0) {
+    return res.status(400).json({ message: "Indique points com pelo menos 1 registo." });
+  }
+  if (points.length > 500) {
+    return res.status(400).json({ message: "Batch demasiado grande. Maximo: 500 pontos por pedido." });
+  }
+
+  try {
+    await ensureServicePointsQualityColumns();
+    const ownerCheck = await db.query(
+      `SELECT id, status, gtfs_trip_id FROM services
+       WHERE id = $1 AND driver_id = $2 AND status = 'in_progress'`,
+      [serviceId, req.user.id]
+    );
+    if (ownerCheck.rowCount === 0) {
+      return res.status(404).json({ message: "Viagem ativa nao encontrada." });
+    }
+
+    const activeSegment = await getActiveSegment(serviceId);
+    if (!activeSegment) {
+      return res.status(409).json({ message: "Servico sem segmento ativo." });
+    }
+
+    let acceptedCount = 0;
+    const rejected = [];
+    let lastAcceptedPoint = null;
+
+    for (let i = 0; i < points.length; i += 1) {
+      const normalized = normalizeIncomingPoint(points[i]);
+      if (!normalized.ok) {
+        rejected.push({ index: i, message: normalized.error });
+        continue;
+      }
+      await insertServicePoint(serviceId, activeSegment.id, normalized.point);
+      acceptedCount += 1;
+      lastAcceptedPoint = normalized.point;
+    }
+
+    let routeCheck = { deviationMeters: null, isOffRoute: false, thresholdMeters: 150 };
+    if (lastAcceptedPoint) {
+      const checked = await updateServiceRouteCheck(serviceId, ownerCheck.rows[0].gtfs_trip_id, lastAcceptedPoint);
+      routeCheck = {
+        deviationMeters: checked.deviationMeters,
+        isOffRoute: checked.isOffRoute,
+        thresholdMeters: 150,
+      };
+    }
+
+    return res.status(201).json({
+      message: "Batch processado.",
+      acceptedCount,
+      rejectedCount: rejected.length,
+      rejected,
+      routeCheck,
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao guardar batch de pontos GPS." });
   }
 });
 
@@ -902,7 +1062,7 @@ router.post("/:serviceId/end", async (req, res) => {
     await closeActiveSegment(serviceId);
 
     const pointsResult = await db.query(
-      `SELECT lat, lng, captured_at
+      `SELECT lat, lng, captured_at, accuracy_m, speed_kmh
        FROM service_points
        WHERE service_id = $1
        ORDER BY captured_at ASC`,
@@ -913,6 +1073,8 @@ router.post("/:serviceId/end", async (req, res) => {
       lat: Number(p.lat),
       lng: Number(p.lng),
       capturedAt: p.captured_at,
+      accuracyM: p.accuracy_m == null ? null : Number(p.accuracy_m),
+      speedKmh: p.speed_kmh == null ? null : Number(p.speed_kmh),
     }));
 
     const totalKmGps = calculatePathDistance(points);
@@ -996,7 +1158,7 @@ router.post("/:serviceId/cancel", async (req, res) => {
     await closeActiveSegment(serviceId, "cancelled");
 
     const pointsResult = await db.query(
-      `SELECT lat, lng, captured_at
+      `SELECT lat, lng, captured_at, accuracy_m, speed_kmh
        FROM service_points
        WHERE service_id = $1
        ORDER BY captured_at ASC`,
@@ -1007,6 +1169,8 @@ router.post("/:serviceId/cancel", async (req, res) => {
       lat: Number(p.lat),
       lng: Number(p.lng),
       capturedAt: p.captured_at,
+      accuracyM: p.accuracy_m == null ? null : Number(p.accuracy_m),
+      speedKmh: p.speed_kmh == null ? null : Number(p.speed_kmh),
     }));
     const totalKm = calculatePathDistance(points);
     const routeGeoJSON = {

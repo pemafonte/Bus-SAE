@@ -93,11 +93,23 @@ CREATE TABLE IF NOT EXISTS service_points (
   service_segment_id INT,
   lat DOUBLE PRECISION NOT NULL,
   lng DOUBLE PRECISION NOT NULL,
-  captured_at TIMESTAMPTZ DEFAULT NOW()
+  captured_at TIMESTAMPTZ DEFAULT NOW(),
+  accuracy_m NUMERIC(8,2),
+  speed_kmh NUMERIC(8,2),
+  heading_deg NUMERIC(6,2),
+  point_source VARCHAR(20) NOT NULL DEFAULT 'mobile'
 );
 
 ALTER TABLE service_points
   ADD COLUMN IF NOT EXISTS service_segment_id INT;
+ALTER TABLE service_points
+  ADD COLUMN IF NOT EXISTS accuracy_m NUMERIC(8,2);
+ALTER TABLE service_points
+  ADD COLUMN IF NOT EXISTS speed_kmh NUMERIC(8,2);
+ALTER TABLE service_points
+  ADD COLUMN IF NOT EXISTS heading_deg NUMERIC(6,2);
+ALTER TABLE service_points
+  ADD COLUMN IF NOT EXISTS point_source VARCHAR(20) NOT NULL DEFAULT 'mobile';
 
 CREATE TABLE IF NOT EXISTS service_segments (
   id BIGSERIAL PRIMARY KEY,
@@ -232,3 +244,19 @@ CREATE TABLE IF NOT EXISTS driver_notifications (
 
 CREATE INDEX IF NOT EXISTS idx_driver_notifications_driver_created
   ON driver_notifications(driver_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS tracker_devices (
+  id BIGSERIAL PRIMARY KEY,
+  imei VARCHAR(40) UNIQUE NOT NULL,
+  fleet_number VARCHAR(50),
+  plate_number VARCHAR(50),
+  provider VARCHAR(40) NOT NULL DEFAULT 'teltonika',
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_tracker_devices_fleet
+  ON tracker_devices(fleet_number);
+CREATE INDEX IF NOT EXISTS idx_tracker_devices_plate
+  ON tracker_devices(plate_number);

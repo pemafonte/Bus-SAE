@@ -17,14 +17,53 @@ function haversineKm(lat1, lon1, lat2, lon2) {
   return R * c;
 }
 
-function calculatePathDistance(points) {
+function getPointTimestampMs(point) {
+  if (!point || !point.capturedAt) return null;
+  const timeMs = Date.parse(point.capturedAt);
+  return Number.isFinite(timeMs) ? timeMs : null;
+}
+
+function isPointAccuracyAcceptable(point, maxAccuracyMeters) {
+  const accuracy = Number(point?.accuracyM);
+  if (!Number.isFinite(accuracy)) return true;
+  return accuracy <= maxAccuracyMeters;
+}
+
+function isSegmentPlausible(prev, curr, distanceKm, maxSpeedKmh) {
+  const prevTs = getPointTimestampMs(prev);
+  const currTs = getPointTimestampMs(curr);
+  if (!Number.isFinite(prevTs) || !Number.isFinite(currTs) || currTs <= prevTs) {
+    return true;
+  }
+
+  const elapsedHours = (currTs - prevTs) / 3600000;
+  if (elapsedHours <= 0) return true;
+  const computedSpeed = distanceKm / elapsedHours;
+  if (computedSpeed > maxSpeedKmh) return false;
+
+  const prevReportedSpeed = Number(prev?.speedKmh);
+  const currReportedSpeed = Number(curr?.speedKmh);
+  const speedCapWithTolerance = maxSpeedKmh * 1.2;
+  if (Number.isFinite(prevReportedSpeed) && prevReportedSpeed > speedCapWithTolerance) return false;
+  if (Number.isFinite(currReportedSpeed) && currReportedSpeed > speedCapWithTolerance) return false;
+
+  return true;
+}
+
+function calculatePathDistance(points, options = {}) {
   if (!points || points.length < 2) return 0;
+  const maxAccuracyMeters = Number(options.maxAccuracyMeters ?? 35);
+  const maxSpeedKmh = Number(options.maxSpeedKmh ?? 120);
 
   let total = 0;
   for (let i = 1; i < points.length; i += 1) {
     const prev = points[i - 1];
     const curr = points[i];
-    total += haversineKm(prev.lat, prev.lng, curr.lat, curr.lng);
+    if (!isPointAccuracyAcceptable(prev, maxAccuracyMeters)) continue;
+    if (!isPointAccuracyAcceptable(curr, maxAccuracyMeters)) continue;
+    const segmentKm = haversineKm(prev.lat, prev.lng, curr.lat, curr.lng);
+    if (!isSegmentPlausible(prev, curr, segmentKm, maxSpeedKmh)) continue;
+    total += segmentKm;
   }
   return Number(total.toFixed(3));
 }

@@ -78,9 +78,16 @@ const conflictAlertsListEl = document.getElementById("conflictAlertsList");
 const supLiveMapEl = document.getElementById("supLiveMap");
 const supLiveServicesListEl = document.getElementById("supLiveServicesList");
 const liveServiceFilterSelectEl = document.getElementById("liveServiceFilterSelect");
+const trackerDevicesListEl = document.getElementById("trackerDevicesList");
+const trackerDeviceFormEl = document.getElementById("trackerDeviceForm");
+const trackerWebhookUrlPreviewEl = document.getElementById("trackerWebhookUrlPreview");
+const trackerWebhookHeadersPreviewEl = document.getElementById("trackerWebhookHeadersPreview");
+const trackerWebhookPayloadPreviewEl = document.getElementById("trackerWebhookPayloadPreview");
+const trackerWebhookBatchPayloadPreviewEl = document.getElementById("trackerWebhookBatchPayloadPreview");
 
 let driversCache = [];
 let usersCache = [];
+let trackerDevicesCache = [];
 let rosterDayCache = [];
 let rosterDaySelectedDriverId = null;
 let supLiveMap = null;
@@ -720,6 +727,9 @@ function openSupervisorTab(tabId) {
   if (tabId === "tabAlertasConflito") {
     loadConflictAlerts();
   }
+  if (tabId === "tabIntegracoesGps") {
+    loadTrackerDevices();
+  }
 }
 
 function initTabs() {
@@ -730,6 +740,58 @@ function initTabs() {
       openSupervisorTab(targetId);
     });
   });
+}
+
+function renderTrackerWebhookExamples() {
+  if (!trackerWebhookUrlPreviewEl || !trackerWebhookHeadersPreviewEl || !trackerWebhookPayloadPreviewEl) return;
+  const webhookUrl = `${API_BASE}/integrations/teltonika/events`;
+  const tokenPlaceholder = "<TELTONIKA_WEBHOOK_TOKEN>";
+  const headersExample = {
+    Authorization: `Bearer ${tokenPlaceholder}`,
+    "Content-Type": "application/json",
+  };
+  const payloadExample = {
+    imei: "356307042441013",
+    lat: 38.7231,
+    lng: -9.1384,
+    speedKmh: 34.2,
+    headingDeg: 115,
+    accuracyM: 6.0,
+    timestamp: "2026-04-22T09:00:00.000Z",
+    fleetNumber: "BUS-01",
+    plateNumber: "AA-00-BB",
+  };
+  const batchExample = {
+    events: [
+      { ...payloadExample, timestamp: "2026-04-22T09:00:05.000Z", lat: 38.7232, lng: -9.1383 },
+      { ...payloadExample, timestamp: "2026-04-22T09:00:10.000Z", lat: 38.7233, lng: -9.1382 },
+    ],
+  };
+  trackerWebhookUrlPreviewEl.value = webhookUrl;
+  trackerWebhookHeadersPreviewEl.value = JSON.stringify(headersExample, null, 2);
+  trackerWebhookPayloadPreviewEl.value = JSON.stringify(payloadExample, null, 2);
+  if (trackerWebhookBatchPayloadPreviewEl) {
+    trackerWebhookBatchPayloadPreviewEl.value = JSON.stringify(batchExample, null, 2);
+  }
+}
+
+async function copyTrackerWebhookConfig() {
+  const webhookUrl = trackerWebhookUrlPreviewEl?.value || `${API_BASE}/integrations/teltonika/events`;
+  const headersText = trackerWebhookHeadersPreviewEl?.value || "";
+  const payloadText = trackerWebhookPayloadPreviewEl?.value || "";
+  const batchText = trackerWebhookBatchPayloadPreviewEl?.value || "";
+  const text = [
+    `URL:\n${webhookUrl}`,
+    `\nHeaders:\n${headersText}`,
+    `\nPayload — um evento:\n${payloadText}`,
+    batchText ? `\nPayload — batch (events):\n${batchText}` : "",
+  ].join("");
+  try {
+    await navigator.clipboard.writeText(text);
+    alert("Configuração do webhook copiada.");
+  } catch (_error) {
+    alert("Não foi possível copiar automaticamente. Selecione e copie manualmente.");
+  }
 }
 
 function initServiceFilterMode() {
@@ -1736,6 +1798,103 @@ async function loadDrivers() {
   renderUsersList();
 }
 
+function normalizeImeiDigits(value) {
+  const digits = String(value || "").replace(/\D/g, "");
+  return digits || "";
+}
+
+async function loadTrackerDevices() {
+  if (!supToken || !trackerDevicesListEl) return;
+  trackerDevicesListEl.innerHTML = "<li>A carregar dispositivos...</li>";
+  const response = await fetch(`${API_BASE}/integrations/teltonika/devices`, {
+    headers: getAuthHeaders(),
+  });
+  const data = await response.json().catch(() => []);
+  if (!response.ok) {
+    trackerDevicesListEl.innerHTML = `<li>${data.message || "Erro ao carregar dispositivos Teltonika."}</li>`;
+    return;
+  }
+  trackerDevicesCache = Array.isArray(data) ? data : [];
+  trackerDevicesListEl.innerHTML = "";
+  if (!trackerDevicesCache.length) {
+    trackerDevicesListEl.innerHTML = "<li>Sem dispositivos configurados.</li>";
+    return;
+  }
+  trackerDevicesCache.forEach((item) => {
+    const li = document.createElement("li");
+    li.className = "user-row-item";
+    const isActive = asPgBool(item.is_active);
+    li.innerHTML = `
+      <div class="user-row-summary">
+        IMEI ${item.imei} | Frota ${item.fleet_number || "-"} | Chapa ${item.plate_number || "-"} | ${
+          isActive ? "Ativo" : "Inativo"
+        }
+      </div>
+    `;
+    const actions = document.createElement("div");
+    actions.className = "user-row-actions";
+    const toggleBtn = document.createElement("button");
+    toggleBtn.type = "button";
+    toggleBtn.textContent = isActive ? "Desativar" : "Ativar";
+    toggleBtn.addEventListener("click", () => upsertTrackerDevice(item, !isActive));
+    actions.appendChild(toggleBtn);
+    li.appendChild(actions);
+    trackerDevicesListEl.appendChild(li);
+  });
+}
+
+async function upsertTrackerDevice(device, nextIsActive) {
+  if (!supToken) return;
+  const payload = {
+    imei: normalizeImeiDigits(device.imei),
+    fleetNumber: String(device.fleet_number || "").trim(),
+    plateNumber: String(device.plate_number || "").trim(),
+    isActive: Boolean(nextIsActive),
+  };
+  const response = await fetch(`${API_BASE}/integrations/teltonika/devices`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao atualizar dispositivo Teltonika.");
+    return;
+  }
+  await loadTrackerDevices();
+}
+
+async function saveTrackerDevice(event) {
+  event.preventDefault();
+  if (!supToken) return;
+  const imei = normalizeImeiDigits(document.getElementById("trackerImei").value);
+  const fleetNumber = document.getElementById("trackerFleetNumber").value.trim();
+  const plateNumber = document.getElementById("trackerPlateNumber").value.trim();
+  const isActive = document.getElementById("trackerIsActive").value === "true";
+  if (!imei) {
+    alert("Indique um IMEI válido.");
+    return;
+  }
+  if (!fleetNumber && !plateNumber) {
+    alert("Indique a frota ou a chapa.");
+    return;
+  }
+  const response = await fetch(`${API_BASE}/integrations/teltonika/devices`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ imei, fleetNumber, plateNumber, isActive }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao guardar dispositivo Teltonika.");
+    return;
+  }
+  trackerDeviceFormEl.reset();
+  document.getElementById("trackerIsActive").value = "true";
+  await loadTrackerDevices();
+  alert(`Dispositivo ${data.imei} guardado com sucesso.`);
+}
+
 function renderRosterDayServiceRows(rows) {
   const container = document.getElementById("rosterDayCards");
   if (!container) return;
@@ -1967,6 +2126,17 @@ document.getElementById("downloadDriversTemplateXlsxBtn").addEventListener("clic
 document.getElementById("exportDriversCsvBtn").addEventListener("click", exportDriversCsv);
 document.getElementById("exportDriversXlsxBtn").addEventListener("click", exportDriversXlsx);
 document.getElementById("refreshDriversBtn").addEventListener("click", loadDrivers);
+if (trackerDeviceFormEl) {
+  trackerDeviceFormEl.addEventListener("submit", saveTrackerDevice);
+}
+const copyTrackerWebhookConfigBtn = document.getElementById("copyTrackerWebhookConfigBtn");
+if (copyTrackerWebhookConfigBtn) {
+  copyTrackerWebhookConfigBtn.addEventListener("click", copyTrackerWebhookConfig);
+}
+const refreshTrackerDevicesBtn = document.getElementById("refreshTrackerDevicesBtn");
+if (refreshTrackerDevicesBtn) {
+  refreshTrackerDevicesBtn.addEventListener("click", loadTrackerDevices);
+}
 const loadStopPassagesBtn = document.getElementById("loadStopPassagesBtn");
 if (loadStopPassagesBtn) {
   loadStopPassagesBtn.addEventListener("click", loadStopPassages);
@@ -2114,6 +2284,7 @@ if (rosterDayCardsEl) {
 }
 initTabs();
 initServiceFilterMode();
+renderTrackerWebhookExamples();
 
 if (serviceCardsEl && !serviceCardsEl.dataset.stopPassagesDelegation) {
   serviceCardsEl.dataset.stopPassagesDelegation = "1";

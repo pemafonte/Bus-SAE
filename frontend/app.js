@@ -77,6 +77,8 @@ let gpsFlushInProgress = false;
 let gpsSaveFailureWarned = false;
 let activeServiceSyncTimer = null;
 const AUTH_SESSION_KEY = "auth_session";
+const GPS_QUEUE_STORAGE_KEY = "gps_point_queue_v1";
+const GPS_BATCH_SIZE = 50;
 const conflictNotifiedPlannedServiceIds = new Set();
 
 const loginScreenEl = document.getElementById("loginScreen");
@@ -173,6 +175,7 @@ function clearActiveServiceState() {
   stopActiveServiceSync();
   activeServiceId = null;
   gpsPointQueue = [];
+  persistGpsQueue();
   gpsSaveFailureWarned = false;
   endTripBtn.disabled = true;
   handoverBtn.disabled = true;
@@ -187,26 +190,89 @@ function clearActiveServiceState() {
   }
 }
 
+function persistGpsQueue() {
+  try {
+    const payload = {
+      serviceId: activeServiceId || null,
+      points: gpsPointQueue,
+    };
+    localStorage.setItem(GPS_QUEUE_STORAGE_KEY, JSON.stringify(payload));
+  } catch (_error) {
+    // ignore storage errors
+  }
+}
+
+function restoreGpsQueueForActiveService() {
+  try {
+    const raw = localStorage.getItem(GPS_QUEUE_STORAGE_KEY);
+    if (!raw) return;
+    const parsed = JSON.parse(raw);
+    const savedServiceId = Number(parsed?.serviceId);
+    const currentServiceId = Number(activeServiceId);
+    if (!savedServiceId || !currentServiceId || savedServiceId !== currentServiceId) {
+      gpsPointQueue = [];
+      persistGpsQueue();
+      return;
+    }
+    gpsPointQueue = Array.isArray(parsed.points) ? parsed.points : [];
+  } catch (_error) {
+    gpsPointQueue = [];
+  }
+}
+
+function enqueueGpsPoint(point) {
+  gpsPointQueue.push(point);
+  persistGpsQueue();
+}
+
+function dequeueGpsPoints(count) {
+  gpsPointQueue.splice(0, count);
+  persistGpsQueue();
+}
+
 async function flushGpsPointQueue() {
   if (gpsFlushInProgress || !gpsPointQueue.length || !activeServiceId || !token) return;
   gpsFlushInProgress = true;
   try {
     while (gpsPointQueue.length && activeServiceId && token) {
-      const nextPoint = gpsPointQueue[0];
-      const pointResponse = await fetch(`${API_BASE}/services/${activeServiceId}/points`, {
+      const batch = gpsPointQueue.slice(0, GPS_BATCH_SIZE);
+      const pointResponse = await fetch(`${API_BASE}/services/${activeServiceId}/points/batch`, {
         method: "POST",
         headers: authHeaders(),
-        body: JSON.stringify(nextPoint),
+        body: JSON.stringify({ points: batch }),
       });
       const pointData = await pointResponse.json().catch(() => ({}));
       if (!pointResponse.ok) {
+        // Compatibilidade com versões antigas sem endpoint batch.
+        if (pointResponse.status === 404 || pointResponse.status === 405) {
+          const nextPoint = gpsPointQueue[0];
+          const fallbackResponse = await fetch(`${API_BASE}/services/${activeServiceId}/points`, {
+            method: "POST",
+            headers: authHeaders(),
+            body: JSON.stringify(nextPoint),
+          });
+          const fallbackData = await fallbackResponse.json().catch(() => ({}));
+          if (fallbackResponse.ok) {
+            dequeueGpsPoints(1);
+            gpsSaveFailureWarned = false;
+            if (fallbackData.routeCheck) {
+              const offRouteText = fallbackData.routeCheck.isOffRoute ? "Fora da rota" : "Dentro da rota";
+              const deviationText =
+                fallbackData.routeCheck.deviationMeters == null ? "-" : `${fallbackData.routeCheck.deviationMeters} m`;
+              const currentSummary = summaryEl.textContent.split("\n").filter((line) => !line.startsWith("Rota:"));
+              currentSummary.push(`Rota: ${offRouteText} | Desvio: ${deviationText}`);
+              setSummary(currentSummary.join("\n"));
+            }
+            continue;
+          }
+        }
         if (!gpsSaveFailureWarned) {
           gpsSaveFailureWarned = true;
           alert("A ligação GPS está instável. Vamos continuar a tentar guardar os pontos do percurso.");
         }
         break;
       }
-      gpsPointQueue.shift();
+      dequeueGpsPoints(pointData.acceptedCount || batch.length);
       gpsSaveFailureWarned = false;
       if (pointData.routeCheck) {
         const offRouteText = pointData.routeCheck.isOffRoute ? "Fora da rota" : "Dentro da rota";
@@ -412,6 +478,7 @@ function logoutDriver() {
   token = "";
   authenticatedUser = null;
   gpsPointQueue = [];
+  persistGpsQueue();
   gpsSaveFailureWarned = false;
   sessionStorage.removeItem(AUTH_SESSION_KEY);
   activeServiceId = null;
@@ -456,6 +523,7 @@ async function restoreActiveService() {
 
   const active = data.activeService;
   activeServiceId = active.id;
+  restoreGpsQueueForActiveService();
   endTripBtn.disabled = false;
   handoverBtn.disabled = false;
   cancelTripBtn.disabled = false;
@@ -483,6 +551,7 @@ async function restoreActiveService() {
     );
   }
   await loadReferenceRoute(active.id);
+  await flushGpsPointQueue();
   startLocationTracking();
   startActiveServiceSync();
   showDriverTab("driverStepMap");
@@ -517,6 +586,7 @@ async function startTrip(event) {
 
   activeServiceId = data.id;
   gpsPointQueue = [];
+  persistGpsQueue();
   gpsSaveFailureWarned = false;
   endTripBtn.disabled = false;
   handoverBtn.disabled = false;
@@ -643,13 +713,26 @@ function startLocationTracking() {
     async (position) => {
       const lat = position.coords.latitude;
       const lng = position.coords.longitude;
+      const accuracyM = Number.isFinite(position.coords.accuracy) ? Number(position.coords.accuracy) : null;
+      const speedMps = Number(position.coords.speed);
+      const headingDegRaw = Number(position.coords.heading);
+      const speedKmh = Number.isFinite(speedMps) && speedMps >= 0 ? Number((speedMps * 3.6).toFixed(2)) : null;
+      const headingDeg = Number.isFinite(headingDegRaw) ? Number(headingDegRaw.toFixed(2)) : null;
 
       routePolyline.addLatLng([lat, lng]);
       updateActiveBusMarker(lat, lng, fleetNumberInput.value.trim() || selectedPlannedFleetNumber);
       map.setView([lat, lng], 15);
 
       if (!activeServiceId || !token) return;
-      gpsPointQueue.push({ lat, lng });
+      enqueueGpsPoint({
+        lat,
+        lng,
+        capturedAt: new Date(position.timestamp || Date.now()).toISOString(),
+        accuracyM,
+        speedKmh,
+        headingDeg,
+        source: "mobile",
+      });
       await flushGpsPointQueue();
     },
     (error) => {
@@ -1089,6 +1172,9 @@ endTripBtn.addEventListener("click", endTrip);
 cancelTripBtn.addEventListener("click", cancelTrip);
 document.getElementById("logoutBtn").addEventListener("click", logoutDriver);
 initDriverTabs();
+window.addEventListener("online", () => {
+  flushGpsPointQueue();
+});
 
 (() => {
   const raw = sessionStorage.getItem(AUTH_SESSION_KEY);

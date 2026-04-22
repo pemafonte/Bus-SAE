@@ -8,6 +8,7 @@ const serviceRoutes = require("./routes/services");
 const supervisorRoutes = require("./routes/supervisor");
 const gtfsRoutes = require("./routes/gtfs");
 const viewerRoutes = require("./routes/viewer");
+const integrationsRoutes = require("./routes/integrations");
 const { ensureSystemSupervisor } = require("./bootstrap/systemSupervisor");
 const { startAutoCloseStaleServicesLoop } = require("./jobs/autoCloseStaleServices");
 
@@ -86,6 +87,7 @@ app.use("/services", serviceRoutes);
 app.use("/supervisor", supervisorRoutes);
 app.use("/gtfs", gtfsRoutes);
 app.use("/viewer", viewerRoutes);
+app.use("/integrations", integrationsRoutes);
 
 app.use((err, _req, res, _next) => {
   console.error(err);
