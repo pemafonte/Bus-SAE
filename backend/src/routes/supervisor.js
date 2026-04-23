@@ -31,14 +31,22 @@ router.use(async (_req, _res, next) => {
   }
 });
 
-let serviceCloseModeColumnEnsured = false;
-async function ensureServiceCloseModeColumn() {
-  if (serviceCloseModeColumnEnsured) return;
-  await db.query(
-    `ALTER TABLE services
-       ADD COLUMN IF NOT EXISTS close_mode VARCHAR(30)`
-  );
-  serviceCloseModeColumnEnsured = true;
+let serviceCloseModeColumnExistsCache = null;
+async function hasServiceCloseModeColumn() {
+  if (serviceCloseModeColumnExistsCache != null) return serviceCloseModeColumnExistsCache;
+  try {
+    const result = await db.query(
+      `SELECT 1
+       FROM information_schema.columns
+       WHERE table_name = 'services'
+         AND column_name = 'close_mode'
+       LIMIT 1`
+    );
+    serviceCloseModeColumnExistsCache = result.rowCount > 0;
+  } catch (_error) {
+    serviceCloseModeColumnExistsCache = false;
+  }
+  return serviceCloseModeColumnExistsCache;
 }
 
 async function ensurePlannedServiceLocationColumns() {
@@ -2687,7 +2695,7 @@ router.get("/services", async (req, res) => {
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
   try {
-    await ensureServiceCloseModeColumn();
+    const selectCloseMode = (await hasServiceCloseModeColumn()) ? "s.close_mode" : "NULL::text AS close_mode";
     const result = await db.query(
       `SELECT
          s.id,
@@ -2698,7 +2706,7 @@ router.get("/services", async (req, res) => {
          s.line_code,
          s.fleet_number,
          s.status,
-         s.close_mode,
+         ${selectCloseMode},
          s.gtfs_trip_id,
          s.started_at,
          s.ended_at,
@@ -3161,7 +3169,7 @@ router.get("/reports/performance.xlsx", async (req, res) => {
 router.get("/services/:serviceId/details", async (req, res) => {
   const { serviceId } = req.params;
   try {
-    await ensureServiceCloseModeColumn();
+    const selectCloseMode = (await hasServiceCloseModeColumn()) ? "s.close_mode" : "NULL::text AS close_mode";
     const serviceResult = await db.query(
       `SELECT
          s.id,
@@ -3172,7 +3180,7 @@ router.get("/services/:serviceId/details", async (req, res) => {
          s.line_code,
          s.fleet_number,
          s.status,
-         s.close_mode,
+         ${selectCloseMode},
          s.started_at,
          s.ended_at,
          s.total_km,

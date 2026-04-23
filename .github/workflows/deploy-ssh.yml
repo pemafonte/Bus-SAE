@@ -1,4 +1,4 @@
-# Deploy: copia o projecto para um servidor via SSH/rsync e corre npm ci no backend.
+# Deploy: copia o projecto para um servidor via SSH/rsync, instala deps e aplica migração DB.
 #
 # Secrets necessários no repositório (Settings → Secrets and variables → Actions):
 #   DEPLOY_HOST          — hostname ou IP do servidor
@@ -7,8 +7,8 @@
 #   DEPLOY_REMOTE_PATH   — caminho absoluto no servidor (ex.: /var/www/bus-platform)
 #
 # Opcional:
-#   DEPLOY_POST_COMMAND  — comandos a correr na pasta do projecto após npm ci (ex.: reinício PM2/systemd).
-#                          Se vazio, só corre: cd backend && npm ci --omit=dev
+#   DEPLOY_POST_COMMAND  — comandos a correr na pasta do projecto após npm ci + db:apply (ex.: reinício PM2/systemd).
+#                          Se vazio, só corre: cd backend && npm ci --omit=dev && npm run db:apply
 #
 # O ficheiro .env no servidor não é sobrescrito (excluído do rsync).
 
@@ -52,7 +52,7 @@ jobs:
             --exclude '*.log' \
             ./ "${DEPLOY_USER}@${DEPLOY_HOST}:${DEPLOY_PATH}/"
 
-      - name: Install backend deps on server
+      - name: Install backend deps and apply schema on server
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.DEPLOY_HOST }}
@@ -63,6 +63,7 @@ jobs:
             set -e
             cd "${{ secrets.DEPLOY_REMOTE_PATH }}/backend"
             npm ci --omit=dev
+            npm run db:apply
             POST_CMD='${{ secrets.DEPLOY_POST_COMMAND }}'
             if [ -n "$POST_CMD" ]; then
               cd "${{ secrets.DEPLOY_REMOTE_PATH }}"

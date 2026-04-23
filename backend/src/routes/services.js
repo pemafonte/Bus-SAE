@@ -1788,9 +1788,17 @@ router.post("/:serviceId/end", async (req, res) => {
   }
 
   try {
-    await ensureServiceVehicleOdometerColumns();
+    // Odometer/extra columns are best-effort in production environments with restricted DB grants.
+    let odometerFeaturesReady = true;
+    try {
+      await ensureServiceVehicleOdometerColumns();
+    } catch (_schemaError) {
+      odometerFeaturesReady = false;
+    }
     const serviceResult = await db.query(
-      `SELECT id, status, planned_service_id, started_at, fleet_number, plate_number, vehicle_odometer_start_km
+      `SELECT id, status, planned_service_id, started_at, fleet_number, plate_number${
+        odometerFeaturesReady ? ", vehicle_odometer_start_km" : ""
+      }
        FROM services
        WHERE id = $1 AND driver_id = $2`,
       [serviceId, req.user.id]
@@ -1847,37 +1855,61 @@ router.post("/:serviceId/end", async (req, res) => {
         ? Number((odometerDeltaKm - Number(totalKm)).toFixed(3))
         : null;
 
-    const updated = await db.query(
-      `UPDATE services
-       SET status = 'completed',
-           ended_at = NOW(),
-           total_km = $2,
-           route_geojson = $3,
-           vehicle_odometer_end_km = COALESCE($4, vehicle_odometer_end_km),
-           vehicle_odometer_delta_km = COALESCE($5, vehicle_odometer_delta_km),
-           vehicle_odometer_vs_gps_diff_km = COALESCE($6, vehicle_odometer_vs_gps_diff_km),
-           close_mode = 'manual'
-       WHERE id = $1
-       RETURNING id, planned_service_id, gtfs_trip_id, plate_number, service_schedule, line_code, fleet_number,
-                 status, started_at, ended_at, total_km, route_geojson, route_deviation_m, is_off_route,
-                 vehicle_odometer_start_km, vehicle_odometer_end_km, vehicle_odometer_delta_km, vehicle_odometer_vs_gps_diff_km, close_mode`,
-      [serviceId, totalKm, JSON.stringify(routeGeoJSON), vehicleOdometerEndKm, odometerDeltaKm, odometerVsGpsDiffKm]
-    );
-    if (Number.isFinite(vehicleOdometerEndKm)) {
-      await db.query(
-        `UPDATE tracker_devices
-         SET current_odometer_km = $1,
-             current_odometer_updated_at = NOW(),
-             updated_at = NOW()
-         WHERE LOWER(TRIM(COALESCE(fleet_number, ''))) = LOWER(TRIM($2))
-            OR LOWER(TRIM(COALESCE(plate_number, ''))) = LOWER(TRIM($3))`,
-        [vehicleOdometerEndKm, String(serviceResult.rows[0].fleet_number || ""), String(serviceResult.rows[0].plate_number || "")]
+    let updated;
+    if (odometerFeaturesReady) {
+      try {
+        updated = await db.query(
+          `UPDATE services
+           SET status = 'completed',
+               ended_at = NOW(),
+               total_km = $2,
+               route_geojson = $3,
+               vehicle_odometer_end_km = COALESCE($4, vehicle_odometer_end_km),
+               vehicle_odometer_delta_km = COALESCE($5, vehicle_odometer_delta_km),
+               vehicle_odometer_vs_gps_diff_km = COALESCE($6, vehicle_odometer_vs_gps_diff_km),
+               close_mode = 'manual'
+           WHERE id = $1
+           RETURNING id, planned_service_id, gtfs_trip_id, plate_number, service_schedule, line_code, fleet_number,
+                     status, started_at, ended_at, total_km, route_geojson, route_deviation_m, is_off_route,
+                     vehicle_odometer_start_km, vehicle_odometer_end_km, vehicle_odometer_delta_km, vehicle_odometer_vs_gps_diff_km, close_mode`,
+          [serviceId, totalKm, JSON.stringify(routeGeoJSON), vehicleOdometerEndKm, odometerDeltaKm, odometerVsGpsDiffKm]
+        );
+      } catch (_updateWithOdometerError) {
+        odometerFeaturesReady = false;
+      }
+    }
+    if (!updated) {
+      updated = await db.query(
+        `UPDATE services
+         SET status = 'completed',
+             ended_at = NOW(),
+             total_km = $2,
+             route_geojson = $3
+         WHERE id = $1
+         RETURNING id, planned_service_id, gtfs_trip_id, plate_number, service_schedule, line_code, fleet_number,
+                   status, started_at, ended_at, total_km, route_geojson, route_deviation_m, is_off_route`,
+        [serviceId, totalKm, JSON.stringify(routeGeoJSON)]
       );
-      await db.query(
-        `INSERT INTO vehicle_odometer_logs (fleet_number, plate_number, odometer_km, captured_at, source)
-         VALUES ($1, $2, $3, NOW(), 'manual_service_end')`,
-        [String(serviceResult.rows[0].fleet_number || "") || null, String(serviceResult.rows[0].plate_number || "") || null, vehicleOdometerEndKm]
-      );
+    }
+    if (odometerFeaturesReady && Number.isFinite(vehicleOdometerEndKm)) {
+      try {
+        await db.query(
+          `UPDATE tracker_devices
+           SET current_odometer_km = $1,
+               current_odometer_updated_at = NOW(),
+               updated_at = NOW()
+           WHERE LOWER(TRIM(COALESCE(fleet_number, ''))) = LOWER(TRIM($2))
+              OR LOWER(TRIM(COALESCE(plate_number, ''))) = LOWER(TRIM($3))`,
+          [vehicleOdometerEndKm, String(serviceResult.rows[0].fleet_number || ""), String(serviceResult.rows[0].plate_number || "")]
+        );
+        await db.query(
+          `INSERT INTO vehicle_odometer_logs (fleet_number, plate_number, odometer_km, captured_at, source)
+           VALUES ($1, $2, $3, NOW(), 'manual_service_end')`,
+          [String(serviceResult.rows[0].fleet_number || "") || null, String(serviceResult.rows[0].plate_number || "") || null, vehicleOdometerEndKm]
+        );
+      } catch (_odometerPersistError) {
+        // Non-blocking for trip closure.
+      }
     }
 
     if (serviceResult.rows[0]?.planned_service_id) {
