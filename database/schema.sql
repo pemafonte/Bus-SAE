@@ -260,3 +260,162 @@ CREATE INDEX IF NOT EXISTS idx_tracker_devices_fleet
   ON tracker_devices(fleet_number);
 CREATE INDEX IF NOT EXISTS idx_tracker_devices_plate
   ON tracker_devices(plate_number);
+
+-- ===============================
+-- Incremental migration (2026-04)
+-- ===============================
+
+-- Tracker/vehicle odometer enrichment
+ALTER TABLE tracker_devices
+  ADD COLUMN IF NOT EXISTS install_odometer_km NUMERIC(12,1);
+ALTER TABLE tracker_devices
+  ADD COLUMN IF NOT EXISTS current_odometer_km NUMERIC(12,1);
+ALTER TABLE tracker_devices
+  ADD COLUMN IF NOT EXISTS current_odometer_updated_at TIMESTAMPTZ;
+
+-- Service close/odometer reconciliation
+ALTER TABLE services
+  ADD COLUMN IF NOT EXISTS vehicle_odometer_start_km NUMERIC(12,1);
+ALTER TABLE services
+  ADD COLUMN IF NOT EXISTS vehicle_odometer_end_km NUMERIC(12,1);
+ALTER TABLE services
+  ADD COLUMN IF NOT EXISTS vehicle_odometer_delta_km NUMERIC(12,3);
+ALTER TABLE services
+  ADD COLUMN IF NOT EXISTS vehicle_odometer_vs_gps_diff_km NUMERIC(12,3);
+ALTER TABLE services
+  ADD COLUMN IF NOT EXISTS close_mode VARCHAR(30);
+
+-- Stop progress for announcements and last-stop auto-close
+CREATE TABLE IF NOT EXISTS service_stop_progress (
+  service_id BIGINT PRIMARY KEY REFERENCES services(id) ON DELETE CASCADE,
+  last_passed_stop_id VARCHAR(120),
+  last_passed_stop_sequence INT,
+  last_passed_at TIMESTAMPTZ,
+  last_announced_stop_id VARCHAR(120),
+  last_announced_stop_sequence INT,
+  last_announcement_type VARCHAR(20),
+  last_announced_at TIMESTAMPTZ,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+-- Deadhead movement tracking (empty trips)
+CREATE TABLE IF NOT EXISTS deadhead_movements (
+  id BIGSERIAL PRIMARY KEY,
+  imei VARCHAR(40) NOT NULL,
+  fleet_number VARCHAR(50),
+  plate_number VARCHAR(50),
+  started_at TIMESTAMPTZ NOT NULL,
+  ended_at TIMESTAMPTZ NOT NULL,
+  start_lat NUMERIC(10,7),
+  start_lng NUMERIC(10,7),
+  end_lat NUMERIC(10,7),
+  end_lng NUMERIC(10,7),
+  total_km NUMERIC(12,3) NOT NULL DEFAULT 0,
+  points_count INT NOT NULL DEFAULT 0,
+  open_state BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE IF NOT EXISTS deadhead_points (
+  id BIGSERIAL PRIMARY KEY,
+  movement_id BIGINT NOT NULL REFERENCES deadhead_movements(id) ON DELETE CASCADE,
+  lat NUMERIC(10,7) NOT NULL,
+  lng NUMERIC(10,7) NOT NULL,
+  captured_at TIMESTAMPTZ NOT NULL,
+  speed_kmh NUMERIC(8,2),
+  heading_deg NUMERIC(6,2),
+  accuracy_m NUMERIC(8,2)
+);
+
+CREATE INDEX IF NOT EXISTS idx_deadhead_movements_open
+  ON deadhead_movements(imei, open_state, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_deadhead_movements_started
+  ON deadhead_movements(started_at DESC);
+CREATE INDEX IF NOT EXISTS idx_deadhead_points_movement
+  ON deadhead_points(movement_id, captured_at ASC);
+
+-- Odometer log history for robust reconciliation
+CREATE TABLE IF NOT EXISTS vehicle_odometer_logs (
+  id BIGSERIAL PRIMARY KEY,
+  imei VARCHAR(40),
+  fleet_number VARCHAR(50),
+  plate_number VARCHAR(50),
+  odometer_km NUMERIC(12,1) NOT NULL,
+  captured_at TIMESTAMPTZ NOT NULL,
+  source VARCHAR(30) NOT NULL DEFAULT 'tracker',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_vehicle_odometer_logs_captured
+  ON vehicle_odometer_logs(captured_at DESC);
+CREATE INDEX IF NOT EXISTS idx_vehicle_odometer_logs_fleet
+  ON vehicle_odometer_logs(fleet_number, captured_at DESC);
+
+-- Supervisor conflict table enrichment
+CREATE TABLE IF NOT EXISTS supervisor_conflict_alerts (
+  id BIGSERIAL PRIMARY KEY,
+  driver_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  alert_type VARCHAR(50) NOT NULL DEFAULT 'roster_conflict',
+  roster_id INT,
+  planned_service_id INT,
+  affected_driver_id INT REFERENCES users(id) ON DELETE SET NULL,
+  affected_planned_service_id INT,
+  service_schedule VARCHAR(80),
+  line_code VARCHAR(40),
+  conflict_planned_service_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  unassigned_planned_service_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE supervisor_conflict_alerts
+  ADD COLUMN IF NOT EXISTS alert_type VARCHAR(50) NOT NULL DEFAULT 'roster_conflict';
+ALTER TABLE supervisor_conflict_alerts
+  ADD COLUMN IF NOT EXISTS affected_driver_id INT REFERENCES users(id) ON DELETE SET NULL;
+ALTER TABLE supervisor_conflict_alerts
+  ADD COLUMN IF NOT EXISTS affected_planned_service_id INT;
+ALTER TABLE supervisor_conflict_alerts
+  ADD COLUMN IF NOT EXISTS unassigned_planned_service_ids JSONB NOT NULL DEFAULT '[]'::jsonb;
+CREATE INDEX IF NOT EXISTS idx_supervisor_conflict_alerts_created
+  ON supervisor_conflict_alerts(created_at DESC);
+
+-- Operational messaging tables
+CREATE TABLE IF NOT EXISTS ops_messages (
+  id BIGSERIAL PRIMARY KEY,
+  from_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  to_user_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  message_text TEXT NOT NULL,
+  preset_code VARCHAR(60),
+  is_traffic_alert BOOLEAN NOT NULL DEFAULT FALSE,
+  related_service_id BIGINT REFERENCES services(id) ON DELETE SET NULL,
+  read_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_ops_messages_to_user_created
+  ON ops_messages(to_user_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_ops_messages_users_created
+  ON ops_messages(from_user_id, to_user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS ops_message_presets (
+  id BIGSERIAL PRIMARY KEY,
+  scope VARCHAR(20) NOT NULL,
+  code VARCHAR(60) NOT NULL,
+  label VARCHAR(200) NOT NULL,
+  default_message_text TEXT,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  created_by_user_id INT REFERENCES users(id) ON DELETE SET NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (scope, code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_ops_message_presets_scope_active
+  ON ops_message_presets(scope, is_active);
+
+-- GTFS editor/query performance indexes
+CREATE INDEX IF NOT EXISTS idx_gtfs_trips_route_id
+  ON gtfs_trips(route_id);
+CREATE INDEX IF NOT EXISTS idx_gtfs_stop_times_trip_seq
+  ON gtfs_stop_times(trip_id, stop_sequence);

@@ -9,6 +9,50 @@ const router = express.Router();
 router.use(authMiddleware);
 router.use(requireRoles("viewer", "supervisor", "admin"));
 
+let deadheadOverviewTableEnsured = false;
+async function ensureDeadheadTableForOverview() {
+  if (deadheadOverviewTableEnsured) return;
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS deadhead_movements (
+      id BIGSERIAL PRIMARY KEY,
+      imei VARCHAR(40) NOT NULL,
+      fleet_number VARCHAR(50),
+      plate_number VARCHAR(50),
+      started_at TIMESTAMPTZ NOT NULL,
+      ended_at TIMESTAMPTZ NOT NULL,
+      start_lat NUMERIC(10,7),
+      start_lng NUMERIC(10,7),
+      end_lat NUMERIC(10,7),
+      end_lng NUMERIC(10,7),
+      total_km NUMERIC(12,3) NOT NULL DEFAULT 0,
+      points_count INT NOT NULL DEFAULT 0,
+      open_state BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  deadheadOverviewTableEnsured = true;
+}
+
+function emptyOverviewPayload() {
+  return {
+    report_date: null,
+    total_services: 0,
+    completed_services: 0,
+    in_progress_services: 0,
+    total_km: 0,
+    avg_km: 0,
+    planned_roster_count: 0,
+    realized_roster_slots: 0,
+    not_realized_count: 0,
+    deadhead_km: 0,
+    total_km_with_deadhead: 0,
+    estimated_planned_km_today: 0,
+    km_not_realized_estimate: 0,
+    degraded: true,
+  };
+}
+
 function csvEscape(value) {
   const raw = value == null ? "" : String(value);
   const escaped = raw.replace(/"/g, '""');
@@ -17,10 +61,17 @@ function csvEscape(value) {
 
 router.get("/overview", async (_req, res) => {
   try {
+    await ensureDeadheadTableForOverview();
     const result = await db.query(OVERVIEW_TODAY_SQL);
-    return res.json(result.rows[0]);
+    return res.json(result.rows[0] || emptyOverviewPayload());
   } catch (_error) {
-    return res.status(500).json({ message: "Erro ao obter resumo." });
+    try {
+      await ensureDeadheadTableForOverview();
+      const retry = await db.query(OVERVIEW_TODAY_SQL);
+      return res.json(retry.rows[0] || emptyOverviewPayload());
+    } catch (_retryError) {
+      return res.json(emptyOverviewPayload());
+    }
   }
 });
 

@@ -1032,7 +1032,14 @@ router.post("/start", async (req, res) => {
   const { plateNumber, serviceSchedule, lineCode, fleetNumber, plannedServiceId } = req.body;
 
   try {
-    await ensureServiceVehicleOdometerColumns();
+    // Do not block trip start if DB user has limited DDL permissions in production.
+    // Odometer enrichment is best-effort.
+    let odometerFeaturesReady = true;
+    try {
+      await ensureServiceVehicleOdometerColumns();
+    } catch (_schemaError) {
+      odometerFeaturesReady = false;
+    }
     const active = await db.query(
       "SELECT id FROM services WHERE driver_id = $1 AND status = 'in_progress' LIMIT 1",
       [req.user.id]
@@ -1084,35 +1091,65 @@ router.post("/start", async (req, res) => {
     }
 
     const gtfsTrip = await findBestTripForLine(header.lineCode, header.serviceSchedule);
-    const vehicleMetaRes = await db.query(
-      `SELECT current_odometer_km
-       FROM tracker_devices
-       WHERE (LOWER(TRIM(COALESCE(fleet_number, ''))) = LOWER(TRIM($1))
-              OR LOWER(TRIM(COALESCE(plate_number, ''))) = LOWER(TRIM($2)))
-       ORDER BY updated_at DESC
-       LIMIT 1`,
-      [String(header.fleetNumber || ""), String(header.plateNumber || "")]
-    );
-    const vehicleOdometerStartKm = vehicleMetaRes.rowCount ? Number(vehicleMetaRes.rows[0].current_odometer_km) : null;
+    let vehicleOdometerStartKm = null;
+    if (odometerFeaturesReady) {
+      try {
+        const vehicleMetaRes = await db.query(
+          `SELECT current_odometer_km
+           FROM tracker_devices
+           WHERE (LOWER(TRIM(COALESCE(fleet_number, ''))) = LOWER(TRIM($1))
+                  OR LOWER(TRIM(COALESCE(plate_number, ''))) = LOWER(TRIM($2)))
+           ORDER BY updated_at DESC
+           LIMIT 1`,
+          [String(header.fleetNumber || ""), String(header.plateNumber || "")]
+        );
+        vehicleOdometerStartKm = vehicleMetaRes.rowCount ? Number(vehicleMetaRes.rows[0].current_odometer_km) : null;
+      } catch (_odometerLookupError) {
+        vehicleOdometerStartKm = null;
+      }
+    }
 
-    const result = await db.query(
-      `INSERT INTO services (
-         driver_id, planned_service_id, gtfs_trip_id, plate_number, service_schedule, line_code, fleet_number, status,
-         vehicle_odometer_start_km
-       )
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'in_progress', $8)
-       RETURNING id, planned_service_id, gtfs_trip_id, plate_number, service_schedule, line_code, fleet_number, status, started_at`,
-      [
-        req.user.id,
-        validPlannedServiceId,
-        gtfsTrip?.trip_id || null,
-        header.plateNumber,
-        header.serviceSchedule,
-        header.lineCode,
-        header.fleetNumber,
-        Number.isFinite(vehicleOdometerStartKm) ? vehicleOdometerStartKm : null,
-      ]
-    );
+    let result;
+    if (odometerFeaturesReady) {
+      try {
+        result = await db.query(
+          `INSERT INTO services (
+             driver_id, planned_service_id, gtfs_trip_id, plate_number, service_schedule, line_code, fleet_number, status,
+             vehicle_odometer_start_km
+           )
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'in_progress', $8)
+           RETURNING id, planned_service_id, gtfs_trip_id, plate_number, service_schedule, line_code, fleet_number, status, started_at`,
+          [
+            req.user.id,
+            validPlannedServiceId,
+            gtfsTrip?.trip_id || null,
+            header.plateNumber,
+            header.serviceSchedule,
+            header.lineCode,
+            header.fleetNumber,
+            Number.isFinite(vehicleOdometerStartKm) ? vehicleOdometerStartKm : null,
+          ]
+        );
+      } catch (_insertWithOdometerError) {
+        odometerFeaturesReady = false;
+      }
+    }
+    if (!result) {
+      result = await db.query(
+        `INSERT INTO services (driver_id, planned_service_id, gtfs_trip_id, plate_number, service_schedule, line_code, fleet_number, status)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, 'in_progress')
+         RETURNING id, planned_service_id, gtfs_trip_id, plate_number, service_schedule, line_code, fleet_number, status, started_at`,
+        [
+          req.user.id,
+          validPlannedServiceId,
+          gtfsTrip?.trip_id || null,
+          header.plateNumber,
+          header.serviceSchedule,
+          header.lineCode,
+          header.fleetNumber,
+        ]
+      );
+    }
 
     await db.query(
       `INSERT INTO service_segments (service_id, driver_id, fleet_number, status)

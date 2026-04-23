@@ -826,13 +826,38 @@ async function ensureDeadheadTablesForOverview() {
   );
 }
 
+function emptyOverviewPayload() {
+  return {
+    report_date: null,
+    total_services: 0,
+    completed_services: 0,
+    in_progress_services: 0,
+    total_km: 0,
+    avg_km: 0,
+    planned_roster_count: 0,
+    realized_roster_slots: 0,
+    not_realized_count: 0,
+    deadhead_km: 0,
+    total_km_with_deadhead: 0,
+    estimated_planned_km_today: 0,
+    km_not_realized_estimate: 0,
+    degraded: true,
+  };
+}
+
 router.get("/overview", async (req, res) => {
   try {
     await ensureDeadheadTablesForOverview();
     const result = await db.query(OVERVIEW_TODAY_SQL);
-    return res.json(result.rows[0]);
+    return res.json(result.rows[0] || emptyOverviewPayload());
   } catch (error) {
-    return res.status(500).json({ message: "Erro ao obter resumo do dashboard." });
+    try {
+      await ensureDeadheadTablesForOverview();
+      const retry = await db.query(OVERVIEW_TODAY_SQL);
+      return res.json(retry.rows[0] || emptyOverviewPayload());
+    } catch (_retryError) {
+      return res.json(emptyOverviewPayload());
+    }
   }
 });
 
