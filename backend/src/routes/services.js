@@ -10,6 +10,8 @@ const { getRosterServiceDateForExecution } = require("../utils/rosterServiceDate
 const router = express.Router();
 router.use(authMiddleware);
 let servicePointsQualityColumnsEnsured = false;
+let serviceStopProgressTableEnsured = false;
+let serviceVehicleOdometerColumnsEnsured = false;
 
 async function ensurePlannedServiceLocationColumns() {
   await db.query(
@@ -45,6 +47,109 @@ async function ensureServicePointsQualityColumns() {
        ADD COLUMN IF NOT EXISTS point_source VARCHAR(20) NOT NULL DEFAULT 'mobile'`
   );
   servicePointsQualityColumnsEnsured = true;
+}
+
+async function ensureServiceStopProgressTable() {
+  if (serviceStopProgressTableEnsured) return;
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS service_stop_progress (
+      service_id BIGINT PRIMARY KEY REFERENCES services(id) ON DELETE CASCADE,
+      last_passed_stop_id VARCHAR(120),
+      last_passed_stop_sequence INT,
+      last_passed_at TIMESTAMPTZ,
+      last_announced_stop_id VARCHAR(120),
+      last_announced_stop_sequence INT,
+      last_announcement_type VARCHAR(20),
+      last_announced_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  serviceStopProgressTableEnsured = true;
+}
+
+async function ensureServiceVehicleOdometerColumns() {
+  if (serviceVehicleOdometerColumnsEnsured) return;
+  await db.query(
+    `ALTER TABLE services
+       ADD COLUMN IF NOT EXISTS vehicle_odometer_start_km NUMERIC(12,1)`
+  );
+  await db.query(
+    `ALTER TABLE services
+       ADD COLUMN IF NOT EXISTS vehicle_odometer_end_km NUMERIC(12,1)`
+  );
+  await db.query(
+    `ALTER TABLE services
+       ADD COLUMN IF NOT EXISTS vehicle_odometer_delta_km NUMERIC(12,3)`
+  );
+  await db.query(
+    `ALTER TABLE services
+       ADD COLUMN IF NOT EXISTS vehicle_odometer_vs_gps_diff_km NUMERIC(12,3)`
+  );
+  await db.query(
+    `ALTER TABLE services
+       ADD COLUMN IF NOT EXISTS close_mode VARCHAR(30)`
+  );
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS tracker_devices (
+      id BIGSERIAL PRIMARY KEY,
+      imei VARCHAR(40) UNIQUE NOT NULL,
+      fleet_number VARCHAR(50),
+      plate_number VARCHAR(50),
+      provider VARCHAR(40) NOT NULL DEFAULT 'teltonika',
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      install_odometer_km NUMERIC(12,1),
+      current_odometer_km NUMERIC(12,1),
+      current_odometer_updated_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS vehicle_odometer_logs (
+      id BIGSERIAL PRIMARY KEY,
+      imei VARCHAR(40),
+      fleet_number VARCHAR(50),
+      plate_number VARCHAR(50),
+      odometer_km NUMERIC(12,1) NOT NULL,
+      captured_at TIMESTAMPTZ NOT NULL,
+      source VARCHAR(30) NOT NULL DEFAULT 'manual',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  serviceVehicleOdometerColumnsEnsured = true;
+}
+
+function geoDistanceMeters(aLat, aLng, bLat, bLng) {
+  const toRad = (deg) => (Number(deg) * Math.PI) / 180;
+  const R = 6371000;
+  const lat1 = Number(aLat);
+  const lng1 = Number(aLng);
+  const lat2 = Number(bLat);
+  const lng2 = Number(bLng);
+  if (![lat1, lng1, lat2, lng2].every(Number.isFinite)) return null;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const p1 = toRad(lat1);
+  const p2 = toRad(lat2);
+  const h =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(p1) * Math.cos(p2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+  return R * c;
+}
+
+function normalizeStopSequence(value) {
+  const n = Number(value);
+  if (!Number.isFinite(n)) return null;
+  return Math.trunc(n);
+}
+
+function canReadServiceByRole(reqUser, serviceDriverId) {
+  const role = String(reqUser?.role || "")
+    .trim()
+    .toLowerCase();
+  if (role === "admin" || role === "supervisor") return true;
+  return Number(reqUser?.id) === Number(serviceDriverId);
 }
 
 function normalizeIncomingPoint(rawPoint) {
@@ -131,6 +236,113 @@ async function updateServiceRouteCheck(serviceId, gtfsTripId, point) {
     }
   }
   return { deviationMeters, isOffRoute };
+}
+
+async function resolveServiceTripId(service) {
+  let tripId = service?.gtfs_trip_id || null;
+  if (!tripId && service?.line_code && service?.service_schedule) {
+    const bestTrip = await findBestTripForLine(service.line_code, service.service_schedule);
+    tripId = bestTrip?.trip_id || null;
+    if (tripId) {
+      await db.query(`UPDATE services SET gtfs_trip_id = $1 WHERE id = $2 AND gtfs_trip_id IS NULL`, [tripId, service.id]);
+    }
+  }
+  return tripId;
+}
+
+async function maybeAutoCompleteServiceAtLastStop(service, latestPoint, options = {}) {
+  const serviceId = Number(service?.id);
+  if (!Number.isFinite(serviceId) || service?.status !== "in_progress") return { autoClosed: false };
+  await ensureServiceVehicleOdometerColumns();
+  const arrivalMeters = Math.max(20, Math.min(180, Number(options.arrivalMeters) || 60));
+  const tripId = await resolveServiceTripId(service);
+  if (!tripId) return { autoClosed: false };
+  const stops = (await getStopsByTripId(tripId))
+    .map((s) => ({
+      stop_id: s.stop_id,
+      stop_sequence: normalizeStopSequence(s.stop_sequence),
+      lat: Number(s.lat),
+      lng: Number(s.lng),
+    }))
+    .filter((s) => s.stop_sequence != null && Number.isFinite(s.lat) && Number.isFinite(s.lng))
+    .sort((a, b) => a.stop_sequence - b.stop_sequence);
+  if (!stops.length) return { autoClosed: false };
+  const lastStop = stops[stops.length - 1];
+  const distanceToLast = geoDistanceMeters(latestPoint.lat, latestPoint.lng, lastStop.lat, lastStop.lng);
+  if (distanceToLast == null || distanceToLast > arrivalMeters) return { autoClosed: false };
+
+  await ensureServiceStopProgressTable();
+  await db.query(
+    `INSERT INTO service_stop_progress (service_id, last_passed_stop_id, last_passed_stop_sequence, last_passed_at, updated_at)
+     VALUES ($1, $2, $3, NOW(), NOW())
+     ON CONFLICT (service_id) DO UPDATE
+       SET last_passed_stop_id = EXCLUDED.last_passed_stop_id,
+           last_passed_stop_sequence = EXCLUDED.last_passed_stop_sequence,
+           last_passed_at = EXCLUDED.last_passed_at,
+           updated_at = NOW()`,
+    [serviceId, lastStop.stop_id || null, lastStop.stop_sequence]
+  );
+
+  await closeActiveSegment(serviceId);
+  const pointsResult = await db.query(
+    `SELECT lat, lng, captured_at, accuracy_m, speed_kmh
+     FROM service_points
+     WHERE service_id = $1
+     ORDER BY captured_at ASC`,
+    [serviceId]
+  );
+  const points = pointsResult.rows.map((p) => ({
+    lat: Number(p.lat),
+    lng: Number(p.lng),
+    capturedAt: p.captured_at,
+    accuracyM: p.accuracy_m == null ? null : Number(p.accuracy_m),
+    speedKmh: p.speed_kmh == null ? null : Number(p.speed_kmh),
+  }));
+  const totalKmGps = calculatePathDistance(points);
+  const totalKm = await resolveTotalKmWithPlannedFallback(totalKmGps, service.planned_service_id);
+  const routeGeoJSON = {
+    type: "Feature",
+    geometry: {
+      type: "LineString",
+      coordinates: points.map((p) => [p.lng, p.lat]),
+    },
+    properties: { points: points.length },
+  };
+  const updated = await db.query(
+    `UPDATE services
+     SET status = 'completed',
+         ended_at = NOW(),
+         total_km = $2,
+         route_geojson = $3,
+         close_mode = 'auto_last_stop'
+     WHERE id = $1
+       AND status = 'in_progress'
+     RETURNING id, driver_id, planned_service_id, started_at`,
+    [serviceId, totalKm, JSON.stringify(routeGeoJSON)]
+  );
+  if (!updated.rowCount) return { autoClosed: false };
+  const closed = updated.rows[0];
+  if (closed.planned_service_id) {
+    let rosterDay = await getRosterServiceDateForExecution(closed.driver_id, closed.planned_service_id, closed.started_at);
+    if (!rosterDay && closed.started_at) {
+      const rosterDayRes = await db.query(
+        `SELECT ($1::timestamptz AT TIME ZONE 'Europe/Lisbon')::date AS d`,
+        [closed.started_at]
+      );
+      rosterDay = rosterDayRes.rows[0]?.d;
+    }
+    if (rosterDay) {
+      await db.query(
+        `UPDATE daily_roster
+         SET status = 'completed'
+         WHERE driver_id = $1
+           AND planned_service_id = $2
+           AND service_date = $3`,
+        [closed.driver_id, closed.planned_service_id, rosterDay]
+      );
+    }
+  }
+  return { autoClosed: true, reason: "last_stop_reached" };
 }
 
 async function getActiveSegment(serviceId) {
@@ -311,14 +523,34 @@ async function ensureSupervisorConflictAlertsTable() {
     `CREATE TABLE IF NOT EXISTS supervisor_conflict_alerts (
       id BIGSERIAL PRIMARY KEY,
       driver_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      alert_type VARCHAR(50) NOT NULL DEFAULT 'roster_conflict',
       roster_id INT,
       planned_service_id INT,
+      affected_driver_id INT REFERENCES users(id) ON DELETE SET NULL,
+      affected_planned_service_id INT,
       service_schedule VARCHAR(80),
       line_code VARCHAR(40),
       conflict_planned_service_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+      unassigned_planned_service_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
       notes TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
+  );
+  await db.query(
+    `ALTER TABLE supervisor_conflict_alerts
+       ADD COLUMN IF NOT EXISTS alert_type VARCHAR(50) NOT NULL DEFAULT 'roster_conflict'`
+  );
+  await db.query(
+    `ALTER TABLE supervisor_conflict_alerts
+       ADD COLUMN IF NOT EXISTS affected_driver_id INT REFERENCES users(id) ON DELETE SET NULL`
+  );
+  await db.query(
+    `ALTER TABLE supervisor_conflict_alerts
+       ADD COLUMN IF NOT EXISTS affected_planned_service_id INT`
+  );
+  await db.query(
+    `ALTER TABLE supervisor_conflict_alerts
+       ADD COLUMN IF NOT EXISTS unassigned_planned_service_ids JSONB NOT NULL DEFAULT '[]'::jsonb`
   );
   await db.query(
     `CREATE INDEX IF NOT EXISTS idx_supervisor_conflict_alerts_created
@@ -800,6 +1032,7 @@ router.post("/start", async (req, res) => {
   const { plateNumber, serviceSchedule, lineCode, fleetNumber, plannedServiceId } = req.body;
 
   try {
+    await ensureServiceVehicleOdometerColumns();
     const active = await db.query(
       "SELECT id FROM services WHERE driver_id = $1 AND status = 'in_progress' LIMIT 1",
       [req.user.id]
@@ -851,10 +1084,23 @@ router.post("/start", async (req, res) => {
     }
 
     const gtfsTrip = await findBestTripForLine(header.lineCode, header.serviceSchedule);
+    const vehicleMetaRes = await db.query(
+      `SELECT current_odometer_km
+       FROM tracker_devices
+       WHERE (LOWER(TRIM(COALESCE(fleet_number, ''))) = LOWER(TRIM($1))
+              OR LOWER(TRIM(COALESCE(plate_number, ''))) = LOWER(TRIM($2)))
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [String(header.fleetNumber || ""), String(header.plateNumber || "")]
+    );
+    const vehicleOdometerStartKm = vehicleMetaRes.rowCount ? Number(vehicleMetaRes.rows[0].current_odometer_km) : null;
 
     const result = await db.query(
-      `INSERT INTO services (driver_id, planned_service_id, gtfs_trip_id, plate_number, service_schedule, line_code, fleet_number, status)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'in_progress')
+      `INSERT INTO services (
+         driver_id, planned_service_id, gtfs_trip_id, plate_number, service_schedule, line_code, fleet_number, status,
+         vehicle_odometer_start_km
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'in_progress', $8)
        RETURNING id, planned_service_id, gtfs_trip_id, plate_number, service_schedule, line_code, fleet_number, status, started_at`,
       [
         req.user.id,
@@ -864,6 +1110,7 @@ router.post("/start", async (req, res) => {
         header.serviceSchedule,
         header.lineCode,
         header.fleetNumber,
+        Number.isFinite(vehicleOdometerStartKm) ? vehicleOdometerStartKm : null,
       ]
     );
 
@@ -900,7 +1147,8 @@ router.post("/:serviceId/points", async (req, res) => {
   try {
     await ensureServicePointsQualityColumns();
     const ownerCheck = await db.query(
-      `SELECT id, status, gtfs_trip_id FROM services
+      `SELECT id, status, gtfs_trip_id, line_code, service_schedule, planned_service_id, driver_id, started_at
+       FROM services
        WHERE id = $1 AND driver_id = $2 AND status = 'in_progress'`,
       [serviceId, req.user.id]
     );
@@ -916,9 +1164,10 @@ router.post("/:serviceId/points", async (req, res) => {
 
     await insertServicePoint(serviceId, activeSegment.id, normalized.point);
     const routeCheck = await updateServiceRouteCheck(serviceId, ownerCheck.rows[0].gtfs_trip_id, normalized.point);
+    const autoClose = await maybeAutoCompleteServiceAtLastStop(ownerCheck.rows[0], normalized.point);
 
     return res.status(201).json({
-      message: "Ponto registado.",
+      message: autoClose.autoClosed ? "Ponto registado. Serviço encerrado automaticamente na última paragem." : "Ponto registado.",
       acceptedPoint: {
         source: normalized.point.source,
         accuracyM: normalized.point.accuracyM,
@@ -930,6 +1179,8 @@ router.post("/:serviceId/points", async (req, res) => {
         isOffRoute: routeCheck.isOffRoute,
         thresholdMeters: 150,
       },
+      autoClosed: autoClose.autoClosed,
+      autoCloseReason: autoClose.reason || null,
     });
   } catch (error) {
     return res.status(500).json({ message: "Erro ao guardar ponto GPS." });
@@ -949,7 +1200,8 @@ router.post("/:serviceId/points/batch", async (req, res) => {
   try {
     await ensureServicePointsQualityColumns();
     const ownerCheck = await db.query(
-      `SELECT id, status, gtfs_trip_id FROM services
+      `SELECT id, status, gtfs_trip_id, line_code, service_schedule, planned_service_id, driver_id, started_at
+       FROM services
        WHERE id = $1 AND driver_id = $2 AND status = 'in_progress'`,
       [serviceId, req.user.id]
     );
@@ -986,13 +1238,20 @@ router.post("/:serviceId/points/batch", async (req, res) => {
         thresholdMeters: 150,
       };
     }
+    const autoClose = lastAcceptedPoint
+      ? await maybeAutoCompleteServiceAtLastStop(ownerCheck.rows[0], lastAcceptedPoint)
+      : { autoClosed: false };
 
     return res.status(201).json({
-      message: "Batch processado.",
+      message: autoClose.autoClosed
+        ? "Batch processado. Serviço encerrado automaticamente na última paragem."
+        : "Batch processado.",
       acceptedCount,
       rejectedCount: rejected.length,
       rejected,
       routeCheck,
+      autoClosed: autoClose.autoClosed,
+      autoCloseReason: autoClose.reason || null,
     });
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao guardar batch de pontos GPS." });
@@ -1064,6 +1323,228 @@ router.get("/reference-route-preview/by-header", async (req, res) => {
     });
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao obter rota de referencia." });
+  }
+});
+
+router.get("/:serviceId/announcement-state", async (req, res) => {
+  const serviceId = Number(req.params.serviceId);
+  const preannounceMeters = Math.max(80, Math.min(800, Number(req.query.preannounceMeters) || 300));
+  const arrivalMeters = Math.max(20, Math.min(180, Number(req.query.arrivalMeters) || 60));
+  if (!Number.isFinite(serviceId) || serviceId <= 0) {
+    return res.status(400).json({ message: "serviceId invalido." });
+  }
+  try {
+    await ensureServiceStopProgressTable();
+
+    const serviceRes = await db.query(
+      `SELECT id, driver_id, gtfs_trip_id, line_code, service_schedule, status
+       FROM services
+       WHERE id = $1`,
+      [serviceId]
+    );
+    if (!serviceRes.rowCount) {
+      return res.status(404).json({ message: "Servico nao encontrado." });
+    }
+    const service = serviceRes.rows[0];
+    if (!canReadServiceByRole(req.user, service.driver_id)) {
+      return res.status(403).json({ message: "Sem permissao para consultar este servico." });
+    }
+
+    let tripId = service.gtfs_trip_id;
+    if (!tripId) {
+      const bestTrip = await findBestTripForLine(service.line_code, service.service_schedule);
+      tripId = bestTrip?.trip_id || null;
+      if (tripId) {
+        await db.query(`UPDATE services SET gtfs_trip_id = $1 WHERE id = $2 AND gtfs_trip_id IS NULL`, [tripId, serviceId]);
+      }
+    }
+    if (!tripId) {
+      return res.status(404).json({ message: "Sem rota/paragens GTFS para esta linha/horario." });
+    }
+
+    const latestPointRes = await db.query(
+      `SELECT lat, lng, captured_at, speed_kmh
+       FROM service_points
+       WHERE service_id = $1
+       ORDER BY captured_at DESC
+       LIMIT 1`,
+      [serviceId]
+    );
+    if (!latestPointRes.rowCount) {
+      return res.json({
+        serviceId,
+        tripId,
+        status: service.status,
+        hasGpsFix: false,
+        nextStop: null,
+        currentStop: null,
+        triggers: {
+          announceNextStop: false,
+          announceArrivedStop: false,
+        },
+      });
+    }
+    const latestPoint = latestPointRes.rows[0];
+    const stops = (await getStopsByTripId(tripId))
+      .map((s) => ({
+        stop_id: s.stop_id,
+        stop_name: s.stop_name,
+        stop_sequence: normalizeStopSequence(s.stop_sequence),
+        lat: Number(s.lat),
+        lng: Number(s.lng),
+      }))
+      .filter((s) => s.stop_sequence != null && Number.isFinite(s.lat) && Number.isFinite(s.lng))
+      .sort((a, b) => a.stop_sequence - b.stop_sequence);
+    if (!stops.length) {
+      return res.status(404).json({ message: "Sem paragens GTFS para este serviço." });
+    }
+
+    const progressRes = await db.query(
+      `SELECT
+         last_passed_stop_id, last_passed_stop_sequence, last_passed_at,
+         last_announced_stop_id, last_announced_stop_sequence, last_announcement_type, last_announced_at
+       FROM service_stop_progress
+       WHERE service_id = $1`,
+      [serviceId]
+    );
+    const progress = progressRes.rows[0] || {};
+    let lastPassedSeq = normalizeStopSequence(progress.last_passed_stop_sequence) || 0;
+
+    const candidateStops = stops.filter((s) => s.stop_sequence > lastPassedSeq);
+    let currentStop = null;
+    if (candidateStops.length) {
+      const firstUpcoming = candidateStops[0];
+      const d = geoDistanceMeters(latestPoint.lat, latestPoint.lng, firstUpcoming.lat, firstUpcoming.lng);
+      if (d != null && d <= arrivalMeters) {
+        currentStop = { ...firstUpcoming, distance_m: Math.round(d) };
+        lastPassedSeq = firstUpcoming.stop_sequence;
+        await db.query(
+          `INSERT INTO service_stop_progress (service_id, last_passed_stop_id, last_passed_stop_sequence, last_passed_at, updated_at)
+           VALUES ($1, $2, $3, NOW(), NOW())
+           ON CONFLICT (service_id) DO UPDATE
+             SET last_passed_stop_id = EXCLUDED.last_passed_stop_id,
+                 last_passed_stop_sequence = EXCLUDED.last_passed_stop_sequence,
+                 last_passed_at = EXCLUDED.last_passed_at,
+                 updated_at = NOW()`,
+          [serviceId, firstUpcoming.stop_id || null, firstUpcoming.stop_sequence]
+        );
+      }
+    }
+
+    const nextStopRaw = stops.find((s) => s.stop_sequence > lastPassedSeq) || null;
+    const nextDistance = nextStopRaw
+      ? geoDistanceMeters(latestPoint.lat, latestPoint.lng, nextStopRaw.lat, nextStopRaw.lng)
+      : null;
+    const speedKmh = Number(latestPoint.speed_kmh);
+    const etaSeconds =
+      nextDistance != null && Number.isFinite(speedKmh) && speedKmh > 2
+        ? Math.round(nextDistance / ((speedKmh * 1000) / 3600))
+        : null;
+
+    const lastAnnouncedSeq = normalizeStopSequence(progress.last_announced_stop_sequence);
+    const lastAnnouncementType = String(progress.last_announcement_type || "").trim().toLowerCase();
+    const announceNextStop =
+      !!nextStopRaw &&
+      nextDistance != null &&
+      nextDistance <= preannounceMeters &&
+      !(lastAnnouncedSeq === nextStopRaw.stop_sequence && lastAnnouncementType === "next");
+    const announceArrivedStop =
+      !!currentStop &&
+      !(lastAnnouncedSeq === currentStop.stop_sequence && lastAnnouncementType === "arrived");
+
+    return res.json({
+      serviceId,
+      tripId,
+      status: service.status,
+      hasGpsFix: true,
+      gps: {
+        lat: Number(latestPoint.lat),
+        lng: Number(latestPoint.lng),
+        capturedAt: latestPoint.captured_at,
+        speedKmh: Number.isFinite(speedKmh) ? speedKmh : null,
+      },
+      currentStop: currentStop
+        ? {
+            stopId: currentStop.stop_id,
+            stopName: currentStop.stop_name,
+            stopSequence: currentStop.stop_sequence,
+            distanceM: currentStop.distance_m,
+          }
+        : null,
+      nextStop: nextStopRaw
+        ? {
+            stopId: nextStopRaw.stop_id,
+            stopName: nextStopRaw.stop_name,
+            stopSequence: nextStopRaw.stop_sequence,
+            distanceM: nextDistance == null ? null : Math.round(nextDistance),
+            etaSeconds,
+          }
+        : null,
+      thresholds: {
+        preannounceMeters,
+        arrivalMeters,
+      },
+      triggers: {
+        announceNextStop,
+        announceArrivedStop,
+      },
+      suggestedAnnouncements: {
+        nextStopText: nextStopRaw ? `Próxima paragem: ${nextStopRaw.stop_name || "paragem sem nome"}.` : null,
+        arrivedStopText: currentStop ? `Paragem: ${currentStop.stop_name || "paragem sem nome"}.` : null,
+      },
+      progress: {
+        lastPassedStopSequence: lastPassedSeq || null,
+        lastAnnouncedStopSequence: lastAnnouncedSeq || null,
+        lastAnnouncementType: lastAnnouncementType || null,
+        lastAnnouncedAt: progress.last_announced_at || null,
+      },
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao obter estado de anúncio de paragens." });
+  }
+});
+
+router.post("/:serviceId/announcement-mark", async (req, res) => {
+  const serviceId = Number(req.params.serviceId);
+  const stopId = String(req.body?.stopId || "").trim() || null;
+  const stopSequence = normalizeStopSequence(req.body?.stopSequence);
+  const announcementType = String(req.body?.announcementType || "")
+    .trim()
+    .toLowerCase();
+  if (!Number.isFinite(serviceId) || serviceId <= 0) {
+    return res.status(400).json({ message: "serviceId invalido." });
+  }
+  if (!stopId && !Number.isFinite(stopSequence)) {
+    return res.status(400).json({ message: "Indique stopId ou stopSequence." });
+  }
+  if (!["next", "arrived"].includes(announcementType)) {
+    return res.status(400).json({ message: "announcementType invalido. Use next ou arrived." });
+  }
+  try {
+    await ensureServiceStopProgressTable();
+    const ownerRes = await db.query(`SELECT id, driver_id FROM services WHERE id = $1`, [serviceId]);
+    if (!ownerRes.rowCount) {
+      return res.status(404).json({ message: "Servico nao encontrado." });
+    }
+    if (!canReadServiceByRole(req.user, ownerRes.rows[0].driver_id)) {
+      return res.status(403).json({ message: "Sem permissao para marcar anuncio deste servico." });
+    }
+
+    await db.query(
+      `INSERT INTO service_stop_progress (
+         service_id, last_announced_stop_id, last_announced_stop_sequence, last_announcement_type, last_announced_at, updated_at
+       ) VALUES ($1, $2, $3, $4, NOW(), NOW())
+       ON CONFLICT (service_id) DO UPDATE
+         SET last_announced_stop_id = EXCLUDED.last_announced_stop_id,
+             last_announced_stop_sequence = EXCLUDED.last_announced_stop_sequence,
+             last_announcement_type = EXCLUDED.last_announcement_type,
+             last_announced_at = EXCLUDED.last_announced_at,
+             updated_at = NOW()`,
+      [serviceId, stopId, Number.isFinite(stopSequence) ? stopSequence : null, announcementType]
+    );
+    return res.json({ message: "Anúncio registado.", serviceId, stopId, stopSequence, announcementType });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao registar anúncio." });
   }
 });
 
@@ -1262,10 +1743,18 @@ router.post("/:serviceId/resume", async (req, res) => {
 
 router.post("/:serviceId/end", async (req, res) => {
   const { serviceId } = req.params;
+  const vehicleOdometerEndRaw = req.body?.vehicleOdometerKm;
+  const vehicleOdometerEndKm =
+    vehicleOdometerEndRaw == null || vehicleOdometerEndRaw === "" ? null : Number(vehicleOdometerEndRaw);
+  if (vehicleOdometerEndKm != null && (!Number.isFinite(vehicleOdometerEndKm) || vehicleOdometerEndKm < 0)) {
+    return res.status(400).json({ message: "vehicleOdometerKm inválido." });
+  }
 
   try {
+    await ensureServiceVehicleOdometerColumns();
     const serviceResult = await db.query(
-      `SELECT id, status, planned_service_id, started_at FROM services
+      `SELECT id, status, planned_service_id, started_at, fleet_number, plate_number, vehicle_odometer_start_km
+       FROM services
        WHERE id = $1 AND driver_id = $2`,
       [serviceId, req.user.id]
     );
@@ -1311,18 +1800,48 @@ router.post("/:serviceId/end", async (req, res) => {
         points: points.length,
       },
     };
+    const vehicleOdometerStartKm = Number(serviceResult.rows[0].vehicle_odometer_start_km);
+    const odometerDeltaKm =
+      Number.isFinite(vehicleOdometerStartKm) && Number.isFinite(vehicleOdometerEndKm)
+        ? Number((vehicleOdometerEndKm - vehicleOdometerStartKm).toFixed(3))
+        : null;
+    const odometerVsGpsDiffKm =
+      Number.isFinite(odometerDeltaKm) && Number.isFinite(Number(totalKm))
+        ? Number((odometerDeltaKm - Number(totalKm)).toFixed(3))
+        : null;
 
     const updated = await db.query(
       `UPDATE services
        SET status = 'completed',
            ended_at = NOW(),
            total_km = $2,
-           route_geojson = $3
+           route_geojson = $3,
+           vehicle_odometer_end_km = COALESCE($4, vehicle_odometer_end_km),
+           vehicle_odometer_delta_km = COALESCE($5, vehicle_odometer_delta_km),
+           vehicle_odometer_vs_gps_diff_km = COALESCE($6, vehicle_odometer_vs_gps_diff_km),
+           close_mode = 'manual'
        WHERE id = $1
        RETURNING id, planned_service_id, gtfs_trip_id, plate_number, service_schedule, line_code, fleet_number,
-                 status, started_at, ended_at, total_km, route_geojson, route_deviation_m, is_off_route`,
-      [serviceId, totalKm, JSON.stringify(routeGeoJSON)]
+                 status, started_at, ended_at, total_km, route_geojson, route_deviation_m, is_off_route,
+                 vehicle_odometer_start_km, vehicle_odometer_end_km, vehicle_odometer_delta_km, vehicle_odometer_vs_gps_diff_km, close_mode`,
+      [serviceId, totalKm, JSON.stringify(routeGeoJSON), vehicleOdometerEndKm, odometerDeltaKm, odometerVsGpsDiffKm]
     );
+    if (Number.isFinite(vehicleOdometerEndKm)) {
+      await db.query(
+        `UPDATE tracker_devices
+         SET current_odometer_km = $1,
+             current_odometer_updated_at = NOW(),
+             updated_at = NOW()
+         WHERE LOWER(TRIM(COALESCE(fleet_number, ''))) = LOWER(TRIM($2))
+            OR LOWER(TRIM(COALESCE(plate_number, ''))) = LOWER(TRIM($3))`,
+        [vehicleOdometerEndKm, String(serviceResult.rows[0].fleet_number || ""), String(serviceResult.rows[0].plate_number || "")]
+      );
+      await db.query(
+        `INSERT INTO vehicle_odometer_logs (fleet_number, plate_number, odometer_km, captured_at, source)
+         VALUES ($1, $2, $3, NOW(), 'manual_service_end')`,
+        [String(serviceResult.rows[0].fleet_number || "") || null, String(serviceResult.rows[0].plate_number || "") || null, vehicleOdometerEndKm]
+      );
+    }
 
     if (serviceResult.rows[0]?.planned_service_id) {
       let rosterDay = await getRosterServiceDateForExecution(
@@ -1349,7 +1868,16 @@ router.post("/:serviceId/end", async (req, res) => {
       }
     }
 
-    return res.json(updated.rows[0]);
+    return res.json({
+      ...updated.rows[0],
+      kmComparison: {
+        appTotalKm: Number(totalKm),
+        odometerStartKm: Number.isFinite(vehicleOdometerStartKm) ? vehicleOdometerStartKm : null,
+        odometerEndKm: Number.isFinite(vehicleOdometerEndKm) ? vehicleOdometerEndKm : null,
+        odometerDeltaKm: Number.isFinite(odometerDeltaKm) ? odometerDeltaKm : null,
+        odometerVsGpsDiffKm: Number.isFinite(odometerVsGpsDiffKm) ? odometerVsGpsDiffKm : null,
+      },
+    });
   } catch (error) {
     return res.status(500).json({ message: "Erro ao finalizar viagem." });
   }

@@ -90,6 +90,13 @@ hist_avg AS (
     AND total_km IS NOT NULL
     AND total_km > 0
     AND COALESCE(ended_at, started_at) >= (NOW() - INTERVAL '365 days')
+),
+deadhead_today AS (
+  SELECT
+    COALESCE(SUM(total_km), 0)::numeric(12,3) AS deadhead_km
+  FROM deadhead_movements dm
+  CROSS JOIN day
+  WHERE ((dm.ended_at AT TIME ZONE 'Europe/Lisbon')::date) = day.d
 )
 SELECT
   day.d::text AS report_date,
@@ -104,6 +111,8 @@ SELECT
   planned.planned_roster_count,
   realized_slots.realized_roster_slots,
   GREATEST(0, planned.planned_roster_count - realized_slots.realized_roster_slots)::int AS not_realized_count,
+  deadhead_today.deadhead_km,
+  (svc.km_realized_today + deadhead_today.deadhead_km)::numeric(12,3) AS total_km_with_deadhead,
   (planned.planned_roster_count * hist_avg.avg_completed_historical)::numeric(12,3) AS estimated_planned_km_today,
   GREATEST(
     0,
@@ -113,6 +122,7 @@ FROM day
 CROSS JOIN planned
 CROSS JOIN realized_slots
 CROSS JOIN svc
+CROSS JOIN deadhead_today
 CROSS JOIN hist_avg
 `;
 

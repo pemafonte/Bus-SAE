@@ -92,6 +92,24 @@
                   </div>
                   <div id="driverNextStopInfo" class="field-help">Sem dados de próxima paragem.</div>
                 </section>
+                <section class="card">
+                  <div class="announce-head">
+                    <h3>Avisos sonoros de paragens</h3>
+                    <span id="announceModeBadge" class="announce-mode-badge announce-mode-badge--api">API</span>
+                  </div>
+                  <label class="inline-checkbox">
+                    <input id="announceEnabled" type="checkbox" checked />
+                    Ativar anúncios automáticos
+                  </label>
+                  <label for="announceVolume">Volume do anúncio</label>
+                  <input id="announceVolume" type="range" min="0" max="100" value="85" />
+                  <label for="announceVoice">Voz</label>
+                  <select id="announceVoice">
+                    <option value="">Voz predefinida (pt-PT)</option>
+                  </select>
+                  <button id="testAnnounceBtn" type="button">Testar anúncio</button>
+                  <small id="announceStatusText" class="field-help">Anúncios preparados.</small>
+                </section>
                 <div id="map"></div>
                 <div class="map-legend" aria-label="Legenda do mapa do motorista">
                   <span class="map-legend-item">
@@ -154,7 +172,7 @@
 
               <section id="driverStepComms" class="tab-panel">
                 <h2>Mensagens com supervisão</h2>
-                <p class="field-help" style="margin-top: 0">
+                <p class="field-help field-help-tight">
                   Envie mensagens pré-definidas ou personalizadas para supervisor/admin e acompanhe alertas de trânsito.
                 </p>
                 <section class="card">
@@ -175,7 +193,7 @@
                 </section>
                 <section class="card">
                   <h3>Mensagens recebidas e enviadas</h3>
-                  <div class="ops-layout" style="margin-bottom: 8px">
+                  <div class="ops-layout ops-layout-compact">
                     <div class="ops-main">
                       <label for="driverAlertSoundType">Tipo de som</label>
                       <select id="driverAlertSoundType">

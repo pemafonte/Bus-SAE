@@ -117,6 +117,15 @@ let gpsSaveFailureWarned = false;
 let activeServiceSyncTimer = null;
 let driverMessagesRefreshTimer = null;
 let driverAlertsPollTimer = null;
+let stopAnnouncementTimer = null;
+let stopAnnouncementInFlight = false;
+let stopAnnouncementSpeaking = false;
+let stopAnnouncementApiFailCount = 0;
+let stopAnnouncementFallbackMode = false;
+let lastKnownGpsForAnnouncement = null;
+let lastLocalAnnouncedStopSequence = null;
+let lastLocalAnnouncementType = "";
+let currentAnnouncementMode = "";
 let driverAlertBaselineReady = false;
 let lastDriverAlertSignature = "";
 let todayServicesCache = [];
@@ -155,6 +164,12 @@ const testDriverAlertSoundBtnEl = document.getElementById("testDriverAlertSoundB
 const driverNextStopDelayEl = document.getElementById("driverNextStopDelay");
 const driverNextStopInfoEl = document.getElementById("driverNextStopInfo");
 const driverMapLiveStateEl = document.getElementById("driverMapLiveState");
+const announceEnabledEl = document.getElementById("announceEnabled");
+const announceVolumeEl = document.getElementById("announceVolume");
+const announceVoiceEl = document.getElementById("announceVoice");
+const testAnnounceBtnEl = document.getElementById("testAnnounceBtn");
+const announceStatusTextEl = document.getElementById("announceStatusText");
+const announceModeBadgeEl = document.getElementById("announceModeBadge");
 const mapTodayServicesListEl = document.getElementById("mapTodayServicesList");
 const mapStopsTimelineEl = document.getElementById("mapStopsTimeline");
 
@@ -248,6 +263,14 @@ async function syncActiveServiceFromServer() {
 
 function clearActiveServiceState() {
   stopActiveServiceSync();
+  stopStopAnnouncementPolling();
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+  stopAnnouncementSpeaking = false;
+  stopAnnouncementApiFailCount = 0;
+  stopAnnouncementFallbackMode = false;
+  lastKnownGpsForAnnouncement = null;
+  lastLocalAnnouncedStopSequence = null;
+  lastLocalAnnouncementType = "";
   activeServiceId = null;
   gpsPointQueue = [];
   persistGpsQueue();
@@ -429,6 +452,7 @@ function authHeaders() {
 }
 
 const DRIVER_ALERT_SOUND_SETTINGS_KEY = "driver_alert_sound_settings_v1";
+const DRIVER_STOP_ANNOUNCE_SETTINGS_KEY = "driver_stop_announce_settings_v1";
 
 function loadDriverAlertSoundSettings() {
   try {
@@ -490,6 +514,307 @@ function applyDriverAlertSoundSettingsToUi() {
   const settings = loadDriverAlertSoundSettings();
   if (driverAlertSoundTypeEl) driverAlertSoundTypeEl.value = settings.type;
   if (driverAlertSoundVolumeEl) driverAlertSoundVolumeEl.value = String(settings.volume);
+}
+
+function loadStopAnnouncementSettings() {
+  try {
+    const raw = localStorage.getItem(DRIVER_STOP_ANNOUNCE_SETTINGS_KEY);
+    const parsed = raw ? JSON.parse(raw) : {};
+    return {
+      enabled: parsed?.enabled !== false,
+      volume: Number.isFinite(Number(parsed?.volume)) ? Number(parsed.volume) : 85,
+      voiceName: String(parsed?.voiceName || ""),
+      preannounceMeters: Number.isFinite(Number(parsed?.preannounceMeters)) ? Number(parsed.preannounceMeters) : 300,
+      arrivalMeters: Number.isFinite(Number(parsed?.arrivalMeters)) ? Number(parsed.arrivalMeters) : 60,
+      pollMs: Number.isFinite(Number(parsed?.pollMs)) ? Number(parsed.pollMs) : 4000,
+    };
+  } catch (_error) {
+    return { enabled: true, volume: 85, voiceName: "", preannounceMeters: 300, arrivalMeters: 60, pollMs: 4000 };
+  }
+}
+
+function saveStopAnnouncementSettings(settings) {
+  localStorage.setItem(DRIVER_STOP_ANNOUNCE_SETTINGS_KEY, JSON.stringify(settings));
+}
+
+function getStopAnnouncementSettingsFromUi() {
+  const saved = loadStopAnnouncementSettings();
+  return {
+    enabled: announceEnabledEl ? announceEnabledEl.checked : saved.enabled,
+    volume: announceVolumeEl ? Number(announceVolumeEl.value || 85) : saved.volume,
+    voiceName: announceVoiceEl ? String(announceVoiceEl.value || "") : saved.voiceName,
+    preannounceMeters: saved.preannounceMeters,
+    arrivalMeters: saved.arrivalMeters,
+    pollMs: saved.pollMs,
+  };
+}
+
+function renderAnnouncementStatus(text) {
+  if (announceStatusTextEl) announceStatusTextEl.textContent = text || "";
+}
+
+function renderAnnouncementModeBadge(mode) {
+  if (!announceModeBadgeEl) return;
+  if (announceStatusTextEl) {
+    announceStatusTextEl.classList.remove("announce-status--api", "announce-status--local", "announce-status--off");
+  }
+  const m = String(mode || "api").toLowerCase();
+  const changed = currentAnnouncementMode && currentAnnouncementMode !== m;
+  currentAnnouncementMode = m;
+  announceModeBadgeEl.classList.remove("announce-mode-badge--api", "announce-mode-badge--local", "announce-mode-badge--off");
+  if (m === "local") {
+    announceModeBadgeEl.classList.add("announce-mode-badge--local");
+    announceModeBadgeEl.textContent = "💾 LOCAL";
+    if (announceStatusTextEl) announceStatusTextEl.classList.add("announce-status--local");
+    if (changed) {
+      announceModeBadgeEl.classList.remove("announce-mode-badge--pulse");
+      void announceModeBadgeEl.offsetWidth;
+      announceModeBadgeEl.classList.add("announce-mode-badge--pulse");
+    }
+    return;
+  }
+  if (m === "off") {
+    announceModeBadgeEl.classList.add("announce-mode-badge--off");
+    announceModeBadgeEl.textContent = "⏸ OFF";
+    if (announceStatusTextEl) announceStatusTextEl.classList.add("announce-status--off");
+    if (changed) {
+      announceModeBadgeEl.classList.remove("announce-mode-badge--pulse");
+      void announceModeBadgeEl.offsetWidth;
+      announceModeBadgeEl.classList.add("announce-mode-badge--pulse");
+    }
+    return;
+  }
+  announceModeBadgeEl.classList.add("announce-mode-badge--api");
+  announceModeBadgeEl.textContent = "☁ API";
+  if (announceStatusTextEl) announceStatusTextEl.classList.add("announce-status--api");
+  if (changed) {
+    announceModeBadgeEl.classList.remove("announce-mode-badge--pulse");
+    void announceModeBadgeEl.offsetWidth;
+    announceModeBadgeEl.classList.add("announce-mode-badge--pulse");
+  }
+}
+
+function toAnnouncementStop(stop) {
+  if (!stop) return null;
+  return {
+    stopId: stop.stopId || stop.stop_id || null,
+    stopSequence: Number(stop.stopSequence ?? stop.sequence ?? stop.stop_sequence),
+    stopName: stop.stopName || stop.stop_name || "",
+    lat: Number(stop.lat),
+    lng: Number(stop.lng),
+  };
+}
+
+function populateAnnouncementVoices() {
+  if (!announceVoiceEl || !window.speechSynthesis) return;
+  const saved = loadStopAnnouncementSettings();
+  const voices = window.speechSynthesis.getVoices() || [];
+  const preferred = voices.filter((v) => String(v.lang || "").toLowerCase().startsWith("pt"));
+  const finalVoices = preferred.length ? preferred : voices;
+  const options = ['<option value="">Voz predefinida (pt-PT)</option>'].concat(
+    finalVoices.map((v) => `<option value="${v.name}">${v.name} (${v.lang || "-"})</option>`)
+  );
+  announceVoiceEl.innerHTML = options.join("");
+  if (saved.voiceName && finalVoices.some((v) => v.name === saved.voiceName)) {
+    announceVoiceEl.value = saved.voiceName;
+  } else {
+    announceVoiceEl.value = "";
+  }
+}
+
+function applyStopAnnouncementSettingsToUi() {
+  const settings = loadStopAnnouncementSettings();
+  if (announceEnabledEl) announceEnabledEl.checked = settings.enabled;
+  if (announceVolumeEl) announceVolumeEl.value = String(settings.volume);
+  populateAnnouncementVoices();
+  renderAnnouncementStatus(settings.enabled ? "Anúncios automáticos ativos." : "Anúncios automáticos desativados.");
+  renderAnnouncementModeBadge(settings.enabled ? "api" : "off");
+}
+
+function speakStopAnnouncement(text) {
+  if (!window.speechSynthesis || !text) return Promise.resolve(false);
+  if (stopAnnouncementSpeaking) return Promise.resolve(false);
+  const settings = getStopAnnouncementSettingsFromUi();
+  return new Promise((resolve) => {
+    const utter = new SpeechSynthesisUtterance(text);
+    utter.lang = "pt-PT";
+    utter.rate = 0.98;
+    utter.pitch = 1;
+    utter.volume = Math.max(0, Math.min(1, Number(settings.volume || 85) / 100));
+    const voices = window.speechSynthesis.getVoices() || [];
+    const selected = voices.find((v) => v.name === settings.voiceName) || voices.find((v) => String(v.lang || "").toLowerCase().startsWith("pt"));
+    if (selected) utter.voice = selected;
+    stopAnnouncementSpeaking = true;
+    utter.onend = () => {
+      stopAnnouncementSpeaking = false;
+      resolve(true);
+    };
+    utter.onerror = () => {
+      stopAnnouncementSpeaking = false;
+      resolve(false);
+    };
+    window.speechSynthesis.speak(utter);
+  });
+}
+
+async function markStopAnnouncement(serviceId, stop, type) {
+  if (!serviceId || !stop || !type) return;
+  await fetch(`${API_BASE}/services/${serviceId}/announcement-mark`, {
+    method: "POST",
+    headers: authHeaders(),
+    body: JSON.stringify({
+      stopId: stop.stopId || null,
+      stopSequence: stop.stopSequence || null,
+      announcementType: type,
+    }),
+  }).catch(() => ({}));
+}
+
+function fallbackNextStopFromLocalRoute(settings) {
+  if (!lastKnownGpsForAnnouncement || !Array.isArray(activeReferenceStops) || !activeReferenceStops.length) return null;
+  const lat = Number(lastKnownGpsForAnnouncement.lat);
+  const lng = Number(lastKnownGpsForAnnouncement.lng);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+
+  while (activeStopProgressIndex < activeReferenceStops.length) {
+    const candidate = toAnnouncementStop(activeReferenceStops[activeStopProgressIndex]);
+    if (!candidate || !Number.isFinite(candidate.lat) || !Number.isFinite(candidate.lng)) {
+      activeStopProgressIndex += 1;
+      continue;
+    }
+    const d = distanceMeters(lat, lng, candidate.lat, candidate.lng);
+    if (Number.isFinite(d) && d <= Number(settings.arrivalMeters || 60)) {
+      activeStopProgressIndex += 1;
+      continue;
+    }
+    break;
+  }
+
+  const next = toAnnouncementStop(activeReferenceStops[activeStopProgressIndex]);
+  if (!next || !Number.isFinite(next.lat) || !Number.isFinite(next.lng)) return null;
+  const distanceM = distanceMeters(lat, lng, next.lat, next.lng);
+  return {
+    nextStop: next,
+    distanceM: Number.isFinite(distanceM) ? Math.round(distanceM) : null,
+  };
+}
+
+async function runLocalAnnouncementFallback(settings) {
+  const fallback = fallbackNextStopFromLocalRoute(settings);
+  if (!fallback || !fallback.nextStop) {
+    renderAnnouncementStatus("Modo local: sem dados suficientes de paragens.");
+    return;
+  }
+  const nextStop = fallback.nextStop;
+  const seq = Number.isFinite(nextStop.stopSequence) ? nextStop.stopSequence : null;
+  renderAnnouncementStatus(`Modo local: próxima ${nextStop.stopName || "-"} (${fallback.distanceM ?? "-"} m)`);
+  if (stopAnnouncementSpeaking || seq == null) return;
+
+  const isArrival = fallback.distanceM != null && fallback.distanceM <= Number(settings.arrivalMeters || 60);
+  const isPreannounce = fallback.distanceM != null && fallback.distanceM <= Number(settings.preannounceMeters || 300);
+  if (isArrival) {
+    if (lastLocalAnnouncedStopSequence === seq && lastLocalAnnouncementType === "arrived") return;
+    const said = await speakStopAnnouncement(`Paragem: ${nextStop.stopName || "paragem sem nome"}.`);
+    if (said) {
+      lastLocalAnnouncedStopSequence = seq;
+      lastLocalAnnouncementType = "arrived";
+    }
+    return;
+  }
+  if (isPreannounce) {
+    if (lastLocalAnnouncedStopSequence === seq && lastLocalAnnouncementType === "next") return;
+    const said = await speakStopAnnouncement(`Próxima paragem: ${nextStop.stopName || "paragem sem nome"}.`);
+    if (said) {
+      lastLocalAnnouncedStopSequence = seq;
+      lastLocalAnnouncementType = "next";
+    }
+  }
+}
+
+async function pollStopAnnouncementState() {
+  if (stopAnnouncementInFlight || !token || !activeServiceId) return;
+  const settings = getStopAnnouncementSettingsFromUi();
+  if (!settings.enabled) return;
+  stopAnnouncementInFlight = true;
+  try {
+    const response = await fetch(
+      `${API_BASE}/services/${activeServiceId}/announcement-state?preannounceMeters=${encodeURIComponent(settings.preannounceMeters)}&arrivalMeters=${encodeURIComponent(settings.arrivalMeters)}`,
+      { headers: authHeaders() }
+    );
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      stopAnnouncementApiFailCount += 1;
+      if (stopAnnouncementApiFailCount >= 3) {
+        stopAnnouncementFallbackMode = true;
+        renderAnnouncementModeBadge("local");
+        await runLocalAnnouncementFallback(settings);
+      }
+      return;
+    }
+    stopAnnouncementApiFailCount = 0;
+    if (stopAnnouncementFallbackMode) {
+      stopAnnouncementFallbackMode = false;
+      renderAnnouncementModeBadge("api");
+      renderAnnouncementStatus("Modo API restabelecido.");
+    }
+    if (!stopAnnouncementFallbackMode) renderAnnouncementModeBadge("api");
+    const nextLabel = data?.nextStop?.stopName ? `Próxima: ${data.nextStop.stopName}` : "Sem próxima paragem.";
+    renderAnnouncementStatus(nextLabel);
+    if (stopAnnouncementSpeaking) return;
+    if (data?.triggers?.announceArrivedStop && data?.currentStop?.stopSequence != null) {
+      const said = await speakStopAnnouncement(
+        data?.suggestedAnnouncements?.arrivedStopText || `Paragem: ${data.currentStop.stopName || "paragem sem nome"}.`
+      );
+      if (said) {
+        await markStopAnnouncement(activeServiceId, data.currentStop, "arrived");
+        lastLocalAnnouncedStopSequence = Number(data.currentStop.stopSequence);
+        lastLocalAnnouncementType = "arrived";
+      }
+      return;
+    }
+    if (data?.triggers?.announceNextStop && data?.nextStop?.stopSequence != null) {
+      const said = await speakStopAnnouncement(
+        data?.suggestedAnnouncements?.nextStopText || `Próxima paragem: ${data.nextStop.stopName || "paragem sem nome"}.`
+      );
+      if (said) {
+        await markStopAnnouncement(activeServiceId, data.nextStop, "next");
+        lastLocalAnnouncedStopSequence = Number(data.nextStop.stopSequence);
+        lastLocalAnnouncementType = "next";
+      }
+    }
+  } catch (_error) {
+    stopAnnouncementApiFailCount += 1;
+    if (stopAnnouncementApiFailCount >= 3) {
+      stopAnnouncementFallbackMode = true;
+      renderAnnouncementModeBadge("local");
+      await runLocalAnnouncementFallback(settings);
+    }
+  } finally {
+    stopAnnouncementInFlight = false;
+  }
+}
+
+function stopStopAnnouncementPolling() {
+  if (stopAnnouncementTimer) {
+    clearInterval(stopAnnouncementTimer);
+    stopAnnouncementTimer = null;
+  }
+}
+
+function startStopAnnouncementPolling() {
+  stopStopAnnouncementPolling();
+  const settings = loadStopAnnouncementSettings();
+  if (!settings.enabled) {
+    renderAnnouncementModeBadge("off");
+    return;
+  }
+  stopAnnouncementApiFailCount = 0;
+  stopAnnouncementFallbackMode = false;
+  renderAnnouncementModeBadge("api");
+  pollStopAnnouncementState();
+  stopAnnouncementTimer = setInterval(() => {
+    pollStopAnnouncementState();
+  }, Math.max(2000, settings.pollMs || 4000));
 }
 
 function updateDriverAlertSignature() {
@@ -889,6 +1214,7 @@ function logoutDriver() {
   if (!confirmed) return;
 
   stopActiveServiceSync();
+  stopStopAnnouncementPolling();
   stopDriverMessagesRefresh();
   stopDriverAlertsPolling();
   token = "";
@@ -979,6 +1305,7 @@ async function restoreActiveService() {
   await flushGpsPointQueue();
   startLocationTracking();
   startActiveServiceSync();
+  startStopAnnouncementPolling();
   showDriverTab("driverStepMap");
 }
 
@@ -1044,6 +1371,7 @@ async function startTrip(event) {
   await loadReferenceRoute(data.id);
   startLocationTracking();
   startActiveServiceSync();
+  startStopAnnouncementPolling();
   showDriverTab("driverStepMap");
 }
 
@@ -1149,6 +1477,7 @@ function startLocationTracking() {
     async (position) => {
       const lat = position.coords.latitude;
       const lng = position.coords.longitude;
+      lastKnownGpsForAnnouncement = { lat, lng, at: Date.now() };
       const accuracyM = Number.isFinite(position.coords.accuracy) ? Number(position.coords.accuracy) : null;
       const speedMps = Number(position.coords.speed);
       const headingDegRaw = Number(position.coords.heading);
@@ -1195,9 +1524,21 @@ async function endTrip() {
     return;
   }
 
+  const odometerInput = window.prompt(
+    "Indique os km atuais no quadrante (odómetro) para fechar e comparar com os km da app:",
+    ""
+  );
+  if (odometerInput == null) return;
+  const vehicleOdometerKm = Number(String(odometerInput).replace(",", ".").trim());
+  if (!Number.isFinite(vehicleOdometerKm) || vehicleOdometerKm < 0) {
+    alert("Valor de odómetro inválido.");
+    return;
+  }
+
   const response = await fetch(`${API_BASE}/services/${activeServiceId}/end`, {
     method: "POST",
     headers: authHeaders(),
+    body: JSON.stringify({ vehicleOdometerKm }),
   });
   const data = await response.json();
 
@@ -1215,6 +1556,10 @@ async function endTrip() {
       `Linha: ${data.line_code}`,
       `Frota: ${data.fleet_number}`,
       `Quilómetros: ${data.total_km}`,
+      `Odómetro início: ${data.kmComparison?.odometerStartKm ?? "-"}`,
+      `Odómetro fim: ${data.kmComparison?.odometerEndKm ?? "-"}`,
+      `Delta odómetro: ${data.kmComparison?.odometerDeltaKm ?? "-"}`,
+      `Diferença odómetro vs app: ${data.kmComparison?.odometerVsGpsDiffKm ?? "-"}`,
       `Início: ${new Date(data.started_at).toLocaleString()}`,
       `Fim: ${new Date(data.ended_at).toLocaleString()}`,
     ].join("\n")
@@ -1618,6 +1963,35 @@ if (driverAlertSoundVolumeEl) {
 if (testDriverAlertSoundBtnEl) {
   testDriverAlertSoundBtnEl.addEventListener("click", playDriverAlertSound);
 }
+if (announceEnabledEl) {
+  announceEnabledEl.addEventListener("change", () => {
+    const settings = getStopAnnouncementSettingsFromUi();
+    saveStopAnnouncementSettings(settings);
+    if (settings.enabled && activeServiceId) {
+      startStopAnnouncementPolling();
+    } else {
+      stopStopAnnouncementPolling();
+      renderAnnouncementModeBadge("off");
+      renderAnnouncementStatus("Anúncios automáticos desativados.");
+    }
+  });
+}
+if (announceVolumeEl) {
+  announceVolumeEl.addEventListener("input", () => {
+    saveStopAnnouncementSettings(getStopAnnouncementSettingsFromUi());
+  });
+}
+if (announceVoiceEl) {
+  announceVoiceEl.addEventListener("change", () => {
+    saveStopAnnouncementSettings(getStopAnnouncementSettingsFromUi());
+  });
+}
+if (testAnnounceBtnEl) {
+  testAnnounceBtnEl.addEventListener("click", async () => {
+    const said = await speakStopAnnouncement("Teste de aviso: próxima paragem.");
+    if (!said) renderAnnouncementStatus("Não foi possível reproduzir áudio neste dispositivo.");
+  });
+}
 fleetNumberInput.addEventListener("input", updateFleetWarning);
 document.getElementById("lineCode").addEventListener("change", () => {
   loadReferenceRoutePreview(document.getElementById("lineCode").value, document.getElementById("serviceSchedule").value);
@@ -1632,9 +2006,16 @@ initDriverTabs();
 window.addEventListener("online", () => {
   flushGpsPointQueue();
   updateDriverAlertSignature();
+  if (activeServiceId) pollStopAnnouncementState();
 });
+if (window.speechSynthesis) {
+  window.speechSynthesis.onvoiceschanged = () => {
+    populateAnnouncementVoices();
+  };
+}
 
 applyDriverAlertSoundSettingsToUi();
+applyStopAnnouncementSettingsToUi();
 
 (() => {
   const raw = sessionStorage.getItem(AUTH_SESSION_KEY);

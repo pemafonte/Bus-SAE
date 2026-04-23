@@ -7,6 +7,7 @@ const authRoutes = require("./routes/auth");
 const serviceRoutes = require("./routes/services");
 const supervisorRoutes = require("./routes/supervisor");
 const gtfsRoutes = require("./routes/gtfs");
+const gtfsRealtimeRoutes = require("./routes/gtfsRealtime");
 const viewerRoutes = require("./routes/viewer");
 const integrationsRoutes = require("./routes/integrations");
 const { startTeltonikaTcpServer } = require("./tcp/teltonikaServer");
@@ -87,6 +88,7 @@ app.use("/auth", authRoutes);
 app.use("/services", serviceRoutes);
 app.use("/supervisor", supervisorRoutes);
 app.use("/gtfs", gtfsRoutes);
+app.use("/gtfs-rt", gtfsRealtimeRoutes);
 app.use("/viewer", viewerRoutes);
 app.use("/integrations", integrationsRoutes.router);
 

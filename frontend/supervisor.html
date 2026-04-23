@@ -28,22 +28,33 @@
       </section>
 
       <section id="supervisorTabs" class="card hidden">
+        <nav id="supervisorModuleNav" class="supervisor-module-nav" aria-label="Menu principal de supervisor">
+          <button type="button" class="module-nav-btn active" data-module-target="dashboard">Dashboard</button>
+          <button type="button" class="module-nav-btn" data-module-target="operacao">Operação</button>
+          <button type="button" class="module-nav-btn" data-module-target="planeamento">Planeamento</button>
+          <button type="button" class="module-nav-btn" data-module-target="comunicacao">Comunicação</button>
+          <button type="button" class="module-nav-btn" data-module-target="dados">Dados</button>
+          <button type="button" class="module-nav-btn" data-module-target="administracao">Administração</button>
+        </nav>
         <div class="dashboard-layout">
           <aside class="tab-nav tab-nav-side">
-            <button type="button" class="tab-btn active" data-tab-target="tabResumo">Resumo</button>
-            <button type="button" class="tab-btn" data-tab-target="tabServicos">Serviços</button>
-            <button type="button" class="tab-btn" data-tab-target="tabEscalaDia">Escala do dia</button>
-            <button type="button" class="tab-btn" data-tab-target="tabAlertasConflito">Alertas de conflito</button>
-            <button type="button" class="tab-btn" data-tab-target="tabCriarMotorista">Criar motorista</button>
-            <button type="button" class="tab-btn" data-tab-target="tabCriarAcesso">Criar acesso</button>
-            <button type="button" class="tab-btn" data-tab-target="tabImportarMotoristas">Importar dados</button>
-            <button type="button" class="tab-btn" data-tab-target="tabExportarMotoristas">Exportar dados</button>
-            <button type="button" class="tab-btn" data-tab-target="tabListaMotoristas">Lista de motoristas</button>
-            <button type="button" class="tab-btn" data-tab-target="tabIntegracoesGps">Integrações GPS</button>
-            <button type="button" class="tab-btn" data-tab-target="tabMensagensComunicacao">Mensagens</button>
-            <button type="button" class="tab-btn" data-tab-target="tabMensagensPresets">Pré-definidas</button>
-            <button type="button" class="tab-btn" data-tab-target="tabParagensServico">Paragens (serviço)</button>
-            <button type="button" class="tab-btn" data-tab-target="tabRelatoriosIa">Relatórios IA</button>
+            <button type="button" class="tab-btn active" data-module="dashboard" data-tab-target="tabResumo">Resumo</button>
+            <button type="button" class="tab-btn" data-module="operacao" data-tab-target="tabTempoReal">Em tempo real</button>
+            <button type="button" class="tab-btn" data-module="operacao" data-tab-target="tabServicos">Serviços</button>
+            <button type="button" class="tab-btn" data-module="planeamento" data-tab-target="tabEscalaDia">Escala do dia</button>
+            <button type="button" class="tab-btn" data-module="operacao" data-tab-target="tabAlertasConflito">Alertas de conflito</button>
+            <button type="button" class="tab-btn" data-module="administracao" data-tab-target="tabCriarMotorista">Criar motorista</button>
+            <button type="button" class="tab-btn" data-module="administracao" data-tab-target="tabCriarAcesso">Criar acesso</button>
+            <button type="button" class="tab-btn" data-module="dados" data-tab-target="tabImportarMotoristas">Importar dados</button>
+            <button type="button" class="tab-btn" data-module="dados" data-tab-target="tabEditorGtfs">Editor GTFS</button>
+            <button type="button" class="tab-btn" data-module="dados" data-tab-target="tabExportarMotoristas">Exportar dados</button>
+            <button type="button" class="tab-btn" data-module="administracao" data-tab-target="tabListaMotoristas">Lista de motoristas</button>
+            <button type="button" class="tab-btn" data-module="dados" data-tab-target="tabViaturas">Viaturas</button>
+            <button type="button" class="tab-btn" data-module="dados" data-tab-target="tabIntegracoesGps">Integrações GPS</button>
+            <button type="button" class="tab-btn" data-module="comunicacao" data-tab-target="tabMensagensComunicacao">Mensagens</button>
+            <button type="button" class="tab-btn" data-module="comunicacao" data-tab-target="tabMensagensPresets">Pré-definidas</button>
+            <button type="button" class="tab-btn" data-module="operacao" data-tab-target="tabParagensServico">Paragens (serviço)</button>
+            <button type="button" class="tab-btn" data-module="dados" data-tab-target="tabRelatoriosIa">Relatórios IA</button>
           </aside>
 
           <div class="tab-content">
@@ -52,8 +63,8 @@
           <pre id="overview">Sem dados.</pre>
         </div>
 
-        <div id="tabServicos" class="tab-panel">
-          <h2>Serviços</h2>
+        <div id="tabTempoReal" class="tab-panel">
+          <h2>Em tempo real</h2>
           <section class="card">
             <h3>Serviços em execução (mapa)</h3>
             <label for="liveServiceFilterSelect">Filtrar serviço no mapa</label>
@@ -61,6 +72,20 @@
               <option value="all">Mostrar todos</option>
             </select>
             <button type="button" id="refreshLiveServicesBtn">Atualizar mapa</button>
+            <div id="liveRealtimeStatusChips" class="live-status-chips" role="tablist" aria-label="Estado operacional em tempo real">
+              <button type="button" class="live-status-chip live-status-chip--all active" data-live-status="all">
+                Todos
+                <span id="liveCountAll" class="live-status-chip-count">0</span>
+              </button>
+              <button type="button" class="live-status-chip live-status-chip--early" data-live-status="early">
+                Adiantados
+                <span id="liveCountEarly" class="live-status-chip-count">0</span>
+              </button>
+              <button type="button" class="live-status-chip live-status-chip--late" data-live-status="late">
+                Atrasados
+                <span id="liveCountLate" class="live-status-chip-count">0</span>
+              </button>
+            </div>
             <div id="supLiveMap"></div>
             <div class="map-legend" aria-label="Legenda do mapa do supervisor">
               <span class="map-legend-item">
@@ -74,8 +99,25 @@
             </div>
             <div id="supLiveServicesList" class="service-cards"></div>
           </section>
-          <div class="supervisor-services-roster-hint card" style="margin-bottom: 14px; padding: 12px 14px">
-            <p style="margin: 0 0 10px; font-size: 14px">
+          <section class="card card-top-gap">
+            <h3>Movimentos em vazio (sem serviço)</h3>
+            <div class="ops-layout-compact">
+              <input type="date" id="deadheadFromDate" />
+              <input type="date" id="deadheadToDate" />
+              <input type="text" id="deadheadFleetFilter" placeholder="Filtrar por frota" />
+            </div>
+            <button type="button" id="refreshDeadheadMovementsBtn">Atualizar vazios</button>
+            <button type="button" id="exportDeadheadCsvBtn">Exportar vazios CSV</button>
+            <button type="button" id="exportDeadheadXlsxBtn">Exportar vazios Excel</button>
+            <div id="deadheadMovementsList" class="service-cards"></div>
+            <div id="deadheadMap"></div>
+          </section>
+        </div>
+
+        <div id="tabServicos" class="tab-panel">
+          <h2>Serviços (registos)</h2>
+          <div class="supervisor-services-roster-hint card card-compact">
+            <p class="section-note">
               <strong>Trocar o motorista de um serviço escalado e ainda por realizar?</strong>
               A lista abaixo mostra <em>serviços já registados na aplicação</em> (viagens). Para mudar quem está na
               <strong>escala do dia</strong> antes de iniciar a viagem — por exemplo, a motorista Lina Silva e outros —
@@ -138,7 +180,7 @@
 
         <div id="tabEscalaDia" class="tab-panel">
           <h2>Escala do dia (serviços planeados)</h2>
-          <p class="field-help" style="margin-top: 0">
+          <p class="field-help field-help-tight">
             Em duas etapas: escolha primeiro o motorista com serviço na data; só depois surgem os serviços escalados para
             esse motorista. Só pode alterar o escalamento quando a linha está <strong>pendente</strong> ou
             <strong>atribuída</strong> (sem viagem iniciada na app nesse dia para esse serviço).
@@ -159,7 +201,7 @@
 
         <div id="tabAlertasConflito" class="tab-panel">
           <h2>Alertas de conflito</h2>
-          <p class="field-help" style="margin-top: 0">
+          <p class="field-help field-help-tight">
             Alertas enviados pelos motoristas quando existe sobreposição de horários na escala.
           </p>
           <button type="button" id="refreshConflictAlertsBtn">Atualizar alertas</button>
@@ -236,7 +278,7 @@
           <pre id="importDriversReport">Sem importacao executada.</pre>
 
           <h2>Importar escala diaria por Excel/CSV</h2>
-          <p class="field-help" style="margin-top: 0">
+          <p class="field-help field-help-tight">
             Se o ficheiro tiver colunas de quilómetros (<strong>KmsCarga</strong>, <strong>KmsVazio</strong>,
             <strong>KmsVazioTecnico</strong> ou equivalentes), só entram na escala as linhas com
             <strong>KmsCarga</strong> &gt; 0; linhas só com deslocação em vazio (KmsVazio ou KmsVazioTecnico &gt; 0)
@@ -261,6 +303,46 @@
           <pre id="importGtfsReport">Sem importacao GTFS executada.</pre>
         </div>
 
+        <div id="tabEditorGtfs" class="tab-panel">
+          <h2>Editor GTFS (linhas e paragens)</h2>
+          <p class="field-help field-help-tight">
+            Selecione uma linha, depois uma trip, e ajuste as paragens dessa viagem GTFS. As alterações afetam o cálculo de
+            próxima paragem e análises GTFS.
+          </p>
+          <section class="card">
+            <h3>Seleção de linha e trip</h3>
+            <label for="gtfsEditorRouteSelect">Linha GTFS</label>
+            <select id="gtfsEditorRouteSelect">
+              <option value="">-- Selecionar linha --</option>
+            </select>
+            <button type="button" id="refreshGtfsEditorLinesBtn">Atualizar linhas</button>
+            <label for="gtfsEditorTripSelect">Trip GTFS</label>
+            <select id="gtfsEditorTripSelect">
+              <option value="">-- Selecionar trip --</option>
+            </select>
+            <button type="button" id="loadGtfsEditorTripStopsBtn">Carregar paragens da trip</button>
+            <pre id="gtfsEditorSummary">Sem linha/trip carregada.</pre>
+          </section>
+          <section class="card card-top-gap">
+            <h3>Adicionar paragem à trip</h3>
+            <form id="gtfsEditorAddStopForm">
+              <input id="gtfsEditorAddStopId" type="text" placeholder="stop_id existente (opcional)" />
+              <input id="gtfsEditorAddStopName" type="text" placeholder="Nome da nova paragem (se criar nova)" />
+              <input id="gtfsEditorAddStopLat" type="number" step="0.000001" placeholder="Latitude (se criar nova)" />
+              <input id="gtfsEditorAddStopLon" type="number" step="0.000001" placeholder="Longitude (se criar nova)" />
+              <input id="gtfsEditorAddStopSequence" type="number" min="1" placeholder="Sequência (opcional)" />
+              <input id="gtfsEditorAddArrivalTime" type="text" placeholder="Hora chegada (HH:MM:SS opcional)" />
+              <input id="gtfsEditorAddDepartureTime" type="text" placeholder="Hora partida (HH:MM:SS opcional)" />
+              <button type="submit">Adicionar paragem</button>
+            </form>
+          </section>
+          <section class="card card-top-gap">
+            <h3>Paragens da trip (remoção)</h3>
+            <p class="field-help">Use "Remover" numa paragem para retirar da trip; a sequência será normalizada automaticamente.</p>
+            <div id="gtfsEditorStopsList" class="service-cards"></div>
+          </section>
+        </div>
+
         <div id="tabExportarMotoristas" class="tab-panel">
           <h2>Exportar motoristas por empresa</h2>
           <input id="driversExportCompany" type="text" placeholder="Empresa (vazio = todas)" />
@@ -274,14 +356,55 @@
           <ul id="driversList"></ul>
         </div>
 
+        <div id="tabViaturas" class="tab-panel">
+          <h2>Viaturas e odómetro</h2>
+          <p class="field-help field-help-tight">
+            Registe frota, matrícula, IMEI e quilometragem da instalação. Atualize os km reais para comparar com os km da
+            viagem ao fechar serviço no motorista.
+          </p>
+          <section class="card">
+            <h3>Adicionar/atualizar viatura</h3>
+            <form id="vehicleRegistryForm">
+              <input id="vehicleImei" type="text" placeholder="IMEI (obrigatório)" required />
+              <input id="vehicleFleetNumber" type="text" placeholder="N.º frota (obrigatório)" required />
+              <input id="vehiclePlateNumber" type="text" placeholder="Matrícula (opcional)" />
+              <input id="vehicleInstallOdometerKm" type="number" step="0.1" min="0" placeholder="Km instalação equipamento" />
+              <input id="vehicleCurrentOdometerKm" type="number" step="0.1" min="0" placeholder="Km atual real (quadrante)" />
+              <select id="vehicleIsActive">
+                <option value="true">Ativa</option>
+                <option value="false">Inativa</option>
+              </select>
+              <button type="submit">Guardar viatura</button>
+            </form>
+            <button type="button" id="refreshVehicleRegistryBtn">Atualizar lista de viaturas</button>
+            <div id="vehicleRegistryList" class="service-cards"></div>
+          </section>
+          <section class="card card-top-gap">
+            <h3>Conciliação conta-quilómetros (carga + vazio)</h3>
+            <div class="ops-layout-compact">
+              <input id="odometerReportDate" type="date" />
+              <button type="button" id="loadOdometerReportBtn">Carregar relatório</button>
+            </div>
+            <div id="odometerReconciliationList" class="service-cards"></div>
+          </section>
+        </div>
+
         <div id="tabIntegracoesGps" class="tab-panel">
           <h2>Integrações GPS (Teltonika)</h2>
           <p class="field-help">
             <a href="/frontend/teltonika-guide.html" target="_blank" rel="noopener noreferrer">
               Abrir guia completo (ativação, TCP Codec8, testes externos e migração de servidor)
             </a>
+            <br />
+            <a href="/frontend/stop-announcements-guide.html" target="_blank" rel="noopener noreferrer">
+              Abrir guia do sistema sonoro de informação de paragens
+            </a>
+            <br />
+            <a href="/frontend/gtfs-rt-guide.html" target="_blank" rel="noopener noreferrer">
+              Abrir guia GTFS Real-Time (VehiclePositions, TripUpdates, ServiceAlerts)
+            </a>
           </p>
-          <p class="field-help" style="margin-top: 0">
+          <p class="field-help field-help-tight">
             O telemóvel do motorista não precisa de estar ligado ao Teltonika. O motorista inicia o serviço na app e os
             pontos do tracker entram na API pelo webhook.
           </p>
@@ -336,7 +459,19 @@
           </form>
           <button type="button" id="refreshTrackerDevicesBtn">Atualizar dispositivos</button>
           <ul id="trackerDevicesList"></ul>
-          <section class="card" style="margin-top: 12px">
+          <section class="card card-top-gap">
+            <h3>Preview GTFS-RT (diagnóstico rápido)</h3>
+            <p class="field-help">
+              Consulte os 3 feeds GTFS-RT em JSON sem sair desta página. Útil para validação operacional rápida.
+            </p>
+            <div class="stack-actions">
+              <button type="button" id="previewGtfsRtVehiclesBtn">Carregar VehiclePositions (JSON)</button>
+              <button type="button" id="previewGtfsRtTripUpdatesBtn">Carregar TripUpdates (JSON)</button>
+              <button type="button" id="previewGtfsRtAlertsBtn">Carregar ServiceAlerts (JSON)</button>
+            </div>
+            <pre id="gtfsRtPreviewReport">Sem preview executado.</pre>
+          </section>
+          <section class="card card-top-gap">
             <h3>Configuração webhook (Flespi/Traccar)</h3>
             <p class="field-help">
               Use estes valores no integrador que recebe Teltonika e encaminha para esta API. O token deve ser igual ao
@@ -356,7 +491,7 @@
 
         <div id="tabMensagensComunicacao" class="tab-panel">
           <h2>Mensagens operacionais e alertas de trânsito</h2>
-          <p class="field-help" style="margin-top: 0">
+          <p class="field-help field-help-tight">
             Comunicação bidirecional entre supervisão e motoristas. Mensagens marcadas como alerta de trânsito ficam destacadas.
           </p>
           <div class="ops-layout">
@@ -382,7 +517,7 @@
                 </label>
                 <button type="submit" id="supMessageSendBtn">Enviar mensagem ao motorista</button>
               </form>
-              <section class="card" style="margin-top: 12px">
+              <section class="card card-top-gap">
                 <h3>Histórico da conversa</h3>
                 <label for="supAlertSoundType">Tipo de som</label>
                 <select id="supAlertSoundType">
@@ -402,7 +537,7 @@
 
         <div id="tabMensagensPresets" class="tab-panel">
           <h2>Mensagens pré-definidas</h2>
-          <p class="field-help" style="margin-top: 0">
+          <p class="field-help field-help-tight">
             Crie textos rápidos para envio ao motorista (supervisor) e textos que o motorista pode escolher ao falar com a
             central. As de fábrica podem ser sobrescritas ao criar uma predefinida com o mesmo código.
           </p>
@@ -427,7 +562,7 @@
               <button type="submit">Guardar</button>
             </form>
           </section>
-          <section class="card" style="margin-top: 12px">
+          <section class="card card-top-gap">
             <h3>Lista (gestão)</h3>
             <label for="supPresetListScope">Filtrar</label>
             <select id="supPresetListScope">
@@ -441,7 +576,7 @@
 
         <div id="tabParagensServico" class="tab-panel">
           <h2>Paragens da linha vs GPS do motorista</h2>
-          <p class="field-help" style="margin-top: 0">
+          <p class="field-help field-help-tight">
             Indique o <strong>n.º do serviço (ID)</strong> — o mesmo que aparece nos cartões em «Serviços» ou no filtro por
             n.º de serviço. Nos cartões de <strong>Saídas</strong> e de <strong>serviços em execução (mapa)</strong> pode
             premir <strong>Paragens</strong> para preencher o ID e abrir este separador. A app cruza as paragens GTFS da
@@ -476,7 +611,7 @@
 
         <div id="tabRelatoriosIa" class="tab-panel">
           <h2>Relatórios inteligentes de operação</h2>
-          <p class="field-help" style="margin-top: 0">
+          <p class="field-help field-help-tight">
             Esta análise cruza horários GTFS, passagens GPS e desempenho por paragem para identificar atrasos, pontos de
             perda de tempo e oportunidades de melhoria operacional.
           </p>
@@ -492,7 +627,7 @@
                 <input id="reportMaxServices" type="number" min="10" max="400" value="120" />
                 <button type="submit">Gerar relatório</button>
               </form>
-              <div style="margin-top: 10px; display: flex; flex-direction: column; gap: 8px">
+              <div class="stack-actions">
                 <button type="button" id="exportReportExcelBtn">Exportar Excel (filtros atuais)</button>
                 <button type="button" id="exportReportExcelTodayBtn">Exportar Excel (hoje — Lisboa)</button>
               </div>

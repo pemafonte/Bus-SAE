@@ -26,6 +26,17 @@ function toFloat(value) {
   return Number.isNaN(n) ? null : n;
 }
 
+async function ensureGtfsEditorIndexes() {
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_gtfs_trips_route_id
+     ON gtfs_trips(route_id)`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_gtfs_stop_times_trip_seq
+     ON gtfs_stop_times(trip_id, stop_sequence)`
+  );
+}
+
 router.post("/import", async (req, res) => {
   const { fileBase64 } = req.body;
   if (!fileBase64) {
@@ -153,6 +164,207 @@ router.get("/status", async (_req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ message: "Erro ao consultar estado GTFS." });
+  }
+});
+
+router.get("/editor/lines", async (_req, res) => {
+  try {
+    await ensureGtfsEditorIndexes();
+    const result = await db.query(
+      `SELECT
+         r.route_id,
+         COALESCE(r.route_short_name, '') AS route_short_name,
+         COALESCE(r.route_long_name, '') AS route_long_name,
+         COUNT(DISTINCT t.trip_id)::int AS trips_count,
+         COUNT(DISTINCT st.stop_id)::int AS stops_count
+       FROM gtfs_routes r
+       LEFT JOIN gtfs_trips t ON t.route_id = r.route_id
+       LEFT JOIN gtfs_stop_times st ON st.trip_id = t.trip_id
+       GROUP BY r.route_id, r.route_short_name, r.route_long_name
+       ORDER BY NULLIF(r.route_short_name, '') ASC NULLS LAST, r.route_id ASC`
+    );
+    return res.json(result.rows);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar linhas GTFS." });
+  }
+});
+
+router.get("/editor/trips", async (req, res) => {
+  const routeId = String(req.query.routeId || "").trim();
+  if (!routeId) return res.status(400).json({ message: "Indique routeId." });
+  try {
+    const result = await db.query(
+      `SELECT
+         t.trip_id,
+         t.route_id,
+         COALESCE(t.trip_headsign, '') AS trip_headsign,
+         t.direction_id,
+         t.service_id,
+         COUNT(st.stop_id)::int AS stops_count
+       FROM gtfs_trips t
+       LEFT JOIN gtfs_stop_times st ON st.trip_id = t.trip_id
+       WHERE t.route_id = $1
+       GROUP BY t.trip_id, t.route_id, t.trip_headsign, t.direction_id, t.service_id
+       ORDER BY t.trip_id ASC`,
+      [routeId]
+    );
+    return res.json(result.rows);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar viagens GTFS." });
+  }
+});
+
+router.get("/editor/trip-stops", async (req, res) => {
+  const tripId = String(req.query.tripId || "").trim();
+  if (!tripId) return res.status(400).json({ message: "Indique tripId." });
+  try {
+    const tripRes = await db.query(
+      `SELECT trip_id, route_id, trip_headsign, direction_id, service_id
+       FROM gtfs_trips
+       WHERE trip_id = $1`,
+      [tripId]
+    );
+    if (!tripRes.rowCount) {
+      return res.status(404).json({ message: "Trip GTFS não encontrada." });
+    }
+    const stopsRes = await db.query(
+      `SELECT
+         st.stop_sequence,
+         st.arrival_time,
+         st.departure_time,
+         st.stop_id,
+         s.stop_name,
+         s.stop_lat,
+         s.stop_lon
+       FROM gtfs_stop_times st
+       LEFT JOIN gtfs_stops s ON s.stop_id = st.stop_id
+       WHERE st.trip_id = $1
+       ORDER BY st.stop_sequence ASC`,
+      [tripId]
+    );
+    return res.json({ trip: tripRes.rows[0], stops: stopsRes.rows });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar paragens da viagem GTFS." });
+  }
+});
+
+router.post("/editor/trip-stops", async (req, res) => {
+  const tripId = String(req.body?.tripId || "").trim();
+  const stopIdRaw = String(req.body?.stopId || "").trim();
+  const stopName = String(req.body?.stopName || "").trim();
+  const stopLat = toFloat(req.body?.stopLat);
+  const stopLon = toFloat(req.body?.stopLon);
+  const arrivalTime = String(req.body?.arrivalTime || "").trim() || null;
+  const departureTime = String(req.body?.departureTime || "").trim() || null;
+  const requestedSequence = toInt(req.body?.stopSequence);
+
+  if (!tripId) return res.status(400).json({ message: "Indique tripId." });
+  if (!stopIdRaw && (!stopName || stopLat == null || stopLon == null)) {
+    return res.status(400).json({ message: "Indique stopId existente ou stopName+stopLat+stopLon para criar nova paragem." });
+  }
+
+  const client = await db.pool.connect();
+  try {
+    await client.query("BEGIN");
+    const tripRes = await client.query(`SELECT trip_id FROM gtfs_trips WHERE trip_id = $1 FOR UPDATE`, [tripId]);
+    if (!tripRes.rowCount) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Trip GTFS não encontrada." });
+    }
+
+    let stopId = stopIdRaw;
+    if (stopId) {
+      const stopRes = await client.query(`SELECT stop_id FROM gtfs_stops WHERE stop_id = $1`, [stopId]);
+      if (!stopRes.rowCount) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ message: "stopId não existe em gtfs_stops." });
+      }
+    } else {
+      stopId = `custom_${Date.now()}`;
+      await client.query(
+        `INSERT INTO gtfs_stops (stop_id, stop_name, stop_lat, stop_lon)
+         VALUES ($1, $2, $3, $4)`,
+        [stopId, stopName, stopLat, stopLon]
+      );
+    }
+
+    const maxSeqRes = await client.query(
+      `SELECT COALESCE(MAX(stop_sequence), 0)::int AS max_seq
+       FROM gtfs_stop_times
+       WHERE trip_id = $1`,
+      [tripId]
+    );
+    const maxSeq = Number(maxSeqRes.rows[0]?.max_seq || 0);
+    let seq = Number.isFinite(requestedSequence) && requestedSequence > 0 ? requestedSequence : maxSeq + 1;
+    if (seq < 1) seq = 1;
+    if (seq <= maxSeq) {
+      await client.query(
+        `UPDATE gtfs_stop_times
+         SET stop_sequence = stop_sequence + 1
+         WHERE trip_id = $1
+           AND stop_sequence >= $2`,
+        [tripId, seq]
+      );
+    }
+
+    await client.query(
+      `INSERT INTO gtfs_stop_times (trip_id, arrival_time, departure_time, stop_id, stop_sequence)
+       VALUES ($1, $2, $3, $4, $5)`,
+      [tripId, arrivalTime, departureTime, stopId, seq]
+    );
+
+    await client.query("COMMIT");
+    return res.json({ message: "Paragem adicionada à trip GTFS.", tripId, stopId, stopSequence: seq });
+  } catch (_error) {
+    await client.query("ROLLBACK").catch(() => {});
+    return res.status(500).json({ message: "Erro ao adicionar paragem na trip GTFS." });
+  } finally {
+    client.release();
+  }
+});
+
+router.delete("/editor/trip-stops", async (req, res) => {
+  const tripId = String(req.query.tripId || req.body?.tripId || "").trim();
+  const stopSequence = toInt(req.query.stopSequence || req.body?.stopSequence);
+  if (!tripId || !Number.isFinite(stopSequence) || stopSequence <= 0) {
+    return res.status(400).json({ message: "Indique tripId e stopSequence válidos." });
+  }
+
+  const client = await db.pool.connect();
+  try {
+    await client.query("BEGIN");
+    const delRes = await client.query(
+      `DELETE FROM gtfs_stop_times
+       WHERE trip_id = $1
+         AND stop_sequence = $2
+       RETURNING trip_id`,
+      [tripId, stopSequence]
+    );
+    if (!delRes.rowCount) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Paragem não encontrada para remoção." });
+    }
+
+    await client.query(
+      `WITH ordered AS (
+         SELECT ctid, ROW_NUMBER() OVER (ORDER BY stop_sequence ASC) AS new_seq
+         FROM gtfs_stop_times
+         WHERE trip_id = $1
+       )
+       UPDATE gtfs_stop_times st
+       SET stop_sequence = o.new_seq
+       FROM ordered o
+       WHERE st.ctid = o.ctid`,
+      [tripId]
+    );
+
+    await client.query("COMMIT");
+    return res.json({ message: "Paragem removida e sequência normalizada.", tripId, removedStopSequence: stopSequence });
+  } catch (_error) {
+    await client.query("ROLLBACK").catch(() => {});
+    return res.status(500).json({ message: "Erro ao remover paragem da trip GTFS." });
+  } finally {
+    client.release();
   }
 });
 

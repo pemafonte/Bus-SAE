@@ -78,6 +78,11 @@ const conflictAlertsListEl = document.getElementById("conflictAlertsList");
 const supLiveMapEl = document.getElementById("supLiveMap");
 const supLiveServicesListEl = document.getElementById("supLiveServicesList");
 const liveServiceFilterSelectEl = document.getElementById("liveServiceFilterSelect");
+const deadheadMovementsListEl = document.getElementById("deadheadMovementsList");
+const deadheadMapEl = document.getElementById("deadheadMap");
+const deadheadFromDateEl = document.getElementById("deadheadFromDate");
+const deadheadToDateEl = document.getElementById("deadheadToDate");
+const deadheadFleetFilterEl = document.getElementById("deadheadFleetFilter");
 const trackerDevicesListEl = document.getElementById("trackerDevicesList");
 const trackerDeviceFormEl = document.getElementById("trackerDeviceForm");
 const trackerWebhookUrlPreviewEl = document.getElementById("trackerWebhookUrlPreview");
@@ -110,6 +115,14 @@ const supPresetIsActiveEl = document.getElementById("supPresetIsActive");
 const supPresetListEl = document.getElementById("supPresetList");
 const supPresetListScopeEl = document.getElementById("supPresetListScope");
 const refreshSupPresetListBtnEl = document.getElementById("refreshSupPresetListBtn");
+const gtfsEditorRouteSelectEl = document.getElementById("gtfsEditorRouteSelect");
+const gtfsEditorTripSelectEl = document.getElementById("gtfsEditorTripSelect");
+const gtfsEditorSummaryEl = document.getElementById("gtfsEditorSummary");
+const gtfsEditorStopsListEl = document.getElementById("gtfsEditorStopsList");
+const gtfsRtPreviewReportEl = document.getElementById("gtfsRtPreviewReport");
+const vehicleRegistryFormEl = document.getElementById("vehicleRegistryForm");
+const vehicleRegistryListEl = document.getElementById("vehicleRegistryList");
+const odometerReconciliationListEl = document.getElementById("odometerReconciliationList");
 
 let driversCache = [];
 let usersCache = [];
@@ -119,6 +132,8 @@ let rosterDaySelectedDriverId = null;
 let supLiveMap = null;
 let supLiveMarkersLayer = null;
 let supLiveRoutesLayer = null;
+let deadheadMap = null;
+let deadheadRouteLayer = null;
 let supLiveRefreshInterval = null;
 let currentLiveServices = [];
 let serviceDetailRouteMap = null;
@@ -131,6 +146,26 @@ let currentSupervisorUserId = null;
 let supervisorAlertsPollTimer = null;
 let supervisorAlertBaselineReady = false;
 let lastSupervisorAlertSignature = "";
+let liveRealtimeStatusFilter = "all";
+const TAB_MODULE_MAP = {
+  tabResumo: "dashboard",
+  tabTempoReal: "operacao",
+  tabServicos: "operacao",
+  tabEscalaDia: "planeamento",
+  tabAlertasConflito: "operacao",
+  tabCriarMotorista: "administracao",
+  tabCriarAcesso: "administracao",
+  tabImportarMotoristas: "dados",
+  tabEditorGtfs: "dados",
+  tabExportarMotoristas: "dados",
+  tabListaMotoristas: "administracao",
+  tabViaturas: "dados",
+  tabIntegracoesGps: "dados",
+  tabMensagensComunicacao: "comunicacao",
+  tabMensagensPresets: "comunicacao",
+  tabParagensServico: "operacao",
+  tabRelatoriosIa: "dados",
+};
 
 function labelEstadoExecucaoServicoPt(code) {
   const k = String(code || "").toLowerCase();
@@ -142,6 +177,20 @@ function labelEstadoExecucaoServicoPt(code) {
     cancelled: "Cancelado",
   };
   return map[k] || code || "—";
+}
+
+function labelCloseModePt(closeMode) {
+  const k = String(closeMode || "").trim().toLowerCase();
+  if (k === "auto_last_stop") return "Auto (última paragem)";
+  if (k === "manual") return "Manual";
+  return "—";
+}
+
+function closeModeBadgeClass(closeMode) {
+  const k = String(closeMode || "").trim().toLowerCase();
+  if (k === "auto_last_stop") return "status-completed";
+  if (k === "manual") return "status-other";
+  return "status-other";
 }
 
 function labelEstadoEscalaPt(code) {
@@ -630,6 +679,7 @@ async function loadServiceDetails(serviceId) {
     `Origem/chapa: ${data.service.plate_number || "-"}`,
     `Frota atual: ${data.service.fleet_number || "-"}`,
     `Estado: ${labelEstadoExecucaoServicoPt(data.service.status)}`,
+    `Modo de fecho: ${labelCloseModePt(data.service.close_mode)}`,
     `Horario: ${data.service.service_schedule || "-"}`,
     `Início: ${data.service.started_at ? new Date(data.service.started_at).toLocaleString() : "-"}`,
     `Chegada: ${data.service.ended_at ? new Date(data.service.ended_at).toLocaleString() : "-"}`,
@@ -859,8 +909,38 @@ function logoutSupervisor() {
   sessionStorage.removeItem(AUTH_SESSION_KEY);
 }
 
+function setSupervisorModule(moduleId, options = {}) {
+  const { preserveCurrentTab = false } = options;
+  if (!moduleId) return;
+  const moduleButtons = document.querySelectorAll(".module-nav-btn");
+  moduleButtons.forEach((btn) => {
+    btn.classList.toggle("active", btn.getAttribute("data-module-target") === moduleId);
+  });
+
+  const tabButtons = document.querySelectorAll(".tab-btn[data-module]");
+  let firstVisibleTabId = "";
+  let activeVisibleTabId = "";
+  tabButtons.forEach((btn) => {
+    const matches = btn.getAttribute("data-module") === moduleId;
+    btn.classList.toggle("hidden", !matches);
+    if (matches) {
+      const tabId = btn.getAttribute("data-tab-target") || "";
+      if (!firstVisibleTabId) firstVisibleTabId = tabId;
+      if (btn.classList.contains("active")) activeVisibleTabId = tabId;
+    }
+  });
+
+  if (preserveCurrentTab && activeVisibleTabId) return;
+  if (!firstVisibleTabId) return;
+  openSupervisorTab(activeVisibleTabId || firstVisibleTabId);
+}
+
 function openSupervisorTab(tabId) {
   if (!tabId) return;
+  const moduleId = TAB_MODULE_MAP[tabId];
+  if (moduleId) {
+    setSupervisorModule(moduleId, { preserveCurrentTab: true });
+  }
   const tabButtons = document.querySelectorAll(".tab-btn");
   const tabPanels = document.querySelectorAll(".tab-panel");
   tabButtons.forEach((b) => {
@@ -873,15 +953,26 @@ function openSupervisorTab(tabId) {
   if (tabId === "tabEscalaDia") {
     loadRosterToday();
   }
-  if (tabId === "tabServicos") {
+  if (tabId === "tabTempoReal" || tabId === "tabServicos") {
     loadLiveServicesMap();
     if (supLiveMap) setTimeout(() => supLiveMap.invalidateSize(), 80);
+    if (tabId === "tabTempoReal") {
+      loadDeadheadMovements();
+      if (deadheadMap) setTimeout(() => deadheadMap.invalidateSize(), 80);
+    }
   }
   if (tabId === "tabAlertasConflito") {
     loadConflictAlerts();
   }
   if (tabId === "tabIntegracoesGps") {
     loadTrackerDevices();
+  }
+  if (tabId === "tabViaturas") {
+    loadVehicleRegistry();
+    loadOdometerReconciliationReport();
+  }
+  if (tabId === "tabEditorGtfs") {
+    loadGtfsEditorLines();
   }
   if (tabId === "tabMensagensComunicacao") {
     loadOpsMessagePresets();
@@ -1055,6 +1146,15 @@ function initTabs() {
       openSupervisorTab(targetId);
     });
   });
+
+  const moduleButtons = document.querySelectorAll(".module-nav-btn");
+  moduleButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const moduleId = btn.getAttribute("data-module-target");
+      setSupervisorModule(moduleId);
+    });
+  });
+  setSupervisorModule("dashboard");
 }
 
 function renderTrackerWebhookExamples() {
@@ -1244,12 +1344,63 @@ async function loadLiveServicesMap() {
     return;
   }
   currentLiveServices = Array.isArray(data) ? data : [];
+  renderLiveRealtimeView();
+}
+
+function computeLiveDelayMinutes(service) {
+  const candidates = [
+    service?.delay_minutes,
+    service?.delay_min,
+    service?.realtime_delay_minutes,
+    service?.realtime_delay_min,
+    service?.next_stop_delay_minutes,
+    service?.next_stop_delay_min,
+  ];
+  for (const value of candidates) {
+    const n = Number(value);
+    if (Number.isFinite(n)) return Math.round(n);
+  }
+  const statusRaw = String(service?.realtime_status || service?.punctuality_status || "").trim().toLowerCase();
+  if (statusRaw.includes("adiant") || statusRaw === "early") return -1;
+  if (statusRaw.includes("atras") || statusRaw === "late") return 1;
+  return 0;
+}
+
+function classifyLiveServiceStatus(service) {
+  const delay = computeLiveDelayMinutes(service);
+  if (delay < 0) return "early";
+  if (delay > 0) return "late";
+  return "on_time";
+}
+
+function updateLiveRealtimeCounters(services) {
+  const allEl = document.getElementById("liveCountAll");
+  const earlyEl = document.getElementById("liveCountEarly");
+  const lateEl = document.getElementById("liveCountLate");
+  if (!allEl || !earlyEl || !lateEl) return;
+  const all = Array.isArray(services) ? services.length : 0;
+  const early = Array.isArray(services) ? services.filter((svc) => classifyLiveServiceStatus(svc) === "early").length : 0;
+  const late = Array.isArray(services) ? services.filter((svc) => classifyLiveServiceStatus(svc) === "late").length : 0;
+  allEl.textContent = String(all);
+  earlyEl.textContent = String(early);
+  lateEl.textContent = String(late);
+}
+
+function getLiveServicesFiltered() {
   const selectedServiceId = String(liveServiceFilterSelectEl?.value || "all");
-  const list =
+  let list =
     selectedServiceId === "all"
       ? currentLiveServices
       : currentLiveServices.filter((svc) => String(svc.id) === selectedServiceId);
+  if (liveRealtimeStatusFilter === "early") {
+    list = list.filter((svc) => classifyLiveServiceStatus(svc) === "early");
+  } else if (liveRealtimeStatusFilter === "late") {
+    list = list.filter((svc) => classifyLiveServiceStatus(svc) === "late");
+  }
+  return list;
+}
 
+async function renderLiveRealtimeView() {
   if (liveServiceFilterSelectEl) {
     const currentValue = String(liveServiceFilterSelectEl.value || "all");
     const options = [
@@ -1263,6 +1414,8 @@ async function loadLiveServicesMap() {
     const exists = currentValue === "all" || currentLiveServices.some((svc) => String(svc.id) === currentValue);
     liveServiceFilterSelectEl.value = exists ? currentValue : "all";
   }
+  updateLiveRealtimeCounters(currentLiveServices);
+  const list = getLiveServicesFiltered();
 
   supLiveServicesListEl.innerHTML = "";
   if (!list.length) {
@@ -1289,7 +1442,10 @@ async function loadLiveServicesMap() {
     }
     const card = document.createElement("article");
     card.className = "service-card-item";
+    const delayMinutes = computeLiveDelayMinutes(svc);
+    const delayClass = getDelayClass(delayMinutes);
     card.innerHTML = `<div><strong>Serviço #${svc.id}</strong> | Linha ${svc.line_code || "-"} | Frota ${svc.fleet_number || "-"} | ${svc.driver_name || "-"}</div>
+      <div><small>Desvio horário:</small> <span class="delay-pill ${delayClass}">${formatDelay(delayMinutes)}</span></div>
       <div class="service-card-actions">
         <button type="button" class="stop-passages-shortcut-btn" data-stop-passages-service-id="${svc.id}">Paragens</button>
       </div>`;
@@ -1348,21 +1504,36 @@ async function loadConflictAlerts() {
     const article = document.createElement("article");
     article.className = "service-card-item";
     const conflictIds = Array.isArray(item.conflict_planned_service_ids) ? item.conflict_planned_service_ids : [];
+    const unassignedIds = Array.isArray(item.unassigned_planned_service_ids) ? item.unassigned_planned_service_ids : [];
     const startLoc = item.start_location || "-";
     const endLoc = item.end_location || "-";
+    const alertType = String(item.alert_type || "roster_conflict");
+    const alertLabel =
+      alertType === "driver_swap_overlap"
+        ? "Conflito após troca"
+        : alertType === "unassigned_service_after_swap"
+          ? "Sem motorista atribuído"
+          : "Conflito";
+    const affectedDriverText = item.affected_driver_name
+      ? `${item.affected_driver_name} (Mec. ${item.affected_driver_mechanic_number || "-"})`
+      : "-";
+    const affectedServiceText = item.affected_service_code || (item.affected_planned_service_id ? `#${item.affected_planned_service_id}` : "-");
     article.innerHTML = `
       <div class="service-card-head">
         <strong>Alerta #${item.id}</strong>
-        <span class="status-badge status-other">Conflito</span>
+        <span class="status-badge status-other">${alertLabel}</span>
       </div>
       <div class="service-card-grid">
         <div><small>Data/Hora alerta</small><div>${item.created_at ? new Date(item.created_at).toLocaleString() : "-"}</div></div>
         <div><small>Motorista</small><div>${item.driver_name || "-"} (Mec. ${item.driver_mechanic_number || "-"})</div></div>
         <div><small>Serviço</small><div>${item.service_code || "-"} (ID plan. ${item.planned_service_id || "-"})</div></div>
+        <div><small>Motorista envolvido</small><div>${affectedDriverText}</div></div>
+        <div><small>Serviço envolvido</small><div>${affectedServiceText}</div></div>
         <div><small>Horário</small><div>${item.service_schedule || "-"}</div></div>
         <div><small>Linha</small><div>${item.line_code || "-"}</div></div>
         <div><small>Origem / destino</small><div>${startLoc} → ${endLoc}</div></div>
         <div><small>IDs em conflito</small><div>${conflictIds.length ? conflictIds.join(", ") : "-"}</div></div>
+        <div><small>Sem motorista atribuído</small><div>${unassignedIds.length ? unassignedIds.join(", ") : "-"}</div></div>
         <div><small>Notas</small><div>${item.notes || "-"}</div></div>
       </div>
     `;
@@ -1653,7 +1824,9 @@ async function loadOverview() {
     `Serviços registados (início ou conclusão neste dia): ${data.total_services}`,
     `Concluídos (data de fim da viagem neste dia): ${data.completed_services}`,
     `Em curso ou em transferência (início neste dia): ${data.in_progress_services}`,
-    `Quilómetros realizados (concluídos): ${n(data.total_km)}`,
+    `Quilómetros em carga (concluídos): ${n(data.total_km)}`,
+    `Quilómetros em vazio: ${n(data.deadhead_km)}`,
+    `Quilómetros totais (carga + vazio): ${n(data.total_km_with_deadhead)}`,
     `Média de quilómetros (concluídos hoje): ${n(data.avg_km)}`,
     `Quilómetros previstos estimados (previstos × média de concluídos nos últimos 12 meses): ${n(data.estimated_planned_km_today)}`,
     `Quilómetros não realizados (estimativa: previsto estimado − realizados): ${n(data.km_not_realized_estimate)}`,
@@ -1714,6 +1887,9 @@ async function loadServices(event) {
         <div><small>Chegada</small><div>${chegada}</div></div>
         <div><small>Quilómetros</small><div>${s.total_km || 0}</div></div>
         <div><small>Estado</small><div>${labelEstadoExecucaoServicoPt(s.status)}</div></div>
+        <div><small>Fecho</small><div><span class="status-badge ${closeModeBadgeClass(s.close_mode)}">${labelCloseModePt(
+      s.close_mode
+    )}</span></div></div>
       </div>
       <div class="service-card-actions">
         <button type="button" class="adjust-btn" data-service-id="${s.id}">Abrir detalhe</button>
@@ -2090,6 +2266,178 @@ async function importGtfsZip() {
   alert("GTFS importado com sucesso.");
 }
 
+function renderGtfsEditorSummary(text) {
+  if (gtfsEditorSummaryEl) gtfsEditorSummaryEl.textContent = text || "";
+}
+
+async function loadGtfsEditorLines() {
+  if (!supToken || !gtfsEditorRouteSelectEl) return;
+  renderGtfsEditorSummary("A carregar linhas GTFS...");
+  const response = await fetch(`${API_BASE}/gtfs/editor/lines`, { headers: getAuthHeaders() });
+  const data = await response.json().catch(() => ([]));
+  if (!response.ok) {
+    renderGtfsEditorSummary(data.message || "Erro ao carregar linhas GTFS.");
+    return;
+  }
+  const rows = Array.isArray(data) ? data : [];
+  gtfsEditorRouteSelectEl.innerHTML = '<option value="">-- Selecionar linha --</option>';
+  rows.forEach((r) => {
+    const option = document.createElement("option");
+    option.value = r.route_id;
+    const short = String(r.route_short_name || "").trim();
+    const long = String(r.route_long_name || "").trim();
+    option.textContent = `${short || r.route_id}${long ? ` - ${long}` : ""} | trips ${r.trips_count || 0} | paragens ${r.stops_count || 0}`;
+    gtfsEditorRouteSelectEl.appendChild(option);
+  });
+  if (gtfsEditorTripSelectEl) {
+    gtfsEditorTripSelectEl.innerHTML = '<option value="">-- Selecionar trip --</option>';
+  }
+  if (gtfsEditorStopsListEl) gtfsEditorStopsListEl.innerHTML = "";
+  renderGtfsEditorSummary(`Linhas GTFS carregadas: ${rows.length}`);
+}
+
+async function loadGtfsEditorTripsByRoute() {
+  if (!supToken || !gtfsEditorRouteSelectEl || !gtfsEditorTripSelectEl) return;
+  const routeId = String(gtfsEditorRouteSelectEl.value || "").trim();
+  gtfsEditorTripSelectEl.innerHTML = '<option value="">-- Selecionar trip --</option>';
+  if (!routeId) {
+    renderGtfsEditorSummary("Selecione uma linha GTFS para listar trips.");
+    return;
+  }
+  renderGtfsEditorSummary(`A carregar trips da linha ${routeId}...`);
+  const response = await fetch(`${API_BASE}/gtfs/editor/trips?routeId=${encodeURIComponent(routeId)}`, {
+    headers: getAuthHeaders(),
+  });
+  const data = await response.json().catch(() => ([]));
+  if (!response.ok) {
+    renderGtfsEditorSummary(data.message || "Erro ao carregar trips GTFS.");
+    return;
+  }
+  const rows = Array.isArray(data) ? data : [];
+  rows.forEach((t) => {
+    const option = document.createElement("option");
+    option.value = t.trip_id;
+    option.textContent = `${t.trip_id} | headsign ${t.trip_headsign || "-"} | dir ${t.direction_id ?? "-"} | paragens ${t.stops_count || 0}`;
+    gtfsEditorTripSelectEl.appendChild(option);
+  });
+  if (gtfsEditorStopsListEl) gtfsEditorStopsListEl.innerHTML = "";
+  renderGtfsEditorSummary(`Trips da linha ${routeId}: ${rows.length}`);
+}
+
+function renderGtfsEditorStops(rows) {
+  if (!gtfsEditorStopsListEl) return;
+  gtfsEditorStopsListEl.innerHTML = "";
+  if (!Array.isArray(rows) || !rows.length) {
+    gtfsEditorStopsListEl.innerHTML = "<div>Sem paragens para esta trip.</div>";
+    return;
+  }
+  rows.forEach((stop) => {
+    const article = document.createElement("article");
+    article.className = "service-card-item";
+    article.innerHTML = `
+      <div class="service-card-head">
+        <strong>#${stop.stop_sequence} ${stop.stop_name || stop.stop_id || "-"}</strong>
+      </div>
+      <div class="service-card-grid">
+        <div><small>stop_id</small><div>${stop.stop_id || "-"}</div></div>
+        <div><small>Hora chegada</small><div>${stop.arrival_time || "-"}</div></div>
+        <div><small>Hora partida</small><div>${stop.departure_time || "-"}</div></div>
+        <div><small>Coordenadas</small><div>${stop.stop_lat ?? "-"}, ${stop.stop_lon ?? "-"}</div></div>
+      </div>
+      <div class="service-card-actions">
+        <button type="button" class="danger-btn" data-gtfs-remove-seq="${stop.stop_sequence}">Remover</button>
+      </div>
+    `;
+    gtfsEditorStopsListEl.appendChild(article);
+  });
+}
+
+async function loadGtfsEditorTripStops() {
+  if (!supToken || !gtfsEditorTripSelectEl) return;
+  const tripId = String(gtfsEditorTripSelectEl.value || "").trim();
+  if (!tripId) {
+    renderGtfsEditorSummary("Selecione uma trip GTFS.");
+    return;
+  }
+  renderGtfsEditorSummary(`A carregar paragens da trip ${tripId}...`);
+  const response = await fetch(`${API_BASE}/gtfs/editor/trip-stops?tripId=${encodeURIComponent(tripId)}`, {
+    headers: getAuthHeaders(),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    renderGtfsEditorSummary(data.message || "Erro ao carregar paragens da trip.");
+    if (gtfsEditorStopsListEl) gtfsEditorStopsListEl.innerHTML = "";
+    return;
+  }
+  renderGtfsEditorStops(data.stops || []);
+  renderGtfsEditorSummary(
+    `Trip ${data.trip?.trip_id || tripId} | route ${data.trip?.route_id || "-"} | headsign ${data.trip?.trip_headsign || "-"} | paragens ${Array.isArray(data.stops) ? data.stops.length : 0}`
+  );
+}
+
+async function addGtfsEditorStop(event) {
+  event.preventDefault();
+  if (!supToken || !gtfsEditorTripSelectEl) return;
+  const tripId = String(gtfsEditorTripSelectEl.value || "").trim();
+  if (!tripId) {
+    alert("Selecione uma trip GTFS antes de adicionar paragem.");
+    return;
+  }
+  const stopId = String(document.getElementById("gtfsEditorAddStopId")?.value || "").trim();
+  const stopName = String(document.getElementById("gtfsEditorAddStopName")?.value || "").trim();
+  const stopLat = String(document.getElementById("gtfsEditorAddStopLat")?.value || "").trim();
+  const stopLon = String(document.getElementById("gtfsEditorAddStopLon")?.value || "").trim();
+  const stopSequence = String(document.getElementById("gtfsEditorAddStopSequence")?.value || "").trim();
+  const arrivalTime = String(document.getElementById("gtfsEditorAddArrivalTime")?.value || "").trim();
+  const departureTime = String(document.getElementById("gtfsEditorAddDepartureTime")?.value || "").trim();
+
+  const payload = {
+    tripId,
+    stopId: stopId || null,
+    stopName: stopName || null,
+    stopLat: stopLat || null,
+    stopLon: stopLon || null,
+    stopSequence: stopSequence || null,
+    arrivalTime: arrivalTime || null,
+    departureTime: departureTime || null,
+  };
+  const response = await fetch(`${API_BASE}/gtfs/editor/trip-stops`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao adicionar paragem GTFS.");
+    return;
+  }
+  alert(data.message || "Paragem adicionada.");
+  event.target.reset();
+  await loadGtfsEditorTripStops();
+}
+
+async function removeGtfsEditorStop(stopSequence) {
+  if (!supToken || !gtfsEditorTripSelectEl) return;
+  const tripId = String(gtfsEditorTripSelectEl.value || "").trim();
+  if (!tripId) return;
+  const confirmed = window.confirm(`Remover paragem da sequência ${stopSequence} da trip ${tripId}?`);
+  if (!confirmed) return;
+  const response = await fetch(
+    `${API_BASE}/gtfs/editor/trip-stops?tripId=${encodeURIComponent(tripId)}&stopSequence=${encodeURIComponent(stopSequence)}`,
+    {
+      method: "DELETE",
+      headers: getAuthHeaders(),
+    }
+  );
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao remover paragem GTFS.");
+    return;
+  }
+  alert(data.message || "Paragem removida.");
+  await loadGtfsEditorTripStops();
+}
+
 async function downloadDriversTemplateCsv() {
   if (!supToken) return;
   const response = await fetch(`${API_BASE}/supervisor/drivers/import-template.csv`, {
@@ -2420,6 +2768,213 @@ async function loadTrackerDevices() {
   });
 }
 
+function ensureDeadheadMap() {
+  if (!deadheadMapEl || deadheadMap) return;
+  deadheadMap = L.map(deadheadMapEl).setView([38.7223, -9.1393], 11);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap contributors",
+  }).addTo(deadheadMap);
+  deadheadRouteLayer = L.layerGroup().addTo(deadheadMap);
+}
+
+function formatDateTimePt(value) {
+  if (!value) return "-";
+  const dt = new Date(value);
+  if (!Number.isFinite(dt.getTime())) return "-";
+  return dt.toLocaleString("pt-PT");
+}
+
+async function loadDeadheadMovements() {
+  if (!supToken || !deadheadMovementsListEl) return;
+  deadheadMovementsListEl.innerHTML = '<article class="service-card-item">A carregar vazios...</article>';
+  try {
+    const params = new URLSearchParams();
+    const from = String(deadheadFromDateEl?.value || "").trim();
+    const to = String(deadheadToDateEl?.value || "").trim();
+    const fleetNumber = String(deadheadFleetFilterEl?.value || "").trim();
+    if (from) params.set("from", from);
+    if (to) params.set("to", to);
+    if (fleetNumber) params.set("fleetNumber", fleetNumber);
+    const query = params.toString() ? `?${params.toString()}` : "";
+    const response = await fetch(`${API_BASE}/integrations/deadhead-movements${query}`, { headers: getAuthHeaders() });
+    const data = await response.json().catch(() => []);
+    if (!response.ok) {
+      deadheadMovementsListEl.innerHTML = `<article class="service-card-item">${data.message || "Erro ao carregar vazios."}</article>`;
+      return;
+    }
+    const rows = Array.isArray(data) ? data : [];
+    if (!rows.length) {
+      deadheadMovementsListEl.innerHTML = '<article class="service-card-item">Sem movimentos em vazio registados.</article>';
+      return;
+    }
+    deadheadMovementsListEl.innerHTML = rows
+      .slice(0, 30)
+      .map(
+        (row) => `<article class="service-card-item">
+          <strong>Vazio #${row.id} | Frota ${row.fleet_number || "-"} | Chapa ${row.plate_number || "-"}</strong>
+          <div>Início: ${formatDateTimePt(row.started_at)}</div>
+          <div>Fim: ${formatDateTimePt(row.ended_at)}</div>
+          <div>Km: ${Number(row.total_km || 0).toFixed(3)}</div>
+          <button type="button" data-deadhead-id="${row.id}">Ver percurso no mapa</button>
+        </article>`
+      )
+      .join("");
+  } catch (_error) {
+    deadheadMovementsListEl.innerHTML = '<article class="service-card-item">Erro de rede ao carregar vazios.</article>';
+  }
+}
+
+function buildDeadheadQueryString() {
+  const params = new URLSearchParams();
+  const from = String(deadheadFromDateEl?.value || "").trim();
+  const to = String(deadheadToDateEl?.value || "").trim();
+  const fleetNumber = String(deadheadFleetFilterEl?.value || "").trim();
+  if (from) params.set("from", from);
+  if (to) params.set("to", to);
+  if (fleetNumber) params.set("fleetNumber", fleetNumber);
+  return params.toString() ? `?${params.toString()}` : "";
+}
+
+async function exportDeadheadCsv() {
+  if (!supToken) return;
+  const response = await fetch(`${API_BASE}/integrations/deadhead-movements/export.csv${buildDeadheadQueryString()}`, {
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    alert(data.message || "Erro ao exportar vazios CSV.");
+    return;
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "movimentos_vazio.csv";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function exportDeadheadXlsx() {
+  if (!supToken) return;
+  const response = await fetch(`${API_BASE}/integrations/deadhead-movements/export.xlsx${buildDeadheadQueryString()}`, {
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    alert(data.message || "Erro ao exportar vazios Excel.");
+    return;
+  }
+  const blob = await response.blob();
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "movimentos_vazio.xlsx";
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function loadOdometerReconciliationReport() {
+  if (!supToken || !odometerReconciliationListEl) return;
+  const dateInputEl = document.getElementById("odometerReportDate");
+  const reportDate = String(dateInputEl?.value || "").trim();
+  if (!reportDate) {
+    alert("Selecione a data do relatório.");
+    return;
+  }
+  odometerReconciliationListEl.innerHTML = '<article class="service-card-item">A carregar conciliação...</article>';
+  const response = await fetch(
+    `${API_BASE}/integrations/odometer-reconciliation/daily?date=${encodeURIComponent(reportDate)}`,
+    { headers: getAuthHeaders() }
+  );
+  const data = await response.json().catch(() => []);
+  if (!response.ok) {
+    odometerReconciliationListEl.innerHTML = `<article class="service-card-item">${data.message || "Erro ao carregar relatório."}</article>`;
+    return;
+  }
+  const rows = Array.isArray(data) ? data : [];
+  if (!rows.length) {
+    odometerReconciliationListEl.innerHTML = '<article class="service-card-item">Sem dados para a data selecionada.</article>';
+    return;
+  }
+  odometerReconciliationListEl.innerHTML = rows
+    .map(
+      (row) => `<article class="service-card-item">
+        <strong>Frota ${row.fleet_number || "-"}</strong>
+        <div>Matrícula: ${row.plate_number || "-"}</div>
+        <div>Km app carga: ${Number(row.app_km_load || 0).toFixed(3)}</div>
+        <div>Km app vazio: ${Number(row.app_km_deadhead || 0).toFixed(3)}</div>
+        <div>Km app total: ${Number(row.app_km_total || 0).toFixed(3)}</div>
+        <div>Km odómetro (dia): ${
+          row.odometer_km_day == null && row.odometer_km_from_services == null
+            ? "-"
+            : Number(row.odometer_km_day ?? row.odometer_km_from_services).toFixed(3)
+        }</div>
+        <div>Diferença odómetro - app: ${
+          row.odometer_vs_app_diff_km == null ? "-" : Number(row.odometer_vs_app_diff_km).toFixed(3)
+        }</div>
+      </article>`
+    )
+    .join("");
+}
+
+async function loadDeadheadMovementDetail(movementId) {
+  if (!supToken || !Number.isFinite(Number(movementId))) return;
+  ensureDeadheadMap();
+  if (!deadheadMap || !deadheadRouteLayer) return;
+  const response = await fetch(`${API_BASE}/integrations/deadhead-movements/${movementId}`, {
+    headers: getAuthHeaders(),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao carregar percurso do vazio.");
+    return;
+  }
+  const coords = data?.route_geojson?.geometry?.coordinates || [];
+  const latLngs = coords.map((c) => [Number(c[1]), Number(c[0])]).filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+  deadheadRouteLayer.clearLayers();
+  if (!latLngs.length) {
+    alert("Este vazio não tem percurso disponível.");
+    return;
+  }
+  const line = L.polyline(latLngs, { color: "#f97316", weight: 4 }).addTo(deadheadRouteLayer);
+  L.circleMarker(latLngs[0], { radius: 6, color: "#16a34a", weight: 2 }).addTo(deadheadRouteLayer);
+  L.circleMarker(latLngs[latLngs.length - 1], { radius: 6, color: "#dc2626", weight: 2 }).addTo(deadheadRouteLayer);
+  deadheadMap.fitBounds(line.getBounds(), { padding: [20, 20] });
+}
+
+async function loadGtfsRtPreview(kind) {
+  if (!supToken || !gtfsRtPreviewReportEl) return;
+  const map = {
+    vehicles: "/gtfs-rt/vehicle-positions.json",
+    tripUpdates: "/gtfs-rt/trip-updates.json",
+    alerts: "/gtfs-rt/service-alerts.json",
+  };
+  const url = map[kind];
+  if (!url) return;
+  gtfsRtPreviewReportEl.textContent = `A carregar ${kind}...`;
+  try {
+    const response = await fetch(`${API_BASE}${url}`, {
+      headers: getAuthHeaders(),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      gtfsRtPreviewReportEl.textContent = data.message || `Erro ao carregar preview GTFS-RT (${kind}).`;
+      return;
+    }
+    const entities = Array.isArray(data?.entity) ? data.entity : [];
+    gtfsRtPreviewReportEl.textContent = [
+      `Feed: ${kind}`,
+      `timestamp: ${data?.header?.timestamp || "-"}`,
+      `entidades: ${entities.length}`,
+      "",
+      JSON.stringify(data, null, 2),
+    ].join("\n");
+  } catch (_error) {
+    gtfsRtPreviewReportEl.textContent = `Erro de rede ao carregar ${kind}.`;
+  }
+}
+
 async function upsertTrackerDevice(device, nextIsActive) {
   if (!supToken) return;
   const payload = {
@@ -2470,6 +3025,102 @@ async function saveTrackerDevice(event) {
   document.getElementById("trackerIsActive").value = "true";
   await loadTrackerDevices();
   alert(`Dispositivo ${data.imei} guardado com sucesso.`);
+}
+
+function formatVehicleKm(value) {
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "-";
+  return `${num.toFixed(1)} km`;
+}
+
+async function loadVehicleRegistry() {
+  if (!supToken || !vehicleRegistryListEl) return;
+  vehicleRegistryListEl.innerHTML = '<article class="service-card-item">A carregar viaturas...</article>';
+  try {
+    const response = await fetch(`${API_BASE}/integrations/teltonika/devices`, { headers: getAuthHeaders() });
+    const data = await response.json().catch(() => []);
+    if (!response.ok) {
+      vehicleRegistryListEl.innerHTML = `<article class="service-card-item">${data.message || "Erro ao carregar viaturas."}</article>`;
+      return;
+    }
+    const rows = Array.isArray(data) ? data : [];
+    if (!rows.length) {
+      vehicleRegistryListEl.innerHTML = '<article class="service-card-item">Sem viaturas registadas.</article>';
+      return;
+    }
+    vehicleRegistryListEl.innerHTML = rows
+      .map((item) => {
+        const imei = String(item.imei || "");
+        return `
+          <article class="service-card-item">
+            <strong>Frota ${item.fleet_number || "-"}</strong>
+            <div>IMEI: ${imei || "-"}</div>
+            <div>Matrícula: ${item.plate_number || "-"}</div>
+            <div>Km instalação: ${formatVehicleKm(item.install_odometer_km)}</div>
+            <div>Km atual: ${formatVehicleKm(item.current_odometer_km)}</div>
+            <div>Estado: ${asPgBool(item.is_active) ? "Ativa" : "Inativa"}</div>
+            <div class="stack-actions">
+              <input type="number" step="0.1" min="0" id="vehicle-current-${imei}" placeholder="Novo km atual" />
+              <button type="button" data-vehicle-imei="${imei}" class="vehicle-km-save-btn">Guardar km atual</button>
+            </div>
+          </article>
+        `;
+      })
+      .join("");
+  } catch (_error) {
+    vehicleRegistryListEl.innerHTML = '<article class="service-card-item">Erro de rede ao carregar viaturas.</article>';
+  }
+}
+
+async function saveVehicleRegistry(event) {
+  event.preventDefault();
+  if (!supToken || !vehicleRegistryFormEl) return;
+  const imei = normalizeImeiDigits(document.getElementById("vehicleImei")?.value);
+  const fleetNumber = document.getElementById("vehicleFleetNumber")?.value?.trim() || "";
+  const plateNumber = document.getElementById("vehiclePlateNumber")?.value?.trim() || "";
+  const installOdometerKmRaw = document.getElementById("vehicleInstallOdometerKm")?.value;
+  const currentOdometerKmRaw = document.getElementById("vehicleCurrentOdometerKm")?.value;
+  const isActive = document.getElementById("vehicleIsActive")?.value === "true";
+  if (!imei || !fleetNumber) {
+    alert("IMEI e nº de frota são obrigatórios.");
+    return;
+  }
+  const payload = {
+    imei,
+    fleetNumber,
+    plateNumber,
+    isActive,
+    installOdometerKm: installOdometerKmRaw === "" ? null : Number(installOdometerKmRaw),
+    currentOdometerKm: currentOdometerKmRaw === "" ? null : Number(currentOdometerKmRaw),
+  };
+  const response = await fetch(`${API_BASE}/integrations/teltonika/devices`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao guardar viatura.");
+    return;
+  }
+  vehicleRegistryFormEl.reset();
+  document.getElementById("vehicleIsActive").value = "true";
+  await loadVehicleRegistry();
+}
+
+async function updateVehicleCurrentKm(imei, currentOdometerKm) {
+  if (!supToken) return;
+  const response = await fetch(`${API_BASE}/integrations/teltonika/devices/${encodeURIComponent(imei)}/odometer`, {
+    method: "PATCH",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ currentOdometerKm }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao atualizar km da viatura.");
+    return;
+  }
+  await loadVehicleRegistry();
 }
 
 function renderRosterDayServiceRows(rows) {
@@ -2706,6 +3357,29 @@ document.getElementById("refreshDriversBtn").addEventListener("click", loadDrive
 if (trackerDeviceFormEl) {
   trackerDeviceFormEl.addEventListener("submit", saveTrackerDevice);
 }
+if (vehicleRegistryFormEl) {
+  vehicleRegistryFormEl.addEventListener("submit", saveVehicleRegistry);
+}
+const refreshVehicleRegistryBtn = document.getElementById("refreshVehicleRegistryBtn");
+if (refreshVehicleRegistryBtn) {
+  refreshVehicleRegistryBtn.addEventListener("click", loadVehicleRegistry);
+}
+if (vehicleRegistryListEl && !vehicleRegistryListEl.dataset.vehicleKmDelegation) {
+  vehicleRegistryListEl.dataset.vehicleKmDelegation = "1";
+  vehicleRegistryListEl.addEventListener("click", (event) => {
+    const btn = event.target.closest(".vehicle-km-save-btn");
+    if (!btn) return;
+    const imei = String(btn.getAttribute("data-vehicle-imei") || "");
+    if (!imei) return;
+    const input = document.getElementById(`vehicle-current-${imei}`);
+    const value = Number(input?.value);
+    if (!Number.isFinite(value) || value < 0) {
+      alert("Introduza um valor de km válido.");
+      return;
+    }
+    updateVehicleCurrentKm(imei, value);
+  });
+}
 const copyTrackerWebhookConfigBtn = document.getElementById("copyTrackerWebhookConfigBtn");
 if (copyTrackerWebhookConfigBtn) {
   copyTrackerWebhookConfigBtn.addEventListener("click", copyTrackerWebhookConfig);
@@ -2714,6 +3388,64 @@ const refreshTrackerDevicesBtn = document.getElementById("refreshTrackerDevicesB
 if (refreshTrackerDevicesBtn) {
   refreshTrackerDevicesBtn.addEventListener("click", loadTrackerDevices);
 }
+const refreshDeadheadMovementsBtn = document.getElementById("refreshDeadheadMovementsBtn");
+if (refreshDeadheadMovementsBtn) {
+  refreshDeadheadMovementsBtn.addEventListener("click", loadDeadheadMovements);
+}
+const exportDeadheadCsvBtn = document.getElementById("exportDeadheadCsvBtn");
+if (exportDeadheadCsvBtn) {
+  exportDeadheadCsvBtn.addEventListener("click", exportDeadheadCsv);
+}
+const exportDeadheadXlsxBtn = document.getElementById("exportDeadheadXlsxBtn");
+if (exportDeadheadXlsxBtn) {
+  exportDeadheadXlsxBtn.addEventListener("click", exportDeadheadXlsx);
+}
+if (deadheadFromDateEl && !deadheadFromDateEl.value) {
+  deadheadFromDateEl.value = todayISOInLisbon();
+}
+if (deadheadToDateEl && !deadheadToDateEl.value) {
+  deadheadToDateEl.value = todayISOInLisbon();
+}
+if (deadheadFromDateEl) deadheadFromDateEl.addEventListener("change", loadDeadheadMovements);
+if (deadheadToDateEl) deadheadToDateEl.addEventListener("change", loadDeadheadMovements);
+if (deadheadFleetFilterEl) {
+  deadheadFleetFilterEl.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      loadDeadheadMovements();
+    }
+  });
+}
+const loadOdometerReportBtn = document.getElementById("loadOdometerReportBtn");
+if (loadOdometerReportBtn) {
+  loadOdometerReportBtn.addEventListener("click", loadOdometerReconciliationReport);
+}
+const odometerReportDateEl = document.getElementById("odometerReportDate");
+if (odometerReportDateEl && !odometerReportDateEl.value) {
+  odometerReportDateEl.value = todayISOInLisbon();
+}
+if (deadheadMovementsListEl && !deadheadMovementsListEl.dataset.deadheadDelegation) {
+  deadheadMovementsListEl.dataset.deadheadDelegation = "1";
+  deadheadMovementsListEl.addEventListener("click", (event) => {
+    const btn = event.target.closest("[data-deadhead-id]");
+    if (!btn) return;
+    const id = Number(btn.getAttribute("data-deadhead-id"));
+    if (!Number.isFinite(id)) return;
+    loadDeadheadMovementDetail(id);
+  });
+}
+const previewGtfsRtVehiclesBtn = document.getElementById("previewGtfsRtVehiclesBtn");
+if (previewGtfsRtVehiclesBtn) {
+  previewGtfsRtVehiclesBtn.addEventListener("click", () => loadGtfsRtPreview("vehicles"));
+}
+const previewGtfsRtTripUpdatesBtn = document.getElementById("previewGtfsRtTripUpdatesBtn");
+if (previewGtfsRtTripUpdatesBtn) {
+  previewGtfsRtTripUpdatesBtn.addEventListener("click", () => loadGtfsRtPreview("tripUpdates"));
+}
+const previewGtfsRtAlertsBtn = document.getElementById("previewGtfsRtAlertsBtn");
+if (previewGtfsRtAlertsBtn) {
+  previewGtfsRtAlertsBtn.addEventListener("click", () => loadGtfsRtPreview("alerts"));
+}
 const loadStopPassagesBtn = document.getElementById("loadStopPassagesBtn");
 if (loadStopPassagesBtn) {
   loadStopPassagesBtn.addEventListener("click", loadStopPassages);
@@ -2721,6 +3453,31 @@ if (loadStopPassagesBtn) {
 document.getElementById("importRosterPreviewBtn").addEventListener("click", () => importRosterFile(true));
 document.getElementById("importRosterBtn").addEventListener("click", () => importRosterFile(false));
 document.getElementById("importGtfsBtn").addEventListener("click", importGtfsZip);
+const refreshGtfsEditorLinesBtn = document.getElementById("refreshGtfsEditorLinesBtn");
+if (refreshGtfsEditorLinesBtn) {
+  refreshGtfsEditorLinesBtn.addEventListener("click", loadGtfsEditorLines);
+}
+if (gtfsEditorRouteSelectEl) {
+  gtfsEditorRouteSelectEl.addEventListener("change", loadGtfsEditorTripsByRoute);
+}
+const loadGtfsEditorTripStopsBtn = document.getElementById("loadGtfsEditorTripStopsBtn");
+if (loadGtfsEditorTripStopsBtn) {
+  loadGtfsEditorTripStopsBtn.addEventListener("click", loadGtfsEditorTripStops);
+}
+const gtfsEditorAddStopForm = document.getElementById("gtfsEditorAddStopForm");
+if (gtfsEditorAddStopForm) {
+  gtfsEditorAddStopForm.addEventListener("submit", addGtfsEditorStop);
+}
+if (gtfsEditorStopsListEl && !gtfsEditorStopsListEl.dataset.gtfsEditorDelegation) {
+  gtfsEditorStopsListEl.dataset.gtfsEditorDelegation = "1";
+  gtfsEditorStopsListEl.addEventListener("click", (e) => {
+    const btn = e.target.closest("[data-gtfs-remove-seq]");
+    if (!btn) return;
+    const seq = Number(btn.getAttribute("data-gtfs-remove-seq"));
+    if (!Number.isFinite(seq)) return;
+    removeGtfsEditorStop(seq);
+  });
+}
 document.getElementById("closeServiceDrawerBtn").addEventListener("click", closeServiceDrawer);
 document.getElementById("serviceDrawerBackdrop").addEventListener("click", closeServiceDrawer);
 document.getElementById("serviceAdjustForm").addEventListener("submit", saveServiceAdjust);
@@ -2757,62 +3514,22 @@ if (liveServiceFilterSelectEl) {
       loadLiveServicesMap();
       return;
     }
-    const selectedServiceId = String(liveServiceFilterSelectEl.value || "all");
-    const filtered =
-      selectedServiceId === "all"
-        ? currentLiveServices
-        : currentLiveServices.filter((svc) => String(svc.id) === selectedServiceId);
-
-    supLiveMarkersLayer.clearLayers();
-    if (supLiveRoutesLayer) supLiveRoutesLayer.clearLayers();
-    supLiveServicesListEl.innerHTML = "";
-    const bounds = [];
-    filtered.forEach((svc) => {
-      const lat = Number(svc.lat);
-      const lng = Number(svc.lng);
-      const lineColor = resolveLineColorHex(svc.route_color);
-      if (Number.isFinite(lat) && Number.isFinite(lng)) {
-        const marker = L.marker([lat, lng], {
-          icon: buildSupervisorBusIcon(svc.fleet_number, lineColor),
-        });
-        marker.bindPopup(
-          `Serviço #${svc.id}<br/>Linha ${svc.line_code || "-"}<br/>Motorista: ${svc.driver_name || "-"}<br/>Horário: ${svc.service_schedule || "-"}`
-        );
-        supLiveMarkersLayer.addLayer(marker);
-        bounds.push([lat, lng]);
-      }
-      const card = document.createElement("article");
-      card.className = "service-card-item";
-      card.innerHTML = `<div><strong>Serviço #${svc.id}</strong> | Linha ${svc.line_code || "-"} | Frota ${svc.fleet_number || "-"} | ${svc.driver_name || "-"}</div>
-        <div class="service-card-actions">
-          <button type="button" class="stop-passages-shortcut-btn" data-stop-passages-service-id="${svc.id}">Paragens</button>
-        </div>`;
-      supLiveServicesListEl.appendChild(card);
-    });
-    if (!filtered.length) {
-      supLiveServicesListEl.innerHTML = "<div>Sem serviços em execução neste momento.</div>";
-    } else if (bounds.length) {
-      supLiveMap.fitBounds(bounds, { padding: [20, 20], maxZoom: 15 });
-    }
-    if (supLiveRoutesLayer && filtered.length) {
-      (async () => {
-        for (const svc of filtered) {
-          try {
-            const points = await loadSupervisorReferenceRoute(svc.id);
-            const latLngs = points
-              .map((p) => [Number(p.lat), Number(p.lng)])
-              .filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
-            if (latLngs.length < 2) continue;
-            const lineColor = resolveLineColorHex(svc.route_color, "#f97316");
-            L.polyline(latLngs, { color: lineColor, weight: 3, opacity: 0.65 }).addTo(supLiveRoutesLayer);
-          } catch (_e) {
-            // ignore
-          }
-        }
-      })();
-    }
+    renderLiveRealtimeView();
   });
 }
+document.querySelectorAll(".live-status-chip").forEach((btn) => {
+  btn.addEventListener("click", () => {
+    liveRealtimeStatusFilter = btn.getAttribute("data-live-status") || "all";
+    document.querySelectorAll(".live-status-chip").forEach((chip) => {
+      chip.classList.toggle("active", chip === btn);
+    });
+    if (!currentLiveServices.length) {
+      loadLiveServicesMap();
+      return;
+    }
+    renderLiveRealtimeView();
+  });
+});
 const rosterDayCardsEl = document.getElementById("rosterDayCards");
 if (rosterDayCardsEl) {
   rosterDayCardsEl.addEventListener("submit", async (event) => {

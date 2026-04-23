@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="pt">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Guia GTFS Real-Time</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="supervisor-page">
+    <main class="container">
+      <h1>Guia GTFS Real-Time (GTFS-RT)</h1>
+      <p class="field-help field-help-tight">
+        Este guia mostra como consumir os feeds GTFS-RT da API para posição de viaturas, atualizações de viagem e alertas
+        operacionais.
+      </p>
+
+      <section class="card">
+        <h2>1) Endpoints disponíveis</h2>
+        <h3>Protobuf (produção)</h3>
+        <pre>GET /gtfs-rt/vehicle-positions.pb
+GET /gtfs-rt/trip-updates.pb
+GET /gtfs-rt/service-alerts.pb</pre>
+
+        <h3>JSON (debug e testes)</h3>
+        <pre>GET /gtfs-rt/vehicle-positions.json
+GET /gtfs-rt/trip-updates.json
+GET /gtfs-rt/service-alerts.json</pre>
+      </section>
+
+      <section class="card">
+        <h2>2) Segurança opcional por token</h2>
+        <p>
+          Se definir <code>GTFS_RT_TOKEN</code> no <code>backend/.env</code>, os feeds exigem autenticação por:
+        </p>
+        <ul>
+          <li><code>Authorization: Bearer &lt;GTFS_RT_TOKEN&gt;</code>, ou</li>
+          <li>query param <code>?token=&lt;GTFS_RT_TOKEN&gt;</code>.</li>
+        </ul>
+        <pre>GTFS_RT_TOKEN=defina_um_token_forte</pre>
+      </section>
+
+      <section class="card">
+        <h2>3) O que cada feed entrega</h2>
+        <ol class="tracker-checklist-ol">
+          <li>
+            <strong>VehiclePositions</strong>: latitude/longitude, velocidade, bearing, identificação da viatura, trip e
+            route.
+          </li>
+          <li>
+            <strong>TripUpdates</strong>: atraso estimado da viagem e próxima paragem prevista (quando disponível).
+          </li>
+          <li>
+            <strong>ServiceAlerts</strong>: alertas operacionais (ex.: transferências pendentes e conflitos registados).
+          </li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2>4) Exemplos de consumo rápido</h2>
+        <h3>4.1 JSON (debug imediato)</h3>
+        <pre>curl "http://localhost:4000/gtfs-rt/vehicle-positions.json"
+curl "http://localhost:4000/gtfs-rt/trip-updates.json"
+curl "http://localhost:4000/gtfs-rt/service-alerts.json"</pre>
+
+        <h3>4.2 Protobuf com token</h3>
+        <pre>curl -H "Authorization: Bearer &lt;GTFS_RT_TOKEN&gt;" \
+  "http://localhost:4000/gtfs-rt/vehicle-positions.pb" --output vehicle-positions.pb</pre>
+      </section>
+
+      <section class="card">
+        <h2>5) Checklist de implementação prática</h2>
+        <ol class="tracker-checklist-ol">
+          <li>Garantir importação GTFS estático atualizada (<code>/gtfs/import</code>).</li>
+          <li>Garantir serviços em execução com GPS a entrar em <code>service_points</code>.</li>
+          <li>Ativar token GTFS-RT em produção (recomendado).</li>
+          <li>Publicar URLs dos feeds no consumidor externo (app de passageiros / broker).</li>
+          <li>Monitorizar disponibilidade dos endpoints e latência de atualização.</li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2>6) Limitações atuais e evolução recomendada</h2>
+        <ul>
+          <li>TripUpdates usa atraso estimado com base no estado operacional atual.</li>
+          <li>ServiceAlerts usa alertas operacionais internos já existentes na plataforma.</li>
+          <li>
+            Próxima evolução recomendada: publicar também uma camada de ocupação por viatura e severidade de alertas por
+            linha.
+          </li>
+        </ul>
+      </section>
+
+      <section class="card">
+        <h2>7) Links úteis</h2>
+        <p>
+          <a href="/frontend/supervisor.html">Abrir Painel do Supervisor</a><br />
+          <a href="/frontend/teltonika-guide.html">Abrir Guia Teltonika</a><br />
+          <a href="/frontend/stop-announcements-guide.html">Abrir Guia Sistema Sonoro de Paragens</a><br />
+          <a href="/health">Health check da API</a>
+        </p>
+      </section>
+    </main>
+    <footer class="app-signature">Direitos Reservados pela RDL, Product powered by Pedro Fonte.</footer>
+  </body>
+</html>

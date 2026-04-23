@@ -2,12 +2,19 @@ const express = require("express");
 const db = require("../db");
 const authMiddleware = require("../middleware/auth");
 const { requireRoles } = require("../middleware/roles");
-const { minDistanceToPolylineMeters } = require("../utils/distance");
-const { getShapePointsByTripId } = require("../utils/gtfsTripResolve");
+const XLSX = require("xlsx");
+const { calculatePathDistance, minDistanceToPolylineMeters, haversineMeters } = require("../utils/distance");
+const { findBestTripForLine, getShapePointsByTripId, getStopsByTripId } = require("../utils/gtfsTripResolve");
+const { resolveTotalKmWithPlannedFallback } = require("../utils/plannedKmFallback");
+const { getRosterServiceDateForExecution } = require("../utils/rosterServiceDate");
 
 const router = express.Router();
 let trackerTablesEnsured = false;
 let servicePointsQualityColumnsEnsured = false;
+let deadheadTablesEnsured = false;
+let serviceOdometerColumnsEnsured = false;
+let odometerLogsTableEnsured = false;
+let serviceStopProgressEnsured = false;
 
 async function ensureTrackerTables() {
   if (trackerTablesEnsured) return;
@@ -19,9 +26,24 @@ async function ensureTrackerTables() {
       plate_number VARCHAR(50),
       provider VARCHAR(40) NOT NULL DEFAULT 'teltonika',
       is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      install_odometer_km NUMERIC(12,1),
+      current_odometer_km NUMERIC(12,1),
+      current_odometer_updated_at TIMESTAMPTZ,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
+  );
+  await db.query(
+    `ALTER TABLE tracker_devices
+       ADD COLUMN IF NOT EXISTS install_odometer_km NUMERIC(12,1)`
+  );
+  await db.query(
+    `ALTER TABLE tracker_devices
+       ADD COLUMN IF NOT EXISTS current_odometer_km NUMERIC(12,1)`
+  );
+  await db.query(
+    `ALTER TABLE tracker_devices
+       ADD COLUMN IF NOT EXISTS current_odometer_updated_at TIMESTAMPTZ`
   );
   await db.query(
     `CREATE INDEX IF NOT EXISTS idx_tracker_devices_fleet
@@ -53,6 +75,289 @@ async function ensureServicePointsQualityColumns() {
        ADD COLUMN IF NOT EXISTS point_source VARCHAR(20) NOT NULL DEFAULT 'mobile'`
   );
   servicePointsQualityColumnsEnsured = true;
+}
+
+async function ensureDeadheadTables() {
+  if (deadheadTablesEnsured) return;
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS deadhead_movements (
+      id BIGSERIAL PRIMARY KEY,
+      imei VARCHAR(40) NOT NULL,
+      fleet_number VARCHAR(50),
+      plate_number VARCHAR(50),
+      started_at TIMESTAMPTZ NOT NULL,
+      ended_at TIMESTAMPTZ NOT NULL,
+      start_lat NUMERIC(10,7),
+      start_lng NUMERIC(10,7),
+      end_lat NUMERIC(10,7),
+      end_lng NUMERIC(10,7),
+      total_km NUMERIC(12,3) NOT NULL DEFAULT 0,
+      points_count INT NOT NULL DEFAULT 0,
+      open_state BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS deadhead_points (
+      id BIGSERIAL PRIMARY KEY,
+      movement_id BIGINT NOT NULL REFERENCES deadhead_movements(id) ON DELETE CASCADE,
+      lat NUMERIC(10,7) NOT NULL,
+      lng NUMERIC(10,7) NOT NULL,
+      captured_at TIMESTAMPTZ NOT NULL,
+      speed_kmh NUMERIC(8,2),
+      heading_deg NUMERIC(6,2),
+      accuracy_m NUMERIC(8,2)
+    )`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_deadhead_movements_open
+     ON deadhead_movements(imei, open_state, updated_at DESC)`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_deadhead_movements_started
+     ON deadhead_movements(started_at DESC)`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_deadhead_points_movement
+     ON deadhead_points(movement_id, captured_at ASC)`
+  );
+  deadheadTablesEnsured = true;
+}
+
+async function ensureServiceOdometerColumns() {
+  if (serviceOdometerColumnsEnsured) return;
+  await db.query(
+    `ALTER TABLE services
+       ADD COLUMN IF NOT EXISTS vehicle_odometer_start_km NUMERIC(12,1)`
+  );
+  await db.query(
+    `ALTER TABLE services
+       ADD COLUMN IF NOT EXISTS vehicle_odometer_end_km NUMERIC(12,1)`
+  );
+  await db.query(
+    `ALTER TABLE services
+       ADD COLUMN IF NOT EXISTS close_mode VARCHAR(30)`
+  );
+  serviceOdometerColumnsEnsured = true;
+}
+
+async function ensureOdometerLogsTable() {
+  if (odometerLogsTableEnsured) return;
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS vehicle_odometer_logs (
+      id BIGSERIAL PRIMARY KEY,
+      imei VARCHAR(40),
+      fleet_number VARCHAR(50),
+      plate_number VARCHAR(50),
+      odometer_km NUMERIC(12,1) NOT NULL,
+      captured_at TIMESTAMPTZ NOT NULL,
+      source VARCHAR(30) NOT NULL DEFAULT 'tracker',
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_vehicle_odometer_logs_captured
+     ON vehicle_odometer_logs(captured_at DESC)`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_vehicle_odometer_logs_fleet
+     ON vehicle_odometer_logs(fleet_number, captured_at DESC)`
+  );
+  odometerLogsTableEnsured = true;
+}
+
+async function ensureServiceStopProgressTable() {
+  if (serviceStopProgressEnsured) return;
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS service_stop_progress (
+      service_id BIGINT PRIMARY KEY REFERENCES services(id) ON DELETE CASCADE,
+      last_passed_stop_id VARCHAR(120),
+      last_passed_stop_sequence INT,
+      last_passed_at TIMESTAMPTZ,
+      last_announced_stop_id VARCHAR(120),
+      last_announced_stop_sequence INT,
+      last_announcement_type VARCHAR(20),
+      last_announced_at TIMESTAMPTZ,
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  serviceStopProgressEnsured = true;
+}
+
+function csvEscape(value) {
+  const raw = value == null ? "" : String(value);
+  return `"${raw.replace(/"/g, '""')}"`;
+}
+
+function buildDateBounds(rawFrom, rawTo) {
+  const from = String(rawFrom || "").trim();
+  const to = String(rawTo || "").trim();
+  const fromTs = from ? `${from}T00:00:00` : "";
+  const toTs = to ? `${to}T23:59:59.999` : "";
+  return { fromTs, toTs };
+}
+
+async function registerVehicleOdometerLog(mapping, event) {
+  const odometerKm = Number(event?.odometerKm);
+  if (!Number.isFinite(odometerKm) || odometerKm < 0) return;
+  await ensureTrackerTables();
+  await ensureOdometerLogsTable();
+  const imei = String(mapping?.imei || event?.imei || "").trim() || null;
+  const fleetNumber = String(mapping?.fleet_number || event?.fleetNumber || "").trim() || null;
+  const plateNumber = String(mapping?.plate_number || event?.plateNumber || "").trim() || null;
+  const capturedAt = parseCapturedAtIso(event?.capturedAt).toISOString();
+  await db.query(
+    `INSERT INTO vehicle_odometer_logs (imei, fleet_number, plate_number, odometer_km, captured_at, source)
+     VALUES ($1, $2, $3, $4, $5, 'tracker')`,
+    [imei, fleetNumber, plateNumber, odometerKm, capturedAt]
+  );
+  if (imei) {
+    await db.query(
+      `UPDATE tracker_devices
+       SET current_odometer_km = $2,
+           current_odometer_updated_at = NOW(),
+           updated_at = NOW()
+       WHERE imei = $1`,
+      [imei, odometerKm]
+    );
+  }
+}
+
+function parseCapturedAtIso(value) {
+  const parsed = value ? new Date(value) : new Date();
+  return Number.isFinite(parsed.getTime()) ? parsed : new Date();
+}
+
+function geoDistanceMeters(aLat, aLng, bLat, bLng) {
+  const toRad = (deg) => (Number(deg) * Math.PI) / 180;
+  const R = 6371000;
+  const lat1 = Number(aLat);
+  const lng1 = Number(aLng);
+  const lat2 = Number(bLat);
+  const lng2 = Number(bLng);
+  if (![lat1, lng1, lat2, lng2].every(Number.isFinite)) return null;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const p1 = toRad(lat1);
+  const p2 = toRad(lat2);
+  const h =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(p1) * Math.cos(p2) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(h), Math.sqrt(1 - h));
+  return R * c;
+}
+
+async function closeOpenDeadheadMovementByDevice(mapping, endedAt) {
+  const fleetNumber = String(mapping?.fleet_number || "").trim();
+  const plateNumber = String(mapping?.plate_number || "").trim();
+  const imei = String(mapping?.imei || "").trim();
+  if (!imei && !fleetNumber && !plateNumber) return;
+  await db.query(
+    `UPDATE deadhead_movements
+     SET open_state = FALSE,
+         ended_at = GREATEST(ended_at, $2::timestamptz),
+         updated_at = NOW()
+     WHERE open_state = TRUE
+       AND (
+         ($1 <> '' AND imei = $1)
+         OR ($3 <> '' AND LOWER(TRIM(COALESCE(fleet_number, ''))) = LOWER(TRIM($3)))
+         OR ($4 <> '' AND LOWER(TRIM(COALESCE(plate_number, ''))) = LOWER(TRIM($4)))
+       )`,
+    [imei, endedAt.toISOString(), fleetNumber, plateNumber]
+  );
+}
+
+async function upsertDeadheadMovementPoint(mapping, point) {
+  await ensureDeadheadTables();
+  const imei = String(mapping?.imei || "").trim();
+  if (!imei) return;
+  const fleetNumber = String(mapping?.fleet_number || "").trim() || null;
+  const plateNumber = String(mapping?.plate_number || "").trim() || null;
+  const capturedAt = parseCapturedAtIso(point.capturedAt);
+  const splitGapMs = 20 * 60 * 1000;
+  const movingSpeedThreshold = 2.5;
+  const hasMovingEvidence = Number(point.speedKmh) > movingSpeedThreshold;
+  if (!hasMovingEvidence) {
+    return;
+  }
+
+  const openRes = await db.query(
+    `SELECT id, ended_at, end_lat, end_lng
+     FROM deadhead_movements
+     WHERE imei = $1
+       AND open_state = TRUE
+     ORDER BY updated_at DESC
+     LIMIT 1`,
+    [imei]
+  );
+
+  let movement = openRes.rows[0] || null;
+  if (movement) {
+    const lastAt = movement.ended_at ? new Date(movement.ended_at) : null;
+    const gapMs = lastAt && Number.isFinite(lastAt.getTime()) ? capturedAt.getTime() - lastAt.getTime() : 0;
+    if (gapMs > splitGapMs) {
+      await db.query(
+        `UPDATE deadhead_movements
+         SET open_state = FALSE,
+             updated_at = NOW()
+         WHERE id = $1`,
+        [movement.id]
+      );
+      movement = null;
+    }
+  }
+
+  if (!movement) {
+    const created = await db.query(
+      `INSERT INTO deadhead_movements (
+         imei, fleet_number, plate_number,
+         started_at, ended_at, start_lat, start_lng, end_lat, end_lng,
+         total_km, points_count, open_state, updated_at
+       )
+       VALUES ($1, $2, $3, $4, $4, $5, $6, $5, $6, 0, 0, TRUE, NOW())
+       RETURNING id, ended_at, end_lat, end_lng`,
+      [imei, fleetNumber, plateNumber, capturedAt.toISOString(), point.lat, point.lng]
+    );
+    movement = created.rows[0];
+  }
+
+  await db.query(
+    `INSERT INTO deadhead_points (
+       movement_id, lat, lng, captured_at, speed_kmh, heading_deg, accuracy_m
+     )
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [
+      movement.id,
+      point.lat,
+      point.lng,
+      capturedAt.toISOString(),
+      Number.isFinite(Number(point.speedKmh)) ? Number(point.speedKmh) : null,
+      Number.isFinite(Number(point.headingDeg)) ? Number(point.headingDeg) : null,
+      Number.isFinite(Number(point.accuracyM)) ? Number(point.accuracyM) : null,
+    ]
+  );
+
+  const prevLat = Number(movement.end_lat);
+  const prevLng = Number(movement.end_lng);
+  const incrementalKm =
+    Number.isFinite(prevLat) && Number.isFinite(prevLng)
+      ? Number((haversineMeters(prevLat, prevLng, Number(point.lat), Number(point.lng)) / 1000).toFixed(3))
+      : 0;
+
+  await db.query(
+    `UPDATE deadhead_movements
+     SET ended_at = $2,
+         end_lat = $3,
+         end_lng = $4,
+         total_km = GREATEST(0, COALESCE(total_km, 0) + $5),
+         points_count = COALESCE(points_count, 0) + 1,
+         fleet_number = COALESCE($6, fleet_number),
+         plate_number = COALESCE($7, plate_number),
+         updated_at = NOW()
+     WHERE id = $1`,
+    [movement.id, capturedAt.toISOString(), point.lat, point.lng, incrementalKm, fleetNumber, plateNumber]
+  );
 }
 
 function trackerAuth(req, res, next) {
@@ -87,6 +392,14 @@ function normalizeTrackerEvent(raw) {
   const accuracyMRaw = Number(raw?.accuracyM ?? raw?.accuracy ?? raw?.hdopMeters);
   const fleetNumberRaw = String(raw?.fleetNumber || raw?.fleet || "").trim();
   const plateNumberRaw = String(raw?.plateNumber || raw?.plate || "").trim();
+  const odometerKmRaw = Number(
+    raw?.odometerKm ??
+      raw?.odometer_km ??
+      raw?.odometer ??
+      raw?.totalOdometerKm ??
+      raw?.mileageKm ??
+      raw?.canOdometerKm
+  );
 
   return {
     ok: true,
@@ -100,6 +413,7 @@ function normalizeTrackerEvent(raw) {
       accuracyM: Number.isFinite(accuracyMRaw) ? accuracyMRaw : null,
       fleetNumber: fleetNumberRaw || null,
       plateNumber: plateNumberRaw || null,
+      odometerKm: Number.isFinite(odometerKmRaw) && odometerKmRaw >= 0 ? odometerKmRaw : null,
       source: "tracker",
     },
   };
@@ -282,6 +596,9 @@ function parseCodec8Input(req) {
 async function processTeltonikaEvents(incomingEvents) {
   await ensureTrackerTables();
   await ensureServicePointsQualityColumns();
+  await ensureDeadheadTables();
+  await ensureOdometerLogsTable();
+  await ensureServiceOdometerColumns();
 
   let accepted = 0;
   const rejected = [];
@@ -298,12 +615,16 @@ async function processTeltonikaEvents(incomingEvents) {
       rejected.push({ index: i, message: "Sem mapeamento ativo para o IMEI recebido." });
       continue;
     }
+    await registerVehicleOdometerLog(mapping, normalized.event);
 
     const service = await resolveActiveServiceForDevice(mapping);
     if (!service) {
-      rejected.push({ index: i, message: "Sem serviço em curso para a viatura do tracker." });
+      await upsertDeadheadMovementPoint(mapping, normalized.event);
+      accepted += 1;
       continue;
     }
+
+    await closeOpenDeadheadMovementByDevice(mapping, parseCapturedAtIso(normalized.event.capturedAt));
 
     const activeSegment = await getActiveSegment(service.id);
     if (!activeSegment) {
@@ -313,6 +634,7 @@ async function processTeltonikaEvents(incomingEvents) {
 
     await insertTrackerPoint(service.id, activeSegment.id, normalized.event);
     await updateRouteDeviation(service.id, service.gtfs_trip_id, normalized.event);
+    await maybeAutoCompleteServiceAtLastStopFromTracker(service, normalized.event);
     accepted += 1;
   }
 
@@ -381,7 +703,7 @@ async function resolveActiveServiceForDevice(device) {
   if (!fleetNumber && !plateNumber) return null;
   const result = fleetNumber
     ? await db.query(
-        `SELECT id, gtfs_trip_id
+        `SELECT id, gtfs_trip_id, line_code, service_schedule, planned_service_id, driver_id, started_at, status
          FROM services
          WHERE status = 'in_progress'
            AND LOWER(TRIM(fleet_number)) = LOWER(TRIM($1))
@@ -390,7 +712,7 @@ async function resolveActiveServiceForDevice(device) {
         [fleetNumber]
       )
     : await db.query(
-        `SELECT id, gtfs_trip_id
+        `SELECT id, gtfs_trip_id, line_code, service_schedule, planned_service_id, driver_id, started_at, status
          FROM services
          WHERE status = 'in_progress'
            AND LOWER(TRIM(plate_number)) = LOWER(TRIM($1))
@@ -439,11 +761,132 @@ async function updateRouteDeviation(serviceId, gtfsTripId, point) {
   );
 }
 
+async function maybeAutoCompleteServiceAtLastStopFromTracker(service, point) {
+  if (!service?.id || service?.status !== "in_progress") return false;
+  await ensureServiceStopProgressTable();
+  let tripId = service.gtfs_trip_id || null;
+  if (!tripId && service.line_code && service.service_schedule) {
+    const best = await findBestTripForLine(service.line_code, service.service_schedule);
+    tripId = best?.trip_id || null;
+    if (tripId) {
+      await db.query(`UPDATE services SET gtfs_trip_id = $1 WHERE id = $2 AND gtfs_trip_id IS NULL`, [tripId, service.id]);
+    }
+  }
+  if (!tripId) return false;
+  const stops = (await getStopsByTripId(tripId))
+    .map((s) => ({
+      stop_id: s.stop_id,
+      stop_sequence: Number(s.stop_sequence),
+      lat: Number(s.lat),
+      lng: Number(s.lng),
+    }))
+    .filter((s) => Number.isFinite(s.stop_sequence) && Number.isFinite(s.lat) && Number.isFinite(s.lng))
+    .sort((a, b) => a.stop_sequence - b.stop_sequence);
+  if (!stops.length) return false;
+  const lastStop = stops[stops.length - 1];
+  const distanceToLast = geoDistanceMeters(point.lat, point.lng, lastStop.lat, lastStop.lng);
+  if (distanceToLast == null || distanceToLast > 60) return false;
+
+  await db.query(
+    `INSERT INTO service_stop_progress (service_id, last_passed_stop_id, last_passed_stop_sequence, last_passed_at, updated_at)
+     VALUES ($1, $2, $3, NOW(), NOW())
+     ON CONFLICT (service_id) DO UPDATE
+       SET last_passed_stop_id = EXCLUDED.last_passed_stop_id,
+           last_passed_stop_sequence = EXCLUDED.last_passed_stop_sequence,
+           last_passed_at = EXCLUDED.last_passed_at,
+           updated_at = NOW()`,
+    [service.id, lastStop.stop_id || null, Number(lastStop.stop_sequence)]
+  );
+
+  const activeSegment = await getActiveSegment(service.id);
+  if (activeSegment) {
+    const segPointsResult = await db.query(
+      `SELECT lat, lng, captured_at
+       FROM service_points
+       WHERE service_segment_id = $1
+       ORDER BY captured_at ASC`,
+      [activeSegment.id]
+    );
+    const segPoints = segPointsResult.rows.map((p) => ({ lat: Number(p.lat), lng: Number(p.lng), capturedAt: p.captured_at }));
+    const kmSegment = calculatePathDistance(segPoints);
+    await db.query(
+      `UPDATE service_segments
+       SET status = 'completed',
+           ended_at = NOW(),
+           km_segment = $2
+       WHERE id = $1`,
+      [activeSegment.id, kmSegment]
+    );
+  }
+
+  const pointsResult = await db.query(
+    `SELECT lat, lng, captured_at, accuracy_m, speed_kmh
+     FROM service_points
+     WHERE service_id = $1
+     ORDER BY captured_at ASC`,
+    [service.id]
+  );
+  const points = pointsResult.rows.map((p) => ({
+    lat: Number(p.lat),
+    lng: Number(p.lng),
+    capturedAt: p.captured_at,
+    accuracyM: p.accuracy_m == null ? null : Number(p.accuracy_m),
+    speedKmh: p.speed_kmh == null ? null : Number(p.speed_kmh),
+  }));
+  const totalKm = await resolveTotalKmWithPlannedFallback(calculatePathDistance(points), service.planned_service_id);
+  const routeGeoJSON = {
+    type: "Feature",
+    geometry: {
+      type: "LineString",
+      coordinates: points.map((p) => [p.lng, p.lat]),
+    },
+    properties: { points: points.length },
+  };
+  const updated = await db.query(
+    `UPDATE services
+     SET status = 'completed',
+         ended_at = NOW(),
+         total_km = $2,
+         route_geojson = $3,
+         close_mode = 'auto_last_stop'
+     WHERE id = $1
+       AND status = 'in_progress'
+     RETURNING id, driver_id, planned_service_id, started_at`,
+    [service.id, totalKm, JSON.stringify(routeGeoJSON)]
+  );
+  if (!updated.rowCount) return false;
+  const closed = updated.rows[0];
+  if (closed.planned_service_id) {
+    let rosterDay = await getRosterServiceDateForExecution(closed.driver_id, closed.planned_service_id, closed.started_at);
+    if (!rosterDay && closed.started_at) {
+      const rosterDayRes = await db.query(
+        `SELECT ($1::timestamptz AT TIME ZONE 'Europe/Lisbon')::date AS d`,
+        [closed.started_at]
+      );
+      rosterDay = rosterDayRes.rows[0]?.d;
+    }
+    if (rosterDay) {
+      await db.query(
+        `UPDATE daily_roster
+         SET status = 'completed'
+         WHERE driver_id = $1
+           AND planned_service_id = $2
+           AND service_date = $3`,
+        [closed.driver_id, closed.planned_service_id, rosterDay]
+      );
+    }
+  }
+  return true;
+}
+
 router.get("/teltonika/devices", authMiddleware, requireRoles("supervisor", "admin"), async (_req, res) => {
   try {
     await ensureTrackerTables();
+    await ensureOdometerLogsTable();
     const result = await db.query(
-      `SELECT imei, fleet_number, plate_number, provider, is_active, created_at, updated_at
+      `SELECT imei, fleet_number, plate_number, provider, is_active,
+              install_odometer_km, current_odometer_km, current_odometer_updated_at,
+              created_at, updated_at
        FROM tracker_devices
        ORDER BY updated_at DESC`
     );
@@ -458,26 +901,348 @@ router.post("/teltonika/devices", authMiddleware, requireRoles("supervisor", "ad
   const fleetNumber = String(req.body?.fleetNumber || "").trim() || null;
   const plateNumber = String(req.body?.plateNumber || "").trim() || null;
   const isActive = req.body?.isActive !== false;
+  const installOdometerKmRaw = req.body?.installOdometerKm;
+  const currentOdometerKmRaw = req.body?.currentOdometerKm;
+  const installOdometerKm =
+    installOdometerKmRaw == null || installOdometerKmRaw === "" ? null : Number(installOdometerKmRaw);
+  const currentOdometerKm =
+    currentOdometerKmRaw == null || currentOdometerKmRaw === "" ? null : Number(currentOdometerKmRaw);
   if (!imei) return res.status(400).json({ message: "IMEI inválido." });
   if (!fleetNumber) {
     return res.status(400).json({ message: "fleetNumber é obrigatório para integração por viatura/frota." });
   }
+  if (installOdometerKm != null && (!Number.isFinite(installOdometerKm) || installOdometerKm < 0)) {
+    return res.status(400).json({ message: "installOdometerKm inválido." });
+  }
+  if (currentOdometerKm != null && (!Number.isFinite(currentOdometerKm) || currentOdometerKm < 0)) {
+    return res.status(400).json({ message: "currentOdometerKm inválido." });
+  }
   try {
     await ensureTrackerTables();
+    await ensureOdometerLogsTable();
     const result = await db.query(
-      `INSERT INTO tracker_devices (imei, fleet_number, plate_number, provider, is_active, updated_at)
-       VALUES ($1, $2, $3, 'teltonika', $4, NOW())
+      `INSERT INTO tracker_devices (
+         imei, fleet_number, plate_number, provider, is_active,
+         install_odometer_km, current_odometer_km, current_odometer_updated_at, updated_at
+       )
+       VALUES ($1, $2, $3, 'teltonika', $4, $5, $6, CASE WHEN $6 IS NULL THEN NULL ELSE NOW() END, NOW())
        ON CONFLICT (imei) DO UPDATE
        SET fleet_number = EXCLUDED.fleet_number,
            plate_number = EXCLUDED.plate_number,
            is_active = EXCLUDED.is_active,
+           install_odometer_km = COALESCE(EXCLUDED.install_odometer_km, tracker_devices.install_odometer_km),
+           current_odometer_km = COALESCE(EXCLUDED.current_odometer_km, tracker_devices.current_odometer_km),
+           current_odometer_updated_at = CASE
+             WHEN EXCLUDED.current_odometer_km IS NULL THEN tracker_devices.current_odometer_updated_at
+             ELSE NOW()
+           END,
            updated_at = NOW()
-       RETURNING imei, fleet_number, plate_number, provider, is_active, created_at, updated_at`,
-      [imei, fleetNumber, plateNumber, isActive]
+       RETURNING imei, fleet_number, plate_number, provider, is_active,
+                 install_odometer_km, current_odometer_km, current_odometer_updated_at,
+                 created_at, updated_at`,
+      [imei, fleetNumber, plateNumber, isActive, installOdometerKm, currentOdometerKm]
     );
-    return res.status(201).json(result.rows[0]);
+    const saved = result.rows[0];
+    if (Number.isFinite(currentOdometerKm)) {
+      await db.query(
+        `INSERT INTO vehicle_odometer_logs (imei, fleet_number, plate_number, odometer_km, captured_at, source)
+         VALUES ($1, $2, $3, $4, NOW(), 'manual')`,
+        [saved.imei || null, saved.fleet_number || null, saved.plate_number || null, currentOdometerKm]
+      );
+    }
+    return res.status(201).json(saved);
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao guardar dispositivo tracker." });
+  }
+});
+
+router.patch("/teltonika/devices/:imei/odometer", authMiddleware, requireRoles("supervisor", "admin"), async (req, res) => {
+  const imei = normalizeImei(req.params.imei);
+  const installRaw = req.body?.installOdometerKm;
+  const currentRaw = req.body?.currentOdometerKm;
+  const installOdometerKm = installRaw == null || installRaw === "" ? null : Number(installRaw);
+  const currentOdometerKm = currentRaw == null || currentRaw === "" ? null : Number(currentRaw);
+  if (!imei) return res.status(400).json({ message: "IMEI inválido." });
+  if (installOdometerKm != null && (!Number.isFinite(installOdometerKm) || installOdometerKm < 0)) {
+    return res.status(400).json({ message: "installOdometerKm inválido." });
+  }
+  if (currentOdometerKm != null && (!Number.isFinite(currentOdometerKm) || currentOdometerKm < 0)) {
+    return res.status(400).json({ message: "currentOdometerKm inválido." });
+  }
+  if (installOdometerKm == null && currentOdometerKm == null) {
+    return res.status(400).json({ message: "Indique installOdometerKm e/ou currentOdometerKm." });
+  }
+  try {
+    await ensureTrackerTables();
+    const result = await db.query(
+      `UPDATE tracker_devices
+       SET install_odometer_km = COALESCE($2, install_odometer_km),
+           current_odometer_km = COALESCE($3, current_odometer_km),
+           current_odometer_updated_at = CASE WHEN $3 IS NULL THEN current_odometer_updated_at ELSE NOW() END,
+           updated_at = NOW()
+       WHERE imei = $1
+       RETURNING imei, fleet_number, plate_number, provider, is_active,
+                 install_odometer_km, current_odometer_km, current_odometer_updated_at,
+                 created_at, updated_at`,
+      [imei, installOdometerKm, currentOdometerKm]
+    );
+    if (!result.rowCount) {
+      return res.status(404).json({ message: "Dispositivo não encontrado." });
+    }
+    const saved = result.rows[0];
+    if (Number.isFinite(currentOdometerKm)) {
+      await db.query(
+        `INSERT INTO vehicle_odometer_logs (imei, fleet_number, plate_number, odometer_km, captured_at, source)
+         VALUES ($1, $2, $3, $4, NOW(), 'manual')`,
+        [saved.imei || null, saved.fleet_number || null, saved.plate_number || null, currentOdometerKm]
+      );
+    }
+    return res.json(saved);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao atualizar quilometragem da viatura." });
+  }
+});
+
+router.get("/deadhead-movements", authMiddleware, requireRoles("supervisor", "admin"), async (req, res) => {
+  const { fromTs, toTs } = buildDateBounds(req.query?.from, req.query?.to);
+  const fleetNumber = String(req.query?.fleetNumber || "").trim();
+  try {
+    await ensureDeadheadTables();
+    const result = await db.query(
+      `SELECT id, imei, fleet_number, plate_number, started_at, ended_at,
+              start_lat, start_lng, end_lat, end_lng, total_km, points_count
+       FROM deadhead_movements
+       WHERE ($1 = '' OR started_at >= $1::timestamptz)
+         AND ($2 = '' OR ended_at <= $2::timestamptz)
+         AND ($3 = '' OR LOWER(TRIM(COALESCE(fleet_number, ''))) = LOWER(TRIM($3)))
+       ORDER BY started_at DESC
+       LIMIT 500`,
+      [fromTs, toTs, fleetNumber]
+    );
+    return res.json(result.rows);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar movimentos em vazio." });
+  }
+});
+
+router.get("/deadhead-movements/export.csv", authMiddleware, requireRoles("supervisor", "admin"), async (req, res) => {
+  const { fromTs, toTs } = buildDateBounds(req.query?.from, req.query?.to);
+  const fleetNumber = String(req.query?.fleetNumber || "").trim();
+  try {
+    await ensureDeadheadTables();
+    const result = await db.query(
+      `SELECT id, imei, fleet_number, plate_number, started_at, ended_at, total_km, points_count
+       FROM deadhead_movements
+       WHERE ($1 = '' OR started_at >= $1::timestamptz)
+         AND ($2 = '' OR ended_at <= $2::timestamptz)
+         AND ($3 = '' OR LOWER(TRIM(COALESCE(fleet_number, ''))) = LOWER(TRIM($3)))
+       ORDER BY started_at DESC`,
+      [fromTs, toTs, fleetNumber]
+    );
+    const header = ["id", "imei", "frota", "matricula", "inicio", "fim", "km", "pontos"];
+    const rows = result.rows.map((r) =>
+      [r.id, r.imei, r.fleet_number, r.plate_number, r.started_at, r.ended_at, r.total_km, r.points_count].map(csvEscape).join(",")
+    );
+    const csv = [header.map(csvEscape).join(","), ...rows].join("\n");
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", "attachment; filename=movimentos_vazio.csv");
+    return res.status(200).send(`\uFEFF${csv}`);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao exportar vazios CSV." });
+  }
+});
+
+router.get("/deadhead-movements/export.xlsx", authMiddleware, requireRoles("supervisor", "admin"), async (req, res) => {
+  const { fromTs, toTs } = buildDateBounds(req.query?.from, req.query?.to);
+  const fleetNumber = String(req.query?.fleetNumber || "").trim();
+  try {
+    await ensureDeadheadTables();
+    const result = await db.query(
+      `SELECT id, imei, fleet_number, plate_number, started_at, ended_at, total_km, points_count
+       FROM deadhead_movements
+       WHERE ($1 = '' OR started_at >= $1::timestamptz)
+         AND ($2 = '' OR ended_at <= $2::timestamptz)
+         AND ($3 = '' OR LOWER(TRIM(COALESCE(fleet_number, ''))) = LOWER(TRIM($3)))
+       ORDER BY started_at DESC`,
+      [fromTs, toTs, fleetNumber]
+    );
+    const rows = result.rows.map((r) => ({
+      id: r.id,
+      imei: r.imei || "",
+      frota: r.fleet_number || "",
+      matricula: r.plate_number || "",
+      inicio: r.started_at || "",
+      fim: r.ended_at || "",
+      km: r.total_km == null ? "" : Number(r.total_km),
+      pontos: r.points_count == null ? "" : Number(r.points_count),
+    }));
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, "vazios");
+    const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", "attachment; filename=movimentos_vazio.xlsx");
+    return res.status(200).send(buffer);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao exportar vazios Excel." });
+  }
+});
+
+router.get("/odometer-reconciliation/daily", authMiddleware, requireRoles("supervisor", "admin"), async (req, res) => {
+  const date = String(req.query?.date || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+    return res.status(400).json({ message: "Data inválida. Use YYYY-MM-DD." });
+  }
+  try {
+    await ensureDeadheadTables();
+    await ensureServiceOdometerColumns();
+    await ensureOdometerLogsTable();
+    const result = await db.query(
+      `WITH day AS (
+         SELECT $1::date AS d
+       ),
+       load_km AS (
+         SELECT
+           COALESCE(NULLIF(TRIM(s.fleet_number), ''), 'SEM_FROTA') AS fleet_key,
+           MIN(NULLIF(TRIM(s.plate_number), '')) AS plate_number,
+           COALESCE(SUM(COALESCE(s.total_km, 0)), 0)::numeric(12,3) AS app_km_load,
+           MIN(s.vehicle_odometer_start_km) AS odometer_min_start,
+           MAX(s.vehicle_odometer_end_km) AS odometer_max_end
+         FROM services s
+         CROSS JOIN day
+         WHERE LOWER(TRIM(COALESCE(s.status::text, ''))) = 'completed'
+           AND ((s.ended_at AT TIME ZONE 'Europe/Lisbon')::date) = day.d
+         GROUP BY COALESCE(NULLIF(TRIM(s.fleet_number), ''), 'SEM_FROTA')
+       ),
+       deadhead_km AS (
+         SELECT
+           COALESCE(NULLIF(TRIM(dm.fleet_number), ''), 'SEM_FROTA') AS fleet_key,
+           MIN(NULLIF(TRIM(dm.plate_number), '')) AS plate_number,
+           COALESCE(SUM(COALESCE(dm.total_km, 0)), 0)::numeric(12,3) AS app_km_deadhead
+         FROM deadhead_movements dm
+         CROSS JOIN day
+         WHERE ((dm.ended_at AT TIME ZONE 'Europe/Lisbon')::date) = day.d
+         GROUP BY COALESCE(NULLIF(TRIM(dm.fleet_number), ''), 'SEM_FROTA')
+       ),
+       odometer_logs_day AS (
+         SELECT
+           COALESCE(NULLIF(TRIM(v.fleet_number), ''), 'SEM_FROTA') AS fleet_key,
+           MIN(NULLIF(TRIM(v.plate_number), '')) AS plate_number,
+           MIN(v.captured_at) AS first_captured_at,
+           MAX(v.captured_at) AS last_captured_at
+         FROM vehicle_odometer_logs v
+         CROSS JOIN day
+         WHERE ((v.captured_at AT TIME ZONE 'Europe/Lisbon')::date) = day.d
+         GROUP BY COALESCE(NULLIF(TRIM(v.fleet_number), ''), 'SEM_FROTA')
+       ),
+       odometer_bounds AS (
+         SELECT
+           o.fleet_key,
+           o.plate_number,
+           first_log.odometer_km AS odometer_first_km,
+           last_log.odometer_km AS odometer_last_km
+         FROM odometer_logs_day o
+         LEFT JOIN LATERAL (
+           SELECT odometer_km
+           FROM vehicle_odometer_logs
+           WHERE COALESCE(NULLIF(TRIM(fleet_number), ''), 'SEM_FROTA') = o.fleet_key
+             AND captured_at = o.first_captured_at
+           ORDER BY id ASC
+           LIMIT 1
+         ) first_log ON TRUE
+         LEFT JOIN LATERAL (
+           SELECT odometer_km
+           FROM vehicle_odometer_logs
+           WHERE COALESCE(NULLIF(TRIM(fleet_number), ''), 'SEM_FROTA') = o.fleet_key
+             AND captured_at = o.last_captured_at
+           ORDER BY id DESC
+           LIMIT 1
+         ) last_log ON TRUE
+       ),
+       keys AS (
+         SELECT fleet_key FROM load_km
+         UNION
+         SELECT fleet_key FROM deadhead_km
+         UNION
+         SELECT fleet_key FROM odometer_bounds
+       )
+       SELECT
+         day.d::text AS report_date,
+         k.fleet_key AS fleet_number,
+         COALESCE(l.plate_number, d.plate_number, o.plate_number, '') AS plate_number,
+         COALESCE(l.app_km_load, 0)::numeric(12,3) AS app_km_load,
+         COALESCE(d.app_km_deadhead, 0)::numeric(12,3) AS app_km_deadhead,
+         (COALESCE(l.app_km_load, 0) + COALESCE(d.app_km_deadhead, 0))::numeric(12,3) AS app_km_total,
+         CASE
+           WHEN o.odometer_first_km IS NOT NULL AND o.odometer_last_km IS NOT NULL
+           THEN (o.odometer_last_km - o.odometer_first_km)::numeric(12,3)
+           WHEN l.odometer_min_start IS NOT NULL AND l.odometer_max_end IS NOT NULL
+           THEN (l.odometer_max_end - l.odometer_min_start)::numeric(12,3)
+           ELSE NULL
+         END AS odometer_km_day,
+         CASE
+           WHEN o.odometer_first_km IS NOT NULL AND o.odometer_last_km IS NOT NULL
+           THEN ((o.odometer_last_km - o.odometer_first_km) - (COALESCE(l.app_km_load, 0) + COALESCE(d.app_km_deadhead, 0)))::numeric(12,3)
+           WHEN l.odometer_min_start IS NOT NULL AND l.odometer_max_end IS NOT NULL
+           THEN ((l.odometer_max_end - l.odometer_min_start) - (COALESCE(l.app_km_load, 0) + COALESCE(d.app_km_deadhead, 0)))::numeric(12,3)
+           ELSE NULL
+         END AS odometer_vs_app_diff_km
+       FROM keys k
+       CROSS JOIN day
+       LEFT JOIN load_km l ON l.fleet_key = k.fleet_key
+       LEFT JOIN deadhead_km d ON d.fleet_key = k.fleet_key
+       LEFT JOIN odometer_bounds o ON o.fleet_key = k.fleet_key
+       ORDER BY k.fleet_key`,
+      [date]
+    );
+    return res.json(result.rows);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao gerar relatório de conciliação." });
+  }
+});
+
+router.get("/deadhead-movements/:movementId", authMiddleware, requireRoles("supervisor", "admin"), async (req, res) => {
+  const movementId = Number(req.params.movementId);
+  if (!Number.isFinite(movementId)) {
+    return res.status(400).json({ message: "movementId inválido." });
+  }
+  try {
+    await ensureDeadheadTables();
+    const movementRes = await db.query(
+      `SELECT id, imei, fleet_number, plate_number, started_at, ended_at,
+              start_lat, start_lng, end_lat, end_lng, total_km, points_count
+       FROM deadhead_movements
+       WHERE id = $1
+       LIMIT 1`,
+      [movementId]
+    );
+    if (!movementRes.rowCount) {
+      return res.status(404).json({ message: "Movimento em vazio não encontrado." });
+    }
+    const pointsRes = await db.query(
+      `SELECT lat, lng, captured_at, speed_kmh, heading_deg, accuracy_m
+       FROM deadhead_points
+       WHERE movement_id = $1
+       ORDER BY captured_at ASC`,
+      [movementId]
+    );
+    const coordinates = pointsRes.rows.map((p) => [Number(p.lng), Number(p.lat)]);
+    return res.json({
+      ...movementRes.rows[0],
+      route_geojson: {
+        type: "Feature",
+        geometry: {
+          type: "LineString",
+          coordinates,
+        },
+        properties: {
+          points: coordinates.length,
+        },
+      },
+      points: pointsRes.rows,
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao obter detalhe do vazio." });
   }
 });
 

@@ -31,6 +31,16 @@ router.use(async (_req, _res, next) => {
   }
 });
 
+let serviceCloseModeColumnEnsured = false;
+async function ensureServiceCloseModeColumn() {
+  if (serviceCloseModeColumnEnsured) return;
+  await db.query(
+    `ALTER TABLE services
+       ADD COLUMN IF NOT EXISTS close_mode VARCHAR(30)`
+  );
+  serviceCloseModeColumnEnsured = true;
+}
+
 async function ensurePlannedServiceLocationColumns() {
   await db.query(
     `ALTER TABLE planned_services
@@ -103,6 +113,24 @@ function parseGtfsTimeToRelativeMinutes(rawTime) {
   const minutes = Number(match[2]);
   if (!Number.isFinite(hours) || !Number.isFinite(minutes)) return null;
   return hours * 60 + minutes;
+}
+
+function parseServiceScheduleRange(rawSchedule) {
+  const text = String(rawSchedule || "").trim();
+  const match = text.match(/^(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})$/);
+  if (!match) return null;
+  const start = Number(match[1]) * 60 + Number(match[2]);
+  const end = Number(match[3]) * 60 + Number(match[4]);
+  if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
+  if (end <= start) return null;
+  return { start, end };
+}
+
+function hasScheduleOverlap(scheduleA, scheduleB) {
+  const a = parseServiceScheduleRange(scheduleA);
+  const b = parseServiceScheduleRange(scheduleB);
+  if (!a || !b) return false;
+  return a.start < b.end && b.start < a.end;
 }
 
 function diffDays(dayA, dayB) {
@@ -776,8 +804,31 @@ function extractRosterAssignmentsFromPdfText(pdfText, context) {
   });
 }
 
+async function ensureDeadheadTablesForOverview() {
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS deadhead_movements (
+      id BIGSERIAL PRIMARY KEY,
+      imei VARCHAR(40) NOT NULL,
+      fleet_number VARCHAR(50),
+      plate_number VARCHAR(50),
+      started_at TIMESTAMPTZ NOT NULL,
+      ended_at TIMESTAMPTZ NOT NULL,
+      start_lat NUMERIC(10,7),
+      start_lng NUMERIC(10,7),
+      end_lat NUMERIC(10,7),
+      end_lng NUMERIC(10,7),
+      total_km NUMERIC(12,3) NOT NULL DEFAULT 0,
+      points_count INT NOT NULL DEFAULT 0,
+      open_state BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+}
+
 router.get("/overview", async (req, res) => {
   try {
+    await ensureDeadheadTablesForOverview();
     const result = await db.query(OVERVIEW_TODAY_SQL);
     return res.json(result.rows[0]);
   } catch (error) {
@@ -809,14 +860,34 @@ async function ensureSupervisorConflictAlertsTable() {
     `CREATE TABLE IF NOT EXISTS supervisor_conflict_alerts (
       id BIGSERIAL PRIMARY KEY,
       driver_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      alert_type VARCHAR(50) NOT NULL DEFAULT 'roster_conflict',
       roster_id INT,
       planned_service_id INT,
+      affected_driver_id INT REFERENCES users(id) ON DELETE SET NULL,
+      affected_planned_service_id INT,
       service_schedule VARCHAR(80),
       line_code VARCHAR(40),
       conflict_planned_service_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
+      unassigned_planned_service_ids JSONB NOT NULL DEFAULT '[]'::jsonb,
       notes TEXT,
       created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
+  );
+  await db.query(
+    `ALTER TABLE supervisor_conflict_alerts
+       ADD COLUMN IF NOT EXISTS alert_type VARCHAR(50) NOT NULL DEFAULT 'roster_conflict'`
+  );
+  await db.query(
+    `ALTER TABLE supervisor_conflict_alerts
+       ADD COLUMN IF NOT EXISTS affected_driver_id INT REFERENCES users(id) ON DELETE SET NULL`
+  );
+  await db.query(
+    `ALTER TABLE supervisor_conflict_alerts
+       ADD COLUMN IF NOT EXISTS affected_planned_service_id INT`
+  );
+  await db.query(
+    `ALTER TABLE supervisor_conflict_alerts
+       ADD COLUMN IF NOT EXISTS unassigned_planned_service_ids JSONB NOT NULL DEFAULT '[]'::jsonb`
   );
   await db.query(
     `CREATE INDEX IF NOT EXISTS idx_supervisor_conflict_alerts_created
@@ -1235,6 +1306,7 @@ router.get("/conflict-alerts", async (_req, res) => {
       `SELECT
          a.id,
          a.driver_id,
+         a.alert_type,
          u.name AS driver_name,
          u.mechanic_number AS driver_mechanic_number,
          a.roster_id,
@@ -1244,12 +1316,20 @@ router.get("/conflict-alerts", async (_req, res) => {
          COALESCE(a.line_code, ps.line_code) AS line_code,
          ps.start_location,
          ps.end_location,
+         a.affected_driver_id,
+         u2.name AS affected_driver_name,
+         u2.mechanic_number AS affected_driver_mechanic_number,
+         a.affected_planned_service_id,
+         ps2.service_code AS affected_service_code,
          a.conflict_planned_service_ids,
+         a.unassigned_planned_service_ids,
          a.notes,
          a.created_at
        FROM supervisor_conflict_alerts a
        JOIN users u ON u.id = a.driver_id
        LEFT JOIN planned_services ps ON ps.id = a.planned_service_id
+       LEFT JOIN users u2 ON u2.id = a.affected_driver_id
+       LEFT JOIN planned_services ps2 ON ps2.id = a.affected_planned_service_id
        ORDER BY a.created_at DESC
        LIMIT 200`
     );
@@ -1439,6 +1519,7 @@ router.patch("/roster/:rosterId/reassign", async (req, res) => {
   try {
     await ensurePlannedServiceLocationColumns();
     await ensureDriverNotificationsTable();
+    await ensureSupervisorConflictAlertsTable();
     await client.query("BEGIN");
 
     // Alinhar estado da linha com a tabela services (igual ideia ao GET /roster/today), antes de validar.
@@ -1596,11 +1677,114 @@ router.patch("/roster/:rosterId/reassign", async (req, res) => {
       ]
     );
 
+    const involvedRosterRes = await client.query(
+      `SELECT
+         dr.id AS roster_id,
+         dr.driver_id,
+         u.name AS driver_name,
+         dr.planned_service_id,
+         ps.service_code,
+         ps.service_schedule,
+         ps.line_code
+       FROM daily_roster dr
+       JOIN planned_services ps ON ps.id = dr.planned_service_id
+       JOIN users u ON u.id = dr.driver_id
+       WHERE dr.service_date = $1::date
+         AND dr.driver_id IN ($2, $3)
+       ORDER BY dr.driver_id ASC, ps.service_schedule ASC NULLS LAST`,
+      [dr.service_date, dr.driver_id, newId]
+    );
+
+    const rowsByDriver = new Map();
+    for (const row of involvedRosterRes.rows) {
+      const key = Number(row.driver_id);
+      if (!rowsByDriver.has(key)) rowsByDriver.set(key, []);
+      rowsByDriver.get(key).push(row);
+    }
+
+    const overlapAlerts = [];
+    for (const [, rows] of rowsByDriver.entries()) {
+      for (let i = 0; i < rows.length; i += 1) {
+        for (let j = i + 1; j < rows.length; j += 1) {
+          const a = rows[i];
+          const b = rows[j];
+          if (!hasScheduleOverlap(a.service_schedule, b.service_schedule)) continue;
+          overlapAlerts.push({
+            driver_id: Number(a.driver_id),
+            roster_id: Number(a.roster_id),
+            planned_service_id: Number(a.planned_service_id),
+            affected_driver_id: Number(b.driver_id),
+            affected_planned_service_id: Number(b.planned_service_id),
+            service_schedule: a.service_schedule || null,
+            line_code: a.line_code || null,
+            conflict_planned_service_ids: [Number(b.planned_service_id)].filter((v) => Number.isFinite(v) && v > 0),
+            notes: `Conflito de horário após troca: ${a.service_code || a.planned_service_id} (${a.service_schedule || "-"}) com ${b.service_code || b.planned_service_id} (${b.service_schedule || "-"}) para o motorista ${a.driver_name || "-"}.`,
+          });
+        }
+      }
+    }
+
+    for (const alertItem of overlapAlerts) {
+      await client.query(
+        `INSERT INTO supervisor_conflict_alerts (
+           driver_id, alert_type, roster_id, planned_service_id, affected_driver_id, affected_planned_service_id,
+           service_schedule, line_code, conflict_planned_service_ids, notes
+         ) VALUES ($1, 'driver_swap_overlap', $2, $3, $4, $5, $6, $7, $8::jsonb, $9)`,
+        [
+          alertItem.driver_id,
+          alertItem.roster_id,
+          alertItem.planned_service_id,
+          alertItem.affected_driver_id,
+          alertItem.affected_planned_service_id,
+          alertItem.service_schedule,
+          alertItem.line_code,
+          JSON.stringify(alertItem.conflict_planned_service_ids || []),
+          alertItem.notes,
+        ]
+      );
+    }
+
+    const unassignedRes = await client.query(
+      `SELECT ps.id, ps.service_code
+       FROM planned_services ps
+       LEFT JOIN daily_roster dr
+         ON dr.planned_service_id = ps.id
+        AND dr.service_date = $1::date
+       WHERE dr.id IS NULL
+         AND LOWER(TRIM(COALESCE(ps.line_code, ''))) = LOWER(TRIM(COALESCE($2, ps.line_code)))
+       ORDER BY ps.service_code ASC NULLS LAST, ps.id ASC
+       LIMIT 100`,
+      [dr.service_date, dr.line_code || null]
+    );
+    if (unassignedRes.rowCount > 0) {
+      const missingIds = unassignedRes.rows
+        .map((r) => Number(r.id))
+        .filter((v) => Number.isFinite(v) && v > 0);
+      await client.query(
+        `INSERT INTO supervisor_conflict_alerts (
+           driver_id, alert_type, roster_id, planned_service_id, service_schedule, line_code,
+           conflict_planned_service_ids, unassigned_planned_service_ids, notes
+         ) VALUES ($1, 'unassigned_service_after_swap', $2, $3, $4, $5, '[]'::jsonb, $6::jsonb, $7)`,
+        [
+          newId,
+          rosterId,
+          dr.planned_service_id,
+          dr.service_schedule || null,
+          dr.line_code || null,
+          JSON.stringify(missingIds),
+          `Serviços sem motorista atribuído detetados para ${dr.service_date} na linha ${dr.line_code || "-"}: ${unassignedRes.rows
+            .map((r) => r.service_code || `#${r.id}`)
+            .join(", ")}.`,
+        ]
+      );
+    }
+
     await client.query("COMMIT");
     return rosterReassignJson(res, 200, {
       roster_id: rosterId,
       new_driver_id: newId,
       new_driver_name: nd.name,
+      conflict_alerts_created: overlapAlerts.length + (unassignedRes?.rowCount > 0 ? 1 : 0),
       message: "Escalamento atualizado e notificacoes registadas.",
     });
   } catch (error) {
@@ -2478,6 +2662,7 @@ router.get("/services", async (req, res) => {
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
   try {
+    await ensureServiceCloseModeColumn();
     const result = await db.query(
       `SELECT
          s.id,
@@ -2488,6 +2673,7 @@ router.get("/services", async (req, res) => {
          s.line_code,
          s.fleet_number,
          s.status,
+         s.close_mode,
          s.gtfs_trip_id,
          s.started_at,
          s.ended_at,
@@ -2950,6 +3136,7 @@ router.get("/reports/performance.xlsx", async (req, res) => {
 router.get("/services/:serviceId/details", async (req, res) => {
   const { serviceId } = req.params;
   try {
+    await ensureServiceCloseModeColumn();
     const serviceResult = await db.query(
       `SELECT
          s.id,
@@ -2960,6 +3147,7 @@ router.get("/services/:serviceId/details", async (req, res) => {
          s.line_code,
          s.fleet_number,
          s.status,
+         s.close_mode,
          s.started_at,
          s.ended_at,
          s.total_km,

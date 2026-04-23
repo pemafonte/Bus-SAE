@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="pt">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Guia sistema sonoro de paragens</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body class="supervisor-page">
+    <main class="container">
+      <h1>Guia de implementação do sistema sonoro de paragens</h1>
+      <p class="field-help field-help-tight">
+        Este guia explica como ativar os avisos de "próxima paragem" e "paragem atual" para passageiros, incluindo
+        equipamentos recomendados, endpoints da API e checklist de entrada em produção.
+      </p>
+
+      <section class="card">
+        <h2>1) Arquitetura recomendada</h2>
+        <ol class="tracker-checklist-ol">
+          <li><strong>App/API</strong>: calcula estado de anúncio por serviço e evita repetições.</li>
+          <li><strong>Dispositivo de bordo</strong>: reproduz áudio TTS e consulta a API em ciclo curto.</li>
+          <li><strong>GPS</strong>: usa pontos da app do motorista (e/ou tracker) para localizar a viatura.</li>
+          <li><strong>GTFS</strong>: usa sequência de paragens para identificar próxima/atual.</li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2>2) Equipamentos compatíveis</h2>
+        <h3>Opção A (piloto rápido e económico)</h3>
+        <ul>
+          <li>Tablet Android 10"+ com 4G/Wi-Fi.</li>
+          <li>Coluna ativa 12V ou amplificador compacto.</li>
+          <li>Conversor 24V/12V estabilizado para alimentação.</li>
+        </ul>
+        <h3>Opção B (mais robusta)</h3>
+        <ul>
+          <li>Raspberry Pi 4/5 + DAC + amplificador classe D.</li>
+          <li>Armazenamento industrial e fonte veicular.</li>
+          <li>Caixa com proteção para vibração e calor.</li>
+        </ul>
+        <p class="field-help">
+          Em ambas as opções, o software de bordo pode consumir os mesmos endpoints da API já implementados.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>3) Endpoints da API para anúncios</h2>
+        <h3>3.1 Obter estado de anúncio</h3>
+        <pre>GET /services/:serviceId/announcement-state?preannounceMeters=300&amp;arrivalMeters=60
+Authorization: Bearer &lt;token&gt;</pre>
+        <p class="field-help">
+          Resposta inclui: <code>nextStop</code>, <code>currentStop</code>, distância/ETA, e triggers
+          <code>announceNextStop</code> / <code>announceArrivedStop</code>.
+        </p>
+
+        <h3>3.2 Confirmar anúncio tocado</h3>
+        <pre>POST /services/:serviceId/announcement-mark
+Authorization: Bearer &lt;token&gt;
+Content-Type: application/json
+
+{
+  "stopId": "1234",
+  "stopSequence": 17,
+  "announcementType": "next"
+}</pre>
+        <p class="field-help">
+          Use <code>announcementType=arrived</code> quando tocar o aviso de chegada à paragem.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>4) Fluxo operacional no dispositivo de bordo</h2>
+        <ol class="tracker-checklist-ol">
+          <li>Identificar o <code>serviceId</code> ativo da viatura.</li>
+          <li>Fazer polling do endpoint de estado (tipicamente a cada 2-4 segundos).</li>
+          <li>Se trigger "next" estiver ativo, tocar "Próxima paragem: ...".</li>
+          <li>Se trigger "arrived" estiver ativo, tocar "Paragem: ...".</li>
+          <li>Após tocar, chamar <code>/announcement-mark</code> para registo anti-repetição.</li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2>5) Configuração recomendada de thresholds</h2>
+        <ul>
+          <li><strong>Pré-aviso:</strong> 250-350m (urbano) ou 350-500m (vias rápidas).</li>
+          <li><strong>Chegada:</strong> 40-80m.</li>
+          <li><strong>Polling:</strong> 2s a 4s.</li>
+        </ul>
+        <p class="field-help">
+          Ajuste por linha e contexto de tráfego. O objetivo é evitar avisos demasiado cedo ou em duplicado.
+        </p>
+      </section>
+
+      <section class="card">
+        <h2>6) Fallback offline (já suportado no frontend do motorista)</h2>
+        <ol class="tracker-checklist-ol">
+          <li>Se a API falhar repetidamente, o modo local é ativado automaticamente.</li>
+          <li>O cálculo passa a usar GTFS local + GPS do dispositivo.</li>
+          <li>Quando a API recuperar, o modo API é restabelecido de forma automática.</li>
+          <li>O badge visual mostra o modo atual: <strong>API</strong>, <strong>LOCAL</strong> ou <strong>OFF</strong>.</li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2>7) Checklist de entrada em produção</h2>
+        <ol class="tracker-checklist-ol">
+          <li>Confirmar que os serviços iniciam corretamente com GTFS associado.</li>
+          <li>Testar 1 linha piloto em horário real por pelo menos 3 dias.</li>
+          <li>Ajustar volume e voz com feedback de passageiros/motoristas.</li>
+          <li>Validar comportamento em túneis/zonas de fraco sinal GPS.</li>
+          <li>Registar procedimento operacional para suporte e manutenção.</li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2>8) Teste rápido (fim-a-fim)</h2>
+        <ol class="tracker-checklist-ol">
+          <li>Iniciar serviço na app de motorista.</li>
+          <li>Abrir "Percurso e operações" e ativar anúncios automáticos.</li>
+          <li>Confirmar mudança de badge para <strong>API</strong> (ou <strong>LOCAL</strong> em fallback).</li>
+          <li>Verificar reprodução em "Próxima paragem" e "Paragem".</li>
+          <li>Confirmar ausência de repetição indevida na mesma paragem.</li>
+        </ol>
+      </section>
+
+      <section class="card">
+        <h2>9) Links úteis</h2>
+        <p>
+          <a href="/frontend/supervisor.html">Abrir Painel do Supervisor</a><br />
+          <a href="/frontend/index.html">Abrir App de Motoristas</a><br />
+          <a href="/frontend/teltonika-guide.html">Abrir Guia Teltonika</a>
+        </p>
+      </section>
+    </main>
+    <footer class="app-signature">Direitos Reservados pela RDL, Product powered by Pedro Fonte.</footer>
+  </body>
+</html>
