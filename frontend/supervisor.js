@@ -3326,8 +3326,14 @@ async function loadRosterToday(options = {}) {
   }
 }
 
-document.getElementById("supLoginForm").addEventListener("submit", loginSupervisor);
-document.getElementById("filtersForm").addEventListener("submit", loadServices);
+function bindById(id, eventName, handler) {
+  const el = document.getElementById(id);
+  if (!el) return;
+  el.addEventListener(eventName, handler);
+}
+
+bindById("supLoginForm", "submit", loginSupervisor);
+bindById("filtersForm", "submit", loadServices);
 const clearFiltersBtn = document.getElementById("clearFiltersBtn");
 if (clearFiltersBtn) {
   clearFiltersBtn.addEventListener("click", clearServiceFilters);
@@ -3342,18 +3348,18 @@ if (onlyCancelledEl) {
     loadServices();
   });
 }
-document.getElementById("exportBtn").addEventListener("click", exportCsv);
-document.getElementById("exportExcelBtn").addEventListener("click", exportExcelServices);
-document.getElementById("driverCreateForm").addEventListener("submit", createDriver);
-document.getElementById("accessUserCreateForm").addEventListener("submit", createAccessUser);
-document.getElementById("driverPasswordResetForm").addEventListener("submit", resetDriverPassword);
-document.getElementById("accessPasswordResetForm").addEventListener("submit", resetAccessPassword);
-document.getElementById("importDriversBtn").addEventListener("click", importDrivers);
-document.getElementById("downloadDriversTemplateCsvBtn").addEventListener("click", downloadDriversTemplateCsv);
-document.getElementById("downloadDriversTemplateXlsxBtn").addEventListener("click", downloadDriversTemplateXlsx);
-document.getElementById("exportDriversCsvBtn").addEventListener("click", exportDriversCsv);
-document.getElementById("exportDriversXlsxBtn").addEventListener("click", exportDriversXlsx);
-document.getElementById("refreshDriversBtn").addEventListener("click", loadDrivers);
+bindById("exportBtn", "click", exportCsv);
+bindById("exportExcelBtn", "click", exportExcelServices);
+bindById("driverCreateForm", "submit", createDriver);
+bindById("accessUserCreateForm", "submit", createAccessUser);
+bindById("driverPasswordResetForm", "submit", resetDriverPassword);
+bindById("accessPasswordResetForm", "submit", resetAccessPassword);
+bindById("importDriversBtn", "click", importDrivers);
+bindById("downloadDriversTemplateCsvBtn", "click", downloadDriversTemplateCsv);
+bindById("downloadDriversTemplateXlsxBtn", "click", downloadDriversTemplateXlsx);
+bindById("exportDriversCsvBtn", "click", exportDriversCsv);
+bindById("exportDriversXlsxBtn", "click", exportDriversXlsx);
+bindById("refreshDriversBtn", "click", loadDrivers);
 if (trackerDeviceFormEl) {
   trackerDeviceFormEl.addEventListener("submit", saveTrackerDevice);
 }
@@ -3450,9 +3456,9 @@ const loadStopPassagesBtn = document.getElementById("loadStopPassagesBtn");
 if (loadStopPassagesBtn) {
   loadStopPassagesBtn.addEventListener("click", loadStopPassages);
 }
-document.getElementById("importRosterPreviewBtn").addEventListener("click", () => importRosterFile(true));
-document.getElementById("importRosterBtn").addEventListener("click", () => importRosterFile(false));
-document.getElementById("importGtfsBtn").addEventListener("click", importGtfsZip);
+bindById("importRosterPreviewBtn", "click", () => importRosterFile(true));
+bindById("importRosterBtn", "click", () => importRosterFile(false));
+bindById("importGtfsBtn", "click", importGtfsZip);
 const refreshGtfsEditorLinesBtn = document.getElementById("refreshGtfsEditorLinesBtn");
 if (refreshGtfsEditorLinesBtn) {
   refreshGtfsEditorLinesBtn.addEventListener("click", loadGtfsEditorLines);
@@ -3478,13 +3484,13 @@ if (gtfsEditorStopsListEl && !gtfsEditorStopsListEl.dataset.gtfsEditorDelegation
     removeGtfsEditorStop(seq);
   });
 }
-document.getElementById("closeServiceDrawerBtn").addEventListener("click", closeServiceDrawer);
-document.getElementById("serviceDrawerBackdrop").addEventListener("click", closeServiceDrawer);
-document.getElementById("serviceAdjustForm").addEventListener("submit", saveServiceAdjust);
-document.getElementById("forceEndServiceBtn").addEventListener("click", forceEndService);
-document.getElementById("transferServiceBtn").addEventListener("click", transferServiceBySupervisor);
-document.getElementById("cancelServiceBtn").addEventListener("click", cancelServiceBySupervisor);
-document.getElementById("logoutBtn").addEventListener("click", logoutSupervisor);
+bindById("closeServiceDrawerBtn", "click", closeServiceDrawer);
+bindById("serviceDrawerBackdrop", "click", closeServiceDrawer);
+bindById("serviceAdjustForm", "submit", saveServiceAdjust);
+bindById("forceEndServiceBtn", "click", forceEndService);
+bindById("transferServiceBtn", "click", transferServiceBySupervisor);
+bindById("cancelServiceBtn", "click", cancelServiceBySupervisor);
+bindById("logoutBtn", "click", logoutSupervisor);
 const openRosterFromServicesBtn = document.getElementById("openRosterFromServicesBtn");
 if (openRosterFromServicesBtn) {
   openRosterFromServicesBtn.addEventListener("click", () => openSupervisorTab("tabEscalaDia"));
