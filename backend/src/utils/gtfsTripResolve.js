@@ -129,7 +129,7 @@ async function findBestTripForLine(lineCode, serviceSchedule) {
   const routeCandidates = resolveGtfsRouteCandidates(lineCode);
   const directionHint = resolveDirectionHint(lineCode);
 
-  const baseSql = `
+  const makeBaseSql = (useFeedFilter = true) => `
      SELECT
        t.trip_id,
        t.shape_id,
@@ -137,21 +137,31 @@ async function findBestTripForLine(lineCode, serviceSchedule) {
        MIN(st.departure_time) AS first_departure_time
      FROM gtfs_trips t
      JOIN gtfs_routes r ON r.route_id = t.route_id
+     ${useFeedFilter ? "JOIN gtfs_feeds gf ON gf.feed_key = t.feed_key AND gf.is_active = TRUE" : ""}
      LEFT JOIN gtfs_stop_times st ON st.trip_id = t.trip_id
      WHERE (%WHERE%)
        AND ($2::int IS NULL OR t.direction_id = $2)
      GROUP BY t.trip_id, t.shape_id, t.direction_id`;
+  const runLookup = async (baseSql) =>
+    db.query(
+      baseSql.replace(
+        "%WHERE%",
+        `(TRIM(COALESCE(r.route_short_name, '')) = ANY($1::text[])
+          OR TRIM(COALESCE(r.route_id, '')) = ANY($1::text[])
+          OR regexp_replace(TRIM(LOWER(COALESCE(r.route_short_name, ''))), '^0+', '', 'g') = ANY($1::text[])
+          OR regexp_replace(TRIM(LOWER(COALESCE(r.route_id, ''))), '^0+', '', 'g') = ANY($1::text[]))`
+      ),
+      [routeCandidates, directionHint]
+    );
 
-  let tripsResult = await db.query(
-    baseSql.replace(
-      "%WHERE%",
-      `(TRIM(COALESCE(r.route_short_name, '')) = ANY($1::text[])
-        OR TRIM(COALESCE(r.route_id, '')) = ANY($1::text[])
-        OR regexp_replace(TRIM(LOWER(COALESCE(r.route_short_name, ''))), '^0+', '', 'g') = ANY($1::text[])
-        OR regexp_replace(TRIM(LOWER(COALESCE(r.route_id, ''))), '^0+', '', 'g') = ANY($1::text[]))`
-    ),
-    [routeCandidates, directionHint]
-  );
+  let baseSql = makeBaseSql(true);
+  let tripsResult;
+  try {
+    tripsResult = await runLookup(baseSql);
+  } catch (_error) {
+    baseSql = makeBaseSql(false);
+    tripsResult = await runLookup(baseSql);
+  }
 
   if (!tripsResult.rows.length) {
     const norm = routeCandidates.map((c) =>

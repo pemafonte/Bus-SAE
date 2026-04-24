@@ -26,7 +26,53 @@ function toFloat(value) {
   return Number.isNaN(n) ? null : n;
 }
 
+function normalizeFeedKey(value) {
+  return String(value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 80);
+}
+
+function scopedId(feedKey, rawId) {
+  const cleaned = String(rawId || "").trim();
+  if (!cleaned) return null;
+  return `${feedKey}::${cleaned}`;
+}
+
+async function ensureGtfsMultiFeedInfra() {
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS gtfs_feeds (
+      feed_key VARCHAR(80) PRIMARY KEY,
+      feed_name VARCHAR(160) NOT NULL,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      source_filename VARCHAR(255),
+      routes_count INT NOT NULL DEFAULT 0,
+      trips_count INT NOT NULL DEFAULT 0,
+      shapes_count INT NOT NULL DEFAULT 0,
+      stops_count INT NOT NULL DEFAULT 0,
+      stop_times_count INT NOT NULL DEFAULT 0,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_imported_at TIMESTAMPTZ
+    )`
+  );
+  await db.query(`ALTER TABLE gtfs_routes ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default'`);
+  await db.query(`ALTER TABLE gtfs_trips ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default'`);
+  await db.query(`ALTER TABLE gtfs_shapes ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default'`);
+  await db.query(`ALTER TABLE gtfs_stops ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default'`);
+  await db.query(`ALTER TABLE gtfs_stop_times ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default'`);
+  await db.query(
+    `INSERT INTO gtfs_feeds (feed_key, feed_name, is_active, source_filename, last_imported_at)
+     VALUES ('default', 'Default GTFS', TRUE, 'legacy', NOW())
+     ON CONFLICT (feed_key) DO NOTHING`
+  );
+}
+
 async function ensureGtfsEditorIndexes() {
+  await ensureGtfsMultiFeedInfra();
   await db.query(
     `CREATE INDEX IF NOT EXISTS idx_gtfs_trips_route_id
      ON gtfs_trips(route_id)`
@@ -35,18 +81,41 @@ async function ensureGtfsEditorIndexes() {
     `CREATE INDEX IF NOT EXISTS idx_gtfs_stop_times_trip_seq
      ON gtfs_stop_times(trip_id, stop_sequence)`
   );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_gtfs_routes_feed
+     ON gtfs_routes(feed_key)`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_gtfs_trips_feed
+     ON gtfs_trips(feed_key)`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_gtfs_feeds_active
+     ON gtfs_feeds(is_active, updated_at DESC)`
+  );
 }
 
 router.post("/import", async (req, res) => {
-  const { fileBase64 } = req.body;
+  const { fileBase64 } = req.body || {};
+  const feedNameRaw = String(req.body?.feedName || "").trim();
+  const feedKeyRaw = String(req.body?.feedKey || "").trim();
+  const sourceFilename = String(req.body?.fileName || "").trim() || null;
+  const replaceFeed = req.body?.replaceFeed !== false;
   if (!fileBase64) {
     return res.status(400).json({ message: "Envie fileBase64 com o zip GTFS." });
   }
 
+  const fallbackKey = sourceFilename ? sourceFilename.replace(/\.[^.]+$/, "") : "";
+  const feedKey = normalizeFeedKey(feedKeyRaw || fallbackKey || "default");
+  if (!feedKey) {
+    return res.status(400).json({ message: "Indique um feedKey valido (letras, numeros, _ ou -)." });
+  }
+  const feedName = feedNameRaw || feedKey;
+
   try {
+    await ensureGtfsEditorIndexes();
     const zipBuffer = Buffer.from(fileBase64, "base64");
     const zip = new AdmZip(zipBuffer);
-
     const routes = readZipCsv(zip, "routes.txt");
     const trips = readZipCsv(zip, "trips.txt");
     const shapes = readZipCsv(zip, "shapes.txt");
@@ -60,86 +129,142 @@ router.post("/import", async (req, res) => {
     }
 
     await db.query("BEGIN");
-    await db.query("TRUNCATE gtfs_stop_times, gtfs_shapes, gtfs_trips, gtfs_stops, gtfs_routes RESTART IDENTITY CASCADE");
+    await db.query(
+      `INSERT INTO gtfs_feeds (feed_key, feed_name, is_active, source_filename, updated_at, last_imported_at)
+       VALUES ($1, $2, TRUE, $3, NOW(), NOW())
+       ON CONFLICT (feed_key) DO UPDATE
+       SET feed_name = EXCLUDED.feed_name,
+           source_filename = EXCLUDED.source_filename,
+           updated_at = NOW(),
+           last_imported_at = NOW()`,
+      [feedKey, feedName, sourceFilename]
+    );
+
+    if (replaceFeed) {
+      await db.query(`DELETE FROM gtfs_stop_times WHERE feed_key = $1`, [feedKey]);
+      await db.query(`DELETE FROM gtfs_shapes WHERE feed_key = $1`, [feedKey]);
+      await db.query(`DELETE FROM gtfs_trips WHERE feed_key = $1`, [feedKey]);
+      await db.query(`DELETE FROM gtfs_stops WHERE feed_key = $1`, [feedKey]);
+      await db.query(`DELETE FROM gtfs_routes WHERE feed_key = $1`, [feedKey]);
+    }
+
+    let insertedRoutes = 0;
+    let insertedTrips = 0;
+    let insertedShapes = 0;
+    let insertedStops = 0;
+    let insertedStopTimes = 0;
 
     for (const row of routes) {
+      const routeId = scopedId(feedKey, row.route_id);
+      if (!routeId) continue;
       await db.query(
-        `INSERT INTO gtfs_routes (route_id, route_short_name, route_long_name)
-         VALUES ($1, $2, $3)
+        `INSERT INTO gtfs_routes (route_id, feed_key, route_short_name, route_long_name)
+         VALUES ($1, $2, $3, $4)
          ON CONFLICT (route_id) DO UPDATE
-         SET route_short_name = EXCLUDED.route_short_name,
+         SET feed_key = EXCLUDED.feed_key,
+             route_short_name = EXCLUDED.route_short_name,
              route_long_name = EXCLUDED.route_long_name`,
-        [row.route_id, row.route_short_name || null, row.route_long_name || null]
+        [routeId, feedKey, row.route_short_name || null, row.route_long_name || null]
       );
+      insertedRoutes += 1;
     }
 
     for (const row of trips) {
+      const tripId = scopedId(feedKey, row.trip_id);
+      const routeId = scopedId(feedKey, row.route_id);
+      const shapeId = scopedId(feedKey, row.shape_id);
+      if (!tripId || !routeId) continue;
       await db.query(
-        `INSERT INTO gtfs_trips (trip_id, route_id, service_id, trip_headsign, direction_id, shape_id)
-         VALUES ($1, $2, $3, $4, $5, $6)
+        `INSERT INTO gtfs_trips (trip_id, feed_key, route_id, service_id, trip_headsign, direction_id, shape_id)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (trip_id) DO UPDATE
-         SET route_id = EXCLUDED.route_id,
+         SET feed_key = EXCLUDED.feed_key,
+             route_id = EXCLUDED.route_id,
              service_id = EXCLUDED.service_id,
              trip_headsign = EXCLUDED.trip_headsign,
              direction_id = EXCLUDED.direction_id,
              shape_id = EXCLUDED.shape_id`,
         [
-          row.trip_id,
-          row.route_id,
+          tripId,
+          feedKey,
+          routeId,
           row.service_id || null,
           row.trip_headsign || null,
           row.direction_id != null && row.direction_id !== "" ? Number(row.direction_id) : null,
-          row.shape_id || null,
+          shapeId,
         ]
       );
+      insertedTrips += 1;
     }
 
     for (const row of shapes) {
+      const shapeId = scopedId(feedKey, row.shape_id);
       const lat = toFloat(row.shape_pt_lat);
       const lon = toFloat(row.shape_pt_lon);
       const seq = toInt(row.shape_pt_sequence);
-      if (!row.shape_id || lat == null || lon == null || seq == null) continue;
+      if (!shapeId || lat == null || lon == null || seq == null) continue;
       await db.query(
-        `INSERT INTO gtfs_shapes (shape_id, shape_pt_lat, shape_pt_lon, shape_pt_sequence)
-         VALUES ($1, $2, $3, $4)`,
-        [row.shape_id, lat, lon, seq]
+        `INSERT INTO gtfs_shapes (feed_key, shape_id, shape_pt_lat, shape_pt_lon, shape_pt_sequence)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [feedKey, shapeId, lat, lon, seq]
       );
+      insertedShapes += 1;
     }
 
     for (const row of stops) {
+      const stopId = scopedId(feedKey, row.stop_id);
       const lat = toFloat(row.stop_lat);
       const lon = toFloat(row.stop_lon);
-      if (!row.stop_id || lat == null || lon == null) continue;
+      if (!stopId || lat == null || lon == null) continue;
       await db.query(
-        `INSERT INTO gtfs_stops (stop_id, stop_name, stop_lat, stop_lon)
-         VALUES ($1, $2, $3, $4)
+        `INSERT INTO gtfs_stops (stop_id, feed_key, stop_name, stop_lat, stop_lon)
+         VALUES ($1, $2, $3, $4, $5)
          ON CONFLICT (stop_id) DO UPDATE
-         SET stop_name = EXCLUDED.stop_name,
+         SET feed_key = EXCLUDED.feed_key,
+             stop_name = EXCLUDED.stop_name,
              stop_lat = EXCLUDED.stop_lat,
              stop_lon = EXCLUDED.stop_lon`,
-        [row.stop_id, row.stop_name || null, lat, lon]
+        [stopId, feedKey, row.stop_name || null, lat, lon]
       );
+      insertedStops += 1;
     }
 
     for (const row of stopTimes) {
+      const tripId = scopedId(feedKey, row.trip_id);
+      const stopId = scopedId(feedKey, row.stop_id);
       const seq = toInt(row.stop_sequence);
-      if (!row.trip_id || seq == null) continue;
+      if (!tripId || seq == null) continue;
       await db.query(
-        `INSERT INTO gtfs_stop_times (trip_id, arrival_time, departure_time, stop_id, stop_sequence)
-         VALUES ($1, $2, $3, $4, $5)`,
-        [row.trip_id, row.arrival_time || null, row.departure_time || null, row.stop_id || null, seq]
+        `INSERT INTO gtfs_stop_times (feed_key, trip_id, arrival_time, departure_time, stop_id, stop_sequence)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [feedKey, tripId, row.arrival_time || null, row.departure_time || null, stopId || null, seq]
       );
+      insertedStopTimes += 1;
     }
+
+    await db.query(
+      `UPDATE gtfs_feeds
+       SET routes_count = $2,
+           trips_count = $3,
+           shapes_count = $4,
+           stops_count = $5,
+           stop_times_count = $6,
+           updated_at = NOW(),
+           last_imported_at = NOW()
+       WHERE feed_key = $1`,
+      [feedKey, insertedRoutes, insertedTrips, insertedShapes, insertedStops, insertedStopTimes]
+    );
 
     await db.query("COMMIT");
     return res.json({
       message: "GTFS importado com sucesso.",
+      feed: { feedKey, feedName, replaceFeed },
       counts: {
-        routes: routes.length,
-        trips: trips.length,
-        shapes: shapes.length,
-        stops: stops.length,
-        stopTimes: stopTimes.length,
+        routes: insertedRoutes,
+        trips: insertedTrips,
+        shapes: insertedShapes,
+        stops: insertedStops,
+        stopTimes: insertedStopTimes,
       },
     });
   } catch (error) {
@@ -150,38 +275,95 @@ router.post("/import", async (req, res) => {
 
 router.get("/status", async (_req, res) => {
   try {
+    await ensureGtfsEditorIndexes();
     const counts = await db.query(
       `SELECT
          (SELECT COUNT(*)::int FROM gtfs_routes) AS routes,
          (SELECT COUNT(*)::int FROM gtfs_trips) AS trips,
          (SELECT COUNT(*)::int FROM gtfs_shapes) AS shapes,
          (SELECT COUNT(*)::int FROM gtfs_stops) AS stops,
-         (SELECT COUNT(*)::int FROM gtfs_stop_times) AS stop_times`
+         (SELECT COUNT(*)::int FROM gtfs_stop_times) AS stop_times,
+         (SELECT COUNT(*)::int FROM gtfs_feeds WHERE is_active = TRUE) AS active_feeds`
     );
-    return res.json({
-      persisted: true,
-      counts: counts.rows[0],
-    });
-  } catch (error) {
+    const feeds = await db.query(
+      `SELECT feed_key, feed_name, is_active, source_filename, routes_count, trips_count, stops_count, updated_at
+       FROM gtfs_feeds
+       ORDER BY is_active DESC, updated_at DESC, feed_key ASC`
+    );
+    return res.json({ persisted: true, counts: counts.rows[0], feeds: feeds.rows });
+  } catch (_error) {
     return res.status(500).json({ message: "Erro ao consultar estado GTFS." });
   }
 });
 
-router.get("/editor/lines", async (_req, res) => {
+router.get("/feeds", async (_req, res) => {
   try {
     await ensureGtfsEditorIndexes();
     const result = await db.query(
+      `SELECT feed_key, feed_name, is_active, source_filename, routes_count, trips_count, shapes_count, stops_count, stop_times_count, updated_at, last_imported_at
+       FROM gtfs_feeds
+       ORDER BY is_active DESC, updated_at DESC, feed_key ASC`
+    );
+    return res.json(result.rows);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar feeds GTFS." });
+  }
+});
+
+router.patch("/feeds/:feedKey", async (req, res) => {
+  const feedKey = normalizeFeedKey(req.params.feedKey);
+  if (!feedKey) return res.status(400).json({ message: "feedKey invalido." });
+  const hasIsActive = typeof req.body?.isActive === "boolean";
+  const hasName = req.body?.feedName != null;
+  if (!hasIsActive && !hasName) {
+    return res.status(400).json({ message: "Nada para atualizar (isActive/feedName)." });
+  }
+  try {
+    await ensureGtfsEditorIndexes();
+    if (hasIsActive && req.body.isActive === false) {
+      const activeCount = await db.query(`SELECT COUNT(*)::int AS c FROM gtfs_feeds WHERE is_active = TRUE`);
+      if (Number(activeCount.rows[0]?.c || 0) <= 1) {
+        return res.status(400).json({ message: "Tem de existir pelo menos um feed GTFS ativo." });
+      }
+    }
+    const result = await db.query(
+      `UPDATE gtfs_feeds
+       SET is_active = COALESCE($2::boolean, is_active),
+           feed_name = COALESCE(NULLIF($3::text, ''), feed_name),
+           updated_at = NOW()
+       WHERE feed_key = $1
+       RETURNING feed_key, feed_name, is_active, source_filename, routes_count, trips_count, shapes_count, stops_count, stop_times_count, updated_at, last_imported_at`,
+      [feedKey, hasIsActive ? req.body.isActive : null, hasName ? String(req.body.feedName).trim() : null]
+    );
+    if (!result.rowCount) return res.status(404).json({ message: "Feed GTFS nao encontrado." });
+    return res.json({ message: "Feed GTFS atualizado.", feed: result.rows[0] });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao atualizar feed GTFS." });
+  }
+});
+
+router.get("/editor/lines", async (req, res) => {
+  try {
+    await ensureGtfsEditorIndexes();
+    const feedKey = normalizeFeedKey(req.query.feedKey || "");
+    const includeInactive = String(req.query.includeInactive || "").toLowerCase() === "true";
+    const result = await db.query(
       `SELECT
+         r.feed_key,
          r.route_id,
          COALESCE(r.route_short_name, '') AS route_short_name,
          COALESCE(r.route_long_name, '') AS route_long_name,
          COUNT(DISTINCT t.trip_id)::int AS trips_count,
          COUNT(DISTINCT st.stop_id)::int AS stops_count
        FROM gtfs_routes r
+       JOIN gtfs_feeds gf ON gf.feed_key = r.feed_key
        LEFT JOIN gtfs_trips t ON t.route_id = r.route_id
        LEFT JOIN gtfs_stop_times st ON st.trip_id = t.trip_id
-       GROUP BY r.route_id, r.route_short_name, r.route_long_name
-       ORDER BY NULLIF(r.route_short_name, '') ASC NULLS LAST, r.route_id ASC`
+       WHERE ($1::text = '' OR r.feed_key = $1)
+         AND ($2::boolean = TRUE OR gf.is_active = TRUE)
+       GROUP BY r.feed_key, r.route_id, r.route_short_name, r.route_long_name
+       ORDER BY r.feed_key ASC, NULLIF(r.route_short_name, '') ASC NULLS LAST, r.route_id ASC`,
+      [feedKey, includeInactive]
     );
     return res.json(result.rows);
   } catch (_error) {
@@ -193,18 +375,22 @@ router.get("/editor/trips", async (req, res) => {
   const routeId = String(req.query.routeId || "").trim();
   if (!routeId) return res.status(400).json({ message: "Indique routeId." });
   try {
+    await ensureGtfsEditorIndexes();
     const result = await db.query(
       `SELECT
          t.trip_id,
+         t.feed_key,
          t.route_id,
          COALESCE(t.trip_headsign, '') AS trip_headsign,
          t.direction_id,
          t.service_id,
          COUNT(st.stop_id)::int AS stops_count
        FROM gtfs_trips t
+       JOIN gtfs_feeds gf ON gf.feed_key = t.feed_key
        LEFT JOIN gtfs_stop_times st ON st.trip_id = t.trip_id
        WHERE t.route_id = $1
-       GROUP BY t.trip_id, t.route_id, t.trip_headsign, t.direction_id, t.service_id
+         AND gf.is_active = TRUE
+       GROUP BY t.trip_id, t.feed_key, t.route_id, t.trip_headsign, t.direction_id, t.service_id
        ORDER BY t.trip_id ASC`,
       [routeId]
     );
@@ -218,15 +404,14 @@ router.get("/editor/trip-stops", async (req, res) => {
   const tripId = String(req.query.tripId || "").trim();
   if (!tripId) return res.status(400).json({ message: "Indique tripId." });
   try {
+    await ensureGtfsEditorIndexes();
     const tripRes = await db.query(
-      `SELECT trip_id, route_id, trip_headsign, direction_id, service_id
+      `SELECT trip_id, feed_key, route_id, trip_headsign, direction_id, service_id
        FROM gtfs_trips
        WHERE trip_id = $1`,
       [tripId]
     );
-    if (!tripRes.rowCount) {
-      return res.status(404).json({ message: "Trip GTFS não encontrada." });
-    }
+    if (!tripRes.rowCount) return res.status(404).json({ message: "Trip GTFS não encontrada." });
     const stopsRes = await db.query(
       `SELECT
          st.stop_sequence,
@@ -250,6 +435,7 @@ router.get("/editor/trip-stops", async (req, res) => {
 
 router.post("/editor/trip-stops", async (req, res) => {
   const tripId = String(req.body?.tripId || "").trim();
+  const applyScope = String(req.body?.applyScope || "trip").trim().toLowerCase();
   const stopIdRaw = String(req.body?.stopId || "").trim();
   const stopName = String(req.body?.stopName || "").trim();
   const stopLat = toFloat(req.body?.stopLat);
@@ -259,62 +445,100 @@ router.post("/editor/trip-stops", async (req, res) => {
   const requestedSequence = toInt(req.body?.stopSequence);
 
   if (!tripId) return res.status(400).json({ message: "Indique tripId." });
+  if (applyScope !== "trip" && applyScope !== "route") {
+    return res.status(400).json({ message: "applyScope inválido (use trip ou route)." });
+  }
   if (!stopIdRaw && (!stopName || stopLat == null || stopLon == null)) {
     return res.status(400).json({ message: "Indique stopId existente ou stopName+stopLat+stopLon para criar nova paragem." });
   }
 
   const client = await db.pool.connect();
   try {
+    await ensureGtfsEditorIndexes();
     await client.query("BEGIN");
-    const tripRes = await client.query(`SELECT trip_id FROM gtfs_trips WHERE trip_id = $1 FOR UPDATE`, [tripId]);
+    const tripRes = await client.query(
+      `SELECT trip_id, feed_key, route_id
+       FROM gtfs_trips
+       WHERE trip_id = $1
+       FOR UPDATE`,
+      [tripId]
+    );
     if (!tripRes.rowCount) {
       await client.query("ROLLBACK");
       return res.status(404).json({ message: "Trip GTFS não encontrada." });
     }
-
+    const tripFeedKey = String(tripRes.rows[0].feed_key || "default");
+    const routeId = String(tripRes.rows[0].route_id || "");
+    const targetTripsRes =
+      applyScope === "route"
+        ? await client.query(
+            `SELECT trip_id
+             FROM gtfs_trips
+             WHERE feed_key = $1
+               AND route_id = $2
+             ORDER BY trip_id ASC
+             FOR UPDATE`,
+            [tripFeedKey, routeId]
+          )
+        : { rows: [{ trip_id: tripId }] };
+    const targetTripIds = targetTripsRes.rows.map((r) => String(r.trip_id || "").trim()).filter(Boolean);
+    if (!targetTripIds.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Não foram encontradas trips para atualizar." });
+    }
     let stopId = stopIdRaw;
+
     if (stopId) {
-      const stopRes = await client.query(`SELECT stop_id FROM gtfs_stops WHERE stop_id = $1`, [stopId]);
+      const scopedStopId = scopedId(tripFeedKey, stopId);
+      const stopRes = await client.query(`SELECT stop_id FROM gtfs_stops WHERE stop_id = $1`, [scopedStopId]);
       if (!stopRes.rowCount) {
         await client.query("ROLLBACK");
         return res.status(404).json({ message: "stopId não existe em gtfs_stops." });
       }
+      stopId = scopedStopId;
     } else {
-      stopId = `custom_${Date.now()}`;
+      stopId = scopedId(tripFeedKey, `custom_${Date.now()}`);
       await client.query(
-        `INSERT INTO gtfs_stops (stop_id, stop_name, stop_lat, stop_lon)
-         VALUES ($1, $2, $3, $4)`,
-        [stopId, stopName, stopLat, stopLon]
+        `INSERT INTO gtfs_stops (stop_id, feed_key, stop_name, stop_lat, stop_lon)
+         VALUES ($1, $2, $3, $4, $5)`,
+        [stopId, tripFeedKey, stopName, stopLat, stopLon]
       );
     }
 
-    const maxSeqRes = await client.query(
-      `SELECT COALESCE(MAX(stop_sequence), 0)::int AS max_seq
-       FROM gtfs_stop_times
-       WHERE trip_id = $1`,
-      [tripId]
-    );
-    const maxSeq = Number(maxSeqRes.rows[0]?.max_seq || 0);
-    let seq = Number.isFinite(requestedSequence) && requestedSequence > 0 ? requestedSequence : maxSeq + 1;
-    if (seq < 1) seq = 1;
-    if (seq <= maxSeq) {
-      await client.query(
-        `UPDATE gtfs_stop_times
-         SET stop_sequence = stop_sequence + 1
-         WHERE trip_id = $1
-           AND stop_sequence >= $2`,
-        [tripId, seq]
+    let totalInserted = 0;
+    for (const targetTripId of targetTripIds) {
+      const maxSeqRes = await client.query(
+        `SELECT COALESCE(MAX(stop_sequence), 0)::int AS max_seq
+         FROM gtfs_stop_times
+         WHERE trip_id = $1`,
+        [targetTripId]
       );
+      const maxSeq = Number(maxSeqRes.rows[0]?.max_seq || 0);
+      let seq = Number.isFinite(requestedSequence) && requestedSequence > 0 ? requestedSequence : maxSeq + 1;
+      if (seq < 1) seq = 1;
+      if (seq <= maxSeq) {
+        await client.query(
+          `UPDATE gtfs_stop_times
+           SET stop_sequence = stop_sequence + 1
+           WHERE trip_id = $1
+             AND stop_sequence >= $2`,
+          [targetTripId, seq]
+        );
+      }
+      await client.query(
+        `INSERT INTO gtfs_stop_times (feed_key, trip_id, arrival_time, departure_time, stop_id, stop_sequence)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [tripFeedKey, targetTripId, arrivalTime, departureTime, stopId, seq]
+      );
+      totalInserted += 1;
     }
-
-    await client.query(
-      `INSERT INTO gtfs_stop_times (trip_id, arrival_time, departure_time, stop_id, stop_sequence)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [tripId, arrivalTime, departureTime, stopId, seq]
-    );
 
     await client.query("COMMIT");
-    return res.json({ message: "Paragem adicionada à trip GTFS.", tripId, stopId, stopSequence: seq });
+    const msg =
+      applyScope === "route"
+        ? `Paragem adicionada em ${totalInserted} trips da carreira.`
+        : "Paragem adicionada à trip GTFS.";
+    return res.json({ message: msg, tripId, stopId, applyScope, affectedTrips: totalInserted });
   } catch (_error) {
     await client.query("ROLLBACK").catch(() => {});
     return res.status(500).json({ message: "Erro ao adicionar paragem na trip GTFS." });
@@ -326,40 +550,86 @@ router.post("/editor/trip-stops", async (req, res) => {
 router.delete("/editor/trip-stops", async (req, res) => {
   const tripId = String(req.query.tripId || req.body?.tripId || "").trim();
   const stopSequence = toInt(req.query.stopSequence || req.body?.stopSequence);
+  const applyScope = String(req.query.applyScope || req.body?.applyScope || "trip")
+    .trim()
+    .toLowerCase();
   if (!tripId || !Number.isFinite(stopSequence) || stopSequence <= 0) {
     return res.status(400).json({ message: "Indique tripId e stopSequence válidos." });
+  }
+  if (applyScope !== "trip" && applyScope !== "route") {
+    return res.status(400).json({ message: "applyScope inválido (use trip ou route)." });
   }
 
   const client = await db.pool.connect();
   try {
     await client.query("BEGIN");
-    const delRes = await client.query(
-      `DELETE FROM gtfs_stop_times
+    const tripRes = await client.query(
+      `SELECT trip_id, feed_key, route_id
+       FROM gtfs_trips
        WHERE trip_id = $1
-         AND stop_sequence = $2
-       RETURNING trip_id`,
-      [tripId, stopSequence]
+       FOR UPDATE`,
+      [tripId]
     );
-    if (!delRes.rowCount) {
+    if (!tripRes.rowCount) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Trip GTFS não encontrada." });
+    }
+    const tripFeedKey = String(tripRes.rows[0].feed_key || "default");
+    const routeId = String(tripRes.rows[0].route_id || "");
+    const targetTripsRes =
+      applyScope === "route"
+        ? await client.query(
+            `SELECT trip_id
+             FROM gtfs_trips
+             WHERE feed_key = $1
+               AND route_id = $2
+             ORDER BY trip_id ASC
+             FOR UPDATE`,
+            [tripFeedKey, routeId]
+          )
+        : { rows: [{ trip_id: tripId }] };
+    const targetTripIds = targetTripsRes.rows.map((r) => String(r.trip_id || "").trim()).filter(Boolean);
+    let totalAffected = 0;
+    for (const targetTripId of targetTripIds) {
+      const delRes = await client.query(
+        `DELETE FROM gtfs_stop_times
+         WHERE trip_id = $1
+           AND stop_sequence = $2
+         RETURNING trip_id`,
+        [targetTripId, stopSequence]
+      );
+      if (!delRes.rowCount) continue;
+      totalAffected += 1;
+      await client.query(
+        `WITH ordered AS (
+           SELECT ctid, ROW_NUMBER() OVER (ORDER BY stop_sequence ASC) AS new_seq
+           FROM gtfs_stop_times
+           WHERE trip_id = $1
+         )
+         UPDATE gtfs_stop_times st
+         SET stop_sequence = o.new_seq
+         FROM ordered o
+         WHERE st.ctid = o.ctid`,
+        [targetTripId]
+      );
+    }
+    if (!totalAffected) {
       await client.query("ROLLBACK");
       return res.status(404).json({ message: "Paragem não encontrada para remoção." });
     }
 
-    await client.query(
-      `WITH ordered AS (
-         SELECT ctid, ROW_NUMBER() OVER (ORDER BY stop_sequence ASC) AS new_seq
-         FROM gtfs_stop_times
-         WHERE trip_id = $1
-       )
-       UPDATE gtfs_stop_times st
-       SET stop_sequence = o.new_seq
-       FROM ordered o
-       WHERE st.ctid = o.ctid`,
-      [tripId]
-    );
-
     await client.query("COMMIT");
-    return res.json({ message: "Paragem removida e sequência normalizada.", tripId, removedStopSequence: stopSequence });
+    const msg =
+      applyScope === "route"
+        ? `Paragem removida em ${totalAffected} trips da carreira e sequências normalizadas.`
+        : "Paragem removida e sequência normalizada.";
+    return res.json({
+      message: msg,
+      tripId,
+      removedStopSequence: stopSequence,
+      applyScope,
+      affectedTrips: totalAffected,
+    });
   } catch (_error) {
     await client.query("ROLLBACK").catch(() => {});
     return res.status(500).json({ message: "Erro ao remover paragem da trip GTFS." });

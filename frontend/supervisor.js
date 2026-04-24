@@ -119,7 +119,12 @@ const gtfsEditorRouteSelectEl = document.getElementById("gtfsEditorRouteSelect")
 const gtfsEditorTripSelectEl = document.getElementById("gtfsEditorTripSelect");
 const gtfsEditorSummaryEl = document.getElementById("gtfsEditorSummary");
 const gtfsEditorStopsListEl = document.getElementById("gtfsEditorStopsList");
+const gtfsEditorApplyScopeEl = document.getElementById("gtfsEditorApplyScope");
 const gtfsRtPreviewReportEl = document.getElementById("gtfsRtPreviewReport");
+const gtfsFeedKeyEl = document.getElementById("gtfsFeedKey");
+const gtfsFeedNameEl = document.getElementById("gtfsFeedName");
+const gtfsReplaceFeedEl = document.getElementById("gtfsReplaceFeed");
+const gtfsFeedsListEl = document.getElementById("gtfsFeedsList");
 const vehicleRegistryFormEl = document.getElementById("vehicleRegistryForm");
 const vehicleRegistryListEl = document.getElementById("vehicleRegistryList");
 const odometerReconciliationListEl = document.getElementById("odometerReconciliationList");
@@ -975,6 +980,9 @@ function openSupervisorTab(tabId) {
   }
   if (tabId === "tabEditorGtfs") {
     loadGtfsEditorLines();
+  }
+  if (tabId === "tabImportarMotoristas") {
+    loadGtfsFeeds();
   }
   if (tabId === "tabMensagensComunicacao") {
     loadOpsMessagePresets();
@@ -2245,10 +2253,28 @@ async function importGtfsZip() {
     binary += String.fromCharCode(b);
   });
 
+  const feedKey = String(gtfsFeedKeyEl?.value || "")
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9_-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "");
+  const feedName = String(gtfsFeedNameEl?.value || "").trim();
+  if (!feedKey) {
+    alert("Indique a chave do feed GTFS (ex.: urbano_lisboa).");
+    return;
+  }
+
   const response = await fetch(`${API_BASE}/gtfs/import`, {
     method: "POST",
     headers: getAuthHeaders(),
-    body: JSON.stringify({ fileBase64: btoa(binary) }),
+    body: JSON.stringify({
+      fileBase64: btoa(binary),
+      feedKey,
+      feedName: feedName || feedKey,
+      fileName: file.name,
+      replaceFeed: gtfsReplaceFeedEl?.checked !== false,
+    }),
   });
   const data = await response.json();
   if (!response.ok) {
@@ -2259,6 +2285,7 @@ async function importGtfsZip() {
 
   importGtfsReportEl.textContent = [
     data.message || "GTFS importado.",
+    `feed: ${data.feed?.feedKey || feedKey} (${data.feed?.feedName || feedName || feedKey})`,
     `routes: ${data.counts?.routes || 0}`,
     `trips: ${data.counts?.trips || 0}`,
     `shapes: ${data.counts?.shapes || 0}`,
@@ -2266,6 +2293,65 @@ async function importGtfsZip() {
     `stop_times: ${data.counts?.stopTimes || 0}`,
   ].join("\n");
   alert("GTFS importado com sucesso.");
+  await loadGtfsFeeds();
+  await loadGtfsEditorLines();
+}
+
+async function loadGtfsFeeds() {
+  if (!supToken || !gtfsFeedsListEl) return;
+  gtfsFeedsListEl.innerHTML = "<div>A carregar feeds GTFS...</div>";
+  const response = await fetch(`${API_BASE}/gtfs/feeds`, { headers: getAuthHeaders() });
+  const data = await response.json().catch(() => ([]));
+  if (!response.ok) {
+    gtfsFeedsListEl.innerHTML = `<div>${data.message || "Erro ao carregar feeds GTFS."}</div>`;
+    return;
+  }
+  const rows = Array.isArray(data) ? data : [];
+  if (!rows.length) {
+    gtfsFeedsListEl.innerHTML = "<div>Sem feeds GTFS carregados.</div>";
+    return;
+  }
+  gtfsFeedsListEl.innerHTML = "";
+  rows.forEach((feed) => {
+    const item = document.createElement("article");
+    item.className = "service-card-item";
+    const active = feed.is_active === true;
+    item.innerHTML = `
+      <div class="service-card-head">
+        <strong>${feed.feed_name || feed.feed_key}</strong>
+        <span class="status-badge ${active ? "status-completed" : "status-cancelled"}">${active ? "Ativo" : "Inativo"}</span>
+      </div>
+      <div class="service-card-grid">
+        <div><small>Chave</small><div>${feed.feed_key || "-"}</div></div>
+        <div><small>Origem</small><div>${feed.source_filename || "-"}</div></div>
+        <div><small>Linhas</small><div>${feed.routes_count ?? 0}</div></div>
+        <div><small>Trips</small><div>${feed.trips_count ?? 0}</div></div>
+        <div><small>Atualizado</small><div>${feed.updated_at ? formatDate(feed.updated_at) : "-"}</div></div>
+      </div>
+      <div class="service-card-actions">
+        <button type="button" class="${active ? "danger-btn" : "adjust-btn"}" data-gtfs-feed-toggle="${feed.feed_key}" data-gtfs-feed-active="${active ? "1" : "0"}">
+          ${active ? "Desativar" : "Ativar"}
+        </button>
+      </div>
+    `;
+    gtfsFeedsListEl.appendChild(item);
+  });
+}
+
+async function toggleGtfsFeed(feedKey, currentlyActive) {
+  if (!supToken || !feedKey) return;
+  const response = await fetch(`${API_BASE}/gtfs/feeds/${encodeURIComponent(feedKey)}`, {
+    method: "PATCH",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ isActive: !currentlyActive }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao atualizar feed GTFS.");
+    return;
+  }
+  await loadGtfsFeeds();
+  await loadGtfsEditorLines();
 }
 
 function renderGtfsEditorSummary(text) {
@@ -2288,7 +2374,7 @@ async function loadGtfsEditorLines() {
     option.value = r.route_id;
     const short = String(r.route_short_name || "").trim();
     const long = String(r.route_long_name || "").trim();
-    option.textContent = `${short || r.route_id}${long ? ` - ${long}` : ""} | trips ${r.trips_count || 0} | paragens ${r.stops_count || 0}`;
+    option.textContent = `[${r.feed_key || "default"}] ${short || r.route_id}${long ? ` - ${long}` : ""} | trips ${r.trips_count || 0} | paragens ${r.stops_count || 0}`;
     gtfsEditorRouteSelectEl.appendChild(option);
   });
   if (gtfsEditorTripSelectEl) {
@@ -2395,6 +2481,7 @@ async function addGtfsEditorStop(event) {
 
   const payload = {
     tripId,
+    applyScope: String(gtfsEditorApplyScopeEl?.value || "trip").trim().toLowerCase(),
     stopId: stopId || null,
     stopName: stopName || null,
     stopLat: stopLat || null,
@@ -2422,10 +2509,15 @@ async function removeGtfsEditorStop(stopSequence) {
   if (!supToken || !gtfsEditorTripSelectEl) return;
   const tripId = String(gtfsEditorTripSelectEl.value || "").trim();
   if (!tripId) return;
-  const confirmed = window.confirm(`Remover paragem da sequência ${stopSequence} da trip ${tripId}?`);
+  const applyScope = String(gtfsEditorApplyScopeEl?.value || "trip").trim().toLowerCase();
+  const targetLabel =
+    applyScope === "route"
+      ? "de todas as trips da carreira (linha da trip selecionada)"
+      : `da trip ${tripId}`;
+  const confirmed = window.confirm(`Remover paragem da sequência ${stopSequence} ${targetLabel}?`);
   if (!confirmed) return;
   const response = await fetch(
-    `${API_BASE}/gtfs/editor/trip-stops?tripId=${encodeURIComponent(tripId)}&stopSequence=${encodeURIComponent(stopSequence)}`,
+    `${API_BASE}/gtfs/editor/trip-stops?tripId=${encodeURIComponent(tripId)}&stopSequence=${encodeURIComponent(stopSequence)}&applyScope=${encodeURIComponent(applyScope)}`,
     {
       method: "DELETE",
       headers: getAuthHeaders(),
@@ -3414,6 +3506,9 @@ if (deadheadFromDateEl && !deadheadFromDateEl.value) {
 if (deadheadToDateEl && !deadheadToDateEl.value) {
   deadheadToDateEl.value = todayISOInLisbon();
 }
+if (gtfsFeedKeyEl && !gtfsFeedKeyEl.value) {
+  gtfsFeedKeyEl.value = "default";
+}
 if (deadheadFromDateEl) deadheadFromDateEl.addEventListener("change", loadDeadheadMovements);
 if (deadheadToDateEl) deadheadToDateEl.addEventListener("change", loadDeadheadMovements);
 if (deadheadFleetFilterEl) {
@@ -3461,6 +3556,7 @@ if (loadStopPassagesBtn) {
 bindById("importRosterPreviewBtn", "click", () => importRosterFile(true));
 bindById("importRosterBtn", "click", () => importRosterFile(false));
 bindById("importGtfsBtn", "click", importGtfsZip);
+bindById("refreshGtfsFeedsBtn", "click", loadGtfsFeeds);
 const refreshGtfsEditorLinesBtn = document.getElementById("refreshGtfsEditorLinesBtn");
 if (refreshGtfsEditorLinesBtn) {
   refreshGtfsEditorLinesBtn.addEventListener("click", loadGtfsEditorLines);
@@ -3484,6 +3580,16 @@ if (gtfsEditorStopsListEl && !gtfsEditorStopsListEl.dataset.gtfsEditorDelegation
     const seq = Number(btn.getAttribute("data-gtfs-remove-seq"));
     if (!Number.isFinite(seq)) return;
     removeGtfsEditorStop(seq);
+  });
+}
+if (gtfsFeedsListEl && !gtfsFeedsListEl.dataset.gtfsFeedsDelegation) {
+  gtfsFeedsListEl.dataset.gtfsFeedsDelegation = "1";
+  gtfsFeedsListEl.addEventListener("click", (event) => {
+    const btn = event.target.closest("button[data-gtfs-feed-toggle]");
+    if (!btn) return;
+    const feedKey = String(btn.getAttribute("data-gtfs-feed-toggle") || "");
+    const active = btn.getAttribute("data-gtfs-feed-active") === "1";
+    toggleGtfsFeed(feedKey, active);
   });
 }
 bindById("closeServiceDrawerBtn", "click", closeServiceDrawer);

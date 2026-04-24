@@ -145,12 +145,14 @@ CREATE TABLE IF NOT EXISTS service_handover_events (
 
 CREATE TABLE IF NOT EXISTS gtfs_routes (
   route_id VARCHAR(120) PRIMARY KEY,
+  feed_key VARCHAR(80) NOT NULL DEFAULT 'default',
   route_short_name VARCHAR(80),
   route_long_name VARCHAR(255)
 );
 
 CREATE TABLE IF NOT EXISTS gtfs_trips (
   trip_id VARCHAR(120) PRIMARY KEY,
+  feed_key VARCHAR(80) NOT NULL DEFAULT 'default',
   route_id VARCHAR(120) NOT NULL REFERENCES gtfs_routes(route_id) ON DELETE CASCADE,
   service_id VARCHAR(120),
   trip_headsign VARCHAR(255),
@@ -163,6 +165,7 @@ ALTER TABLE gtfs_trips
 
 CREATE TABLE IF NOT EXISTS gtfs_shapes (
   id BIGSERIAL PRIMARY KEY,
+  feed_key VARCHAR(80) NOT NULL DEFAULT 'default',
   shape_id VARCHAR(120) NOT NULL,
   shape_pt_lat DOUBLE PRECISION NOT NULL,
   shape_pt_lon DOUBLE PRECISION NOT NULL,
@@ -171,6 +174,7 @@ CREATE TABLE IF NOT EXISTS gtfs_shapes (
 
 CREATE TABLE IF NOT EXISTS gtfs_stops (
   stop_id VARCHAR(120) PRIMARY KEY,
+  feed_key VARCHAR(80) NOT NULL DEFAULT 'default',
   stop_name VARCHAR(255),
   stop_lat DOUBLE PRECISION NOT NULL,
   stop_lon DOUBLE PRECISION NOT NULL
@@ -178,6 +182,7 @@ CREATE TABLE IF NOT EXISTS gtfs_stops (
 
 CREATE TABLE IF NOT EXISTS gtfs_stop_times (
   id BIGSERIAL PRIMARY KEY,
+  feed_key VARCHAR(80) NOT NULL DEFAULT 'default',
   trip_id VARCHAR(120) NOT NULL REFERENCES gtfs_trips(trip_id) ON DELETE CASCADE,
   arrival_time VARCHAR(20),
   departure_time VARCHAR(20),
@@ -185,16 +190,54 @@ CREATE TABLE IF NOT EXISTS gtfs_stop_times (
   stop_sequence INT
 );
 
+ALTER TABLE gtfs_routes
+  ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default';
+ALTER TABLE gtfs_trips
+  ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default';
+ALTER TABLE gtfs_shapes
+  ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default';
+ALTER TABLE gtfs_stops
+  ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default';
+ALTER TABLE gtfs_stop_times
+  ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default';
+
+CREATE TABLE IF NOT EXISTS gtfs_feeds (
+  feed_key VARCHAR(80) PRIMARY KEY,
+  feed_name VARCHAR(160) NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  source_filename VARCHAR(255),
+  routes_count INT NOT NULL DEFAULT 0,
+  trips_count INT NOT NULL DEFAULT 0,
+  shapes_count INT NOT NULL DEFAULT 0,
+  stops_count INT NOT NULL DEFAULT 0,
+  stop_times_count INT NOT NULL DEFAULT 0,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_imported_at TIMESTAMPTZ
+);
+
 CREATE INDEX IF NOT EXISTS idx_gtfs_routes_short_name
   ON gtfs_routes(route_short_name);
 CREATE INDEX IF NOT EXISTS idx_gtfs_trips_route
   ON gtfs_trips(route_id);
+CREATE INDEX IF NOT EXISTS idx_gtfs_routes_feed
+  ON gtfs_routes(feed_key);
+CREATE INDEX IF NOT EXISTS idx_gtfs_trips_feed
+  ON gtfs_trips(feed_key);
 CREATE INDEX IF NOT EXISTS idx_gtfs_shapes_shape_seq
   ON gtfs_shapes(shape_id, shape_pt_sequence);
+CREATE INDEX IF NOT EXISTS idx_gtfs_shapes_feed_shape_seq
+  ON gtfs_shapes(feed_key, shape_id, shape_pt_sequence);
 CREATE INDEX IF NOT EXISTS idx_gtfs_stop_times_trip_seq
   ON gtfs_stop_times(trip_id, stop_sequence);
 CREATE INDEX IF NOT EXISTS idx_gtfs_stop_times_trip_departure
   ON gtfs_stop_times(trip_id, departure_time);
+CREATE INDEX IF NOT EXISTS idx_gtfs_stop_times_feed_trip_seq
+  ON gtfs_stop_times(feed_key, trip_id, stop_sequence);
+CREATE INDEX IF NOT EXISTS idx_gtfs_stops_feed
+  ON gtfs_stops(feed_key);
+CREATE INDEX IF NOT EXISTS idx_gtfs_feeds_active
+  ON gtfs_feeds(is_active, updated_at DESC);
 
 ALTER TABLE service_handover_events
   ADD COLUMN IF NOT EXISTS handover_lat DOUBLE PRECISION;

@@ -298,9 +298,18 @@
           <pre id="importRosterReport">Sem importacao de escala executada.</pre>
 
           <h2>Importar GTFS (zip)</h2>
+          <input id="gtfsFeedKey" type="text" placeholder="Chave do feed (ex.: urbano_lisboa)" />
+          <input id="gtfsFeedName" type="text" placeholder="Nome do feed (ex.: Urbano Lisboa)" />
+          <label class="inline-checkbox">
+            <input id="gtfsReplaceFeed" type="checkbox" checked />
+            Substituir apenas este feed se já existir
+          </label>
           <input id="gtfsZipInput" type="file" accept=".zip,application/zip" />
           <button id="importGtfsBtn">Importar GTFS</button>
           <pre id="importGtfsReport">Sem importacao GTFS executada.</pre>
+          <h3>Feeds GTFS carregados</h3>
+          <button id="refreshGtfsFeedsBtn" type="button">Atualizar feeds GTFS</button>
+          <div id="gtfsFeedsList" class="service-cards"></div>
         </div>
 
         <div id="tabEditorGtfs" class="tab-panel">
@@ -325,6 +334,14 @@
           </section>
           <section class="card card-top-gap">
             <h3>Adicionar paragem à trip</h3>
+            <label for="gtfsEditorApplyScope">Aplicar alterações em</label>
+            <select id="gtfsEditorApplyScope">
+              <option value="trip">Apenas nesta trip selecionada</option>
+              <option value="route">Carreira completa (todas as trips da linha)</option>
+            </select>
+            <p class="field-help field-help-tight">
+              Em modo carreira completa, a paragem é adicionada/removida em todas as trips da linha da trip selecionada.
+            </p>
             <form id="gtfsEditorAddStopForm">
               <input id="gtfsEditorAddStopId" type="text" placeholder="stop_id existente (opcional)" />
               <input id="gtfsEditorAddStopName" type="text" placeholder="Nome da nova paragem (se criar nova)" />
