@@ -205,6 +205,8 @@ CREATE TABLE IF NOT EXISTS gtfs_feeds (
   feed_key VARCHAR(80) PRIMARY KEY,
   feed_name VARCHAR(160) NOT NULL,
   is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  gtfs_effective_from DATE,
+  calendar_effective_from DATE,
   source_filename VARCHAR(255),
   routes_count INT NOT NULL DEFAULT 0,
   trips_count INT NOT NULL DEFAULT 0,
@@ -214,6 +216,40 @@ CREATE TABLE IF NOT EXISTS gtfs_feeds (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   last_imported_at TIMESTAMPTZ
+);
+
+ALTER TABLE gtfs_feeds
+  ADD COLUMN IF NOT EXISTS gtfs_effective_from DATE;
+ALTER TABLE gtfs_feeds
+  ADD COLUMN IF NOT EXISTS calendar_effective_from DATE;
+
+CREATE TABLE IF NOT EXISTS gtfs_calendars (
+  feed_key VARCHAR(80) NOT NULL DEFAULT 'default',
+  service_id VARCHAR(120) NOT NULL,
+  monday INT NOT NULL DEFAULT 0,
+  tuesday INT NOT NULL DEFAULT 0,
+  wednesday INT NOT NULL DEFAULT 0,
+  thursday INT NOT NULL DEFAULT 0,
+  friday INT NOT NULL DEFAULT 0,
+  saturday INT NOT NULL DEFAULT 0,
+  sunday INT NOT NULL DEFAULT 0,
+  start_date DATE NOT NULL,
+  end_date DATE NOT NULL,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (feed_key, service_id),
+  FOREIGN KEY (feed_key) REFERENCES gtfs_feeds(feed_key) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS gtfs_calendar_dates (
+  id BIGSERIAL PRIMARY KEY,
+  feed_key VARCHAR(80) NOT NULL DEFAULT 'default',
+  service_id VARCHAR(120) NOT NULL,
+  calendar_date DATE NOT NULL,
+  exception_type INT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  UNIQUE (feed_key, service_id, calendar_date),
+  FOREIGN KEY (feed_key) REFERENCES gtfs_feeds(feed_key) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_gtfs_routes_short_name
@@ -238,6 +274,10 @@ CREATE INDEX IF NOT EXISTS idx_gtfs_stops_feed
   ON gtfs_stops(feed_key);
 CREATE INDEX IF NOT EXISTS idx_gtfs_feeds_active
   ON gtfs_feeds(is_active, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_gtfs_calendars_feed_service
+  ON gtfs_calendars(feed_key, service_id);
+CREATE INDEX IF NOT EXISTS idx_gtfs_calendar_dates_feed_service
+  ON gtfs_calendar_dates(feed_key, service_id, calendar_date);
 
 ALTER TABLE service_handover_events
   ADD COLUMN IF NOT EXISTS handover_lat DOUBLE PRECISION;

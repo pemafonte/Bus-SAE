@@ -116,11 +116,15 @@ const supPresetListEl = document.getElementById("supPresetList");
 const supPresetListScopeEl = document.getElementById("supPresetListScope");
 const refreshSupPresetListBtnEl = document.getElementById("refreshSupPresetListBtn");
 const gtfsEditorRouteSelectEl = document.getElementById("gtfsEditorRouteSelect");
+const gtfsEditorFeedSelectEl = document.getElementById("gtfsEditorFeedSelect");
 const gtfsEditorTripSelectEl = document.getElementById("gtfsEditorTripSelect");
 const gtfsEditorSummaryEl = document.getElementById("gtfsEditorSummary");
 const gtfsEditorStopsListEl = document.getElementById("gtfsEditorStopsList");
 const gtfsEditorApplyScopeEl = document.getElementById("gtfsEditorApplyScope");
 const gtfsRtPreviewReportEl = document.getElementById("gtfsRtPreviewReport");
+const gtfsEffectiveFromEl = document.getElementById("gtfsEffectiveFrom");
+const calendarEffectiveFromEl = document.getElementById("calendarEffectiveFrom");
+const gtfsCalendarsListEl = document.getElementById("gtfsCalendarsList");
 const gtfsFeedKeyEl = document.getElementById("gtfsFeedKey");
 const gtfsFeedNameEl = document.getElementById("gtfsFeedName");
 const gtfsReplaceFeedEl = document.getElementById("gtfsReplaceFeed");
@@ -148,6 +152,7 @@ let supLiveMapUserAdjustedView = false;
 let reportsLoadedOnce = false;
 let selectedOpsDriverId = null;
 let currentSupervisorUserId = null;
+let selectedGtfsFeedKey = "";
 let supervisorAlertsPollTimer = null;
 let supervisorAlertBaselineReady = false;
 let lastSupervisorAlertSignature = "";
@@ -979,7 +984,9 @@ function openSupervisorTab(tabId) {
     loadOdometerReconciliationReport();
   }
   if (tabId === "tabEditorGtfs") {
+    loadGtfsFeeds();
     loadGtfsEditorLines();
+    loadGtfsCalendars();
   }
   if (tabId === "tabImportarMotoristas") {
     loadGtfsFeeds();
@@ -2311,6 +2318,27 @@ async function loadGtfsFeeds() {
     gtfsFeedsListEl.innerHTML = "<div>Sem feeds GTFS carregados.</div>";
     return;
   }
+  if (!selectedGtfsFeedKey) {
+    const firstActive = rows.find((r) => r.is_active === true);
+    selectedGtfsFeedKey = String(firstActive?.feed_key || rows[0]?.feed_key || "");
+  }
+  if (gtfsEditorFeedSelectEl) {
+    gtfsEditorFeedSelectEl.innerHTML = '<option value="">-- Feed ativo (automático) --</option>';
+    rows.forEach((feed) => {
+      const option = document.createElement("option");
+      option.value = feed.feed_key;
+      option.textContent = `${feed.feed_name || feed.feed_key} (${feed.is_active ? "ativo" : "inativo"})`;
+      if (feed.feed_key === selectedGtfsFeedKey) option.selected = true;
+      gtfsEditorFeedSelectEl.appendChild(option);
+    });
+  }
+  const selectedFeed = rows.find((r) => String(r.feed_key) === String(selectedGtfsFeedKey));
+  if (gtfsEffectiveFromEl) gtfsEffectiveFromEl.value = selectedFeed?.gtfs_effective_from ? String(selectedFeed.gtfs_effective_from).slice(0, 10) : "";
+  if (calendarEffectiveFromEl) {
+    calendarEffectiveFromEl.value = selectedFeed?.calendar_effective_from
+      ? String(selectedFeed.calendar_effective_from).slice(0, 10)
+      : "";
+  }
   gtfsFeedsListEl.innerHTML = "";
   rows.forEach((feed) => {
     const item = document.createElement("article");
@@ -2351,7 +2379,118 @@ async function toggleGtfsFeed(feedKey, currentlyActive) {
     return;
   }
   await loadGtfsFeeds();
+  await loadGtfsCalendars();
   await loadGtfsEditorLines();
+}
+
+async function saveGtfsEffectiveDates() {
+  if (!supToken || !selectedGtfsFeedKey) {
+    alert("Selecione um feed GTFS.");
+    return;
+  }
+  const response = await fetch(`${API_BASE}/gtfs/feeds/${encodeURIComponent(selectedGtfsFeedKey)}`, {
+    method: "PATCH",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({
+      gtfsEffectiveFrom: gtfsEffectiveFromEl?.value || null,
+      calendarEffectiveFrom: calendarEffectiveFromEl?.value || null,
+    }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao guardar datas de entrada em vigor.");
+    return;
+  }
+  alert("Datas de entrada em vigor guardadas.");
+  await loadGtfsFeeds();
+}
+
+async function exportGtfsModified() {
+  if (!supToken || !selectedGtfsFeedKey) {
+    alert("Selecione um feed GTFS.");
+    return;
+  }
+  const response = await fetch(`${API_BASE}/gtfs/feeds/${encodeURIComponent(selectedGtfsFeedKey)}/export.zip`, {
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    alert(data.message || "Erro ao exportar GTFS modificado.");
+    return;
+  }
+  const buffer = await response.arrayBuffer();
+  const blob = new Blob([buffer], { type: "application/zip" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = `gtfs_${selectedGtfsFeedKey}_modified.zip`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function renderGtfsCalendars(rows) {
+  if (!gtfsCalendarsListEl) return;
+  gtfsCalendarsListEl.innerHTML = "";
+  if (!Array.isArray(rows) || !rows.length) {
+    gtfsCalendarsListEl.innerHTML = "<div>Sem calendários para este feed.</div>";
+    return;
+  }
+  rows.forEach((row) => {
+    const item = document.createElement("article");
+    item.className = "service-card-item";
+    item.innerHTML = `
+      <div class="service-card-head">
+        <strong>${row.service_id || "-"}</strong>
+        <span class="status-badge ${row.is_active ? "status-completed" : "status-cancelled"}">${row.is_active ? "Ativo" : "Inativo"}</span>
+      </div>
+      <div class="service-card-grid">
+        <div><small>Início</small><div><input type="date" data-cal-start value="${row.start_date ? String(row.start_date).slice(0, 10) : ""}" /></div></div>
+        <div><small>Fim</small><div><input type="date" data-cal-end value="${row.end_date ? String(row.end_date).slice(0, 10) : ""}" /></div></div>
+        <div><small>Dias (0/1)</small><div>${row.monday}${row.tuesday}${row.wednesday}${row.thursday}${row.friday}${row.saturday}${row.sunday}</div></div>
+      </div>
+      <div class="service-card-actions">
+        <button type="button" class="${row.is_active ? "danger-btn" : "adjust-btn"}" data-cal-toggle="${row.service_id}" data-cal-active="${row.is_active ? "1" : "0"}">
+          ${row.is_active ? "Desativar calendário" : "Ativar calendário"}
+        </button>
+        <button type="button" class="adjust-btn" data-cal-save="${row.service_id}">Guardar datas</button>
+      </div>
+    `;
+    gtfsCalendarsListEl.appendChild(item);
+  });
+}
+
+async function loadGtfsCalendars() {
+  if (!supToken || !gtfsCalendarsListEl || !selectedGtfsFeedKey) return;
+  gtfsCalendarsListEl.innerHTML = "<div>A carregar calendários...</div>";
+  const response = await fetch(`${API_BASE}/gtfs/feeds/${encodeURIComponent(selectedGtfsFeedKey)}/calendars`, {
+    headers: getAuthHeaders(),
+  });
+  const data = await response.json().catch(() => ([]));
+  if (!response.ok) {
+    gtfsCalendarsListEl.innerHTML = `<div>${data.message || "Erro ao carregar calendários."}</div>`;
+    return;
+  }
+  renderGtfsCalendars(Array.isArray(data) ? data : []);
+}
+
+async function updateGtfsCalendar(serviceId, payload) {
+  if (!supToken || !selectedGtfsFeedKey || !serviceId) return;
+  const response = await fetch(
+    `${API_BASE}/gtfs/feeds/${encodeURIComponent(selectedGtfsFeedKey)}/calendars/${encodeURIComponent(serviceId)}`,
+    {
+      method: "PATCH",
+      headers: getAuthHeaders(),
+      body: JSON.stringify(payload),
+    }
+  );
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao atualizar calendário.");
+    return;
+  }
+  await loadGtfsCalendars();
 }
 
 function renderGtfsEditorSummary(text) {
@@ -2361,7 +2500,8 @@ function renderGtfsEditorSummary(text) {
 async function loadGtfsEditorLines() {
   if (!supToken || !gtfsEditorRouteSelectEl) return;
   renderGtfsEditorSummary("A carregar linhas GTFS...");
-  const response = await fetch(`${API_BASE}/gtfs/editor/lines`, { headers: getAuthHeaders() });
+  const query = selectedGtfsFeedKey ? `?feedKey=${encodeURIComponent(selectedGtfsFeedKey)}` : "";
+  const response = await fetch(`${API_BASE}/gtfs/editor/lines${query}`, { headers: getAuthHeaders() });
   const data = await response.json().catch(() => ([]));
   if (!response.ok) {
     renderGtfsEditorSummary(data.message || "Erro ao carregar linhas GTFS.");
@@ -3557,9 +3697,20 @@ bindById("importRosterPreviewBtn", "click", () => importRosterFile(true));
 bindById("importRosterBtn", "click", () => importRosterFile(false));
 bindById("importGtfsBtn", "click", importGtfsZip);
 bindById("refreshGtfsFeedsBtn", "click", loadGtfsFeeds);
+bindById("refreshGtfsCalendarsBtn", "click", loadGtfsCalendars);
+bindById("saveGtfsEffectiveDatesBtn", "click", saveGtfsEffectiveDates);
+bindById("exportGtfsModifiedBtn", "click", exportGtfsModified);
 const refreshGtfsEditorLinesBtn = document.getElementById("refreshGtfsEditorLinesBtn");
 if (refreshGtfsEditorLinesBtn) {
   refreshGtfsEditorLinesBtn.addEventListener("click", loadGtfsEditorLines);
+}
+if (gtfsEditorFeedSelectEl) {
+  gtfsEditorFeedSelectEl.addEventListener("change", () => {
+    selectedGtfsFeedKey = String(gtfsEditorFeedSelectEl.value || "").trim();
+    loadGtfsFeeds();
+    loadGtfsEditorLines();
+    loadGtfsCalendars();
+  });
 }
 if (gtfsEditorRouteSelectEl) {
   gtfsEditorRouteSelectEl.addEventListener("change", loadGtfsEditorTripsByRoute);
@@ -3590,6 +3741,28 @@ if (gtfsFeedsListEl && !gtfsFeedsListEl.dataset.gtfsFeedsDelegation) {
     const feedKey = String(btn.getAttribute("data-gtfs-feed-toggle") || "");
     const active = btn.getAttribute("data-gtfs-feed-active") === "1";
     toggleGtfsFeed(feedKey, active);
+  });
+}
+if (gtfsCalendarsListEl && !gtfsCalendarsListEl.dataset.gtfsCalendarsDelegation) {
+  gtfsCalendarsListEl.dataset.gtfsCalendarsDelegation = "1";
+  gtfsCalendarsListEl.addEventListener("click", (event) => {
+    const toggleBtn = event.target.closest("button[data-cal-toggle]");
+    if (toggleBtn) {
+      const serviceId = String(toggleBtn.getAttribute("data-cal-toggle") || "");
+      const active = toggleBtn.getAttribute("data-cal-active") === "1";
+      updateGtfsCalendar(serviceId, { isActive: !active });
+      return;
+    }
+    const saveBtn = event.target.closest("button[data-cal-save]");
+    if (!saveBtn) return;
+    const serviceId = String(saveBtn.getAttribute("data-cal-save") || "");
+    const item = saveBtn.closest(".service-card-item");
+    const startInput = item?.querySelector("input[data-cal-start]");
+    const endInput = item?.querySelector("input[data-cal-end]");
+    updateGtfsCalendar(serviceId, {
+      startDate: startInput?.value || null,
+      endDate: endInput?.value || null,
+    });
   });
 }
 bindById("closeServiceDrawerBtn", "click", closeServiceDrawer);

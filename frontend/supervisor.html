@@ -320,6 +320,10 @@
           </p>
           <section class="card">
             <h3>Seleção de linha e trip</h3>
+            <label for="gtfsEditorFeedSelect">Feed GTFS</label>
+            <select id="gtfsEditorFeedSelect">
+              <option value="">-- Feed ativo (automático) --</option>
+            </select>
             <label for="gtfsEditorRouteSelect">Linha GTFS</label>
             <select id="gtfsEditorRouteSelect">
               <option value="">-- Selecionar linha --</option>
@@ -331,6 +335,20 @@
             </select>
             <button type="button" id="loadGtfsEditorTripStopsBtn">Carregar paragens da trip</button>
             <pre id="gtfsEditorSummary">Sem linha/trip carregada.</pre>
+          </section>
+          <section class="card card-top-gap">
+            <h3>Entrada em vigor e exportação</h3>
+            <label for="gtfsEffectiveFrom">Data entrada em vigor (alterações GTFS)</label>
+            <input id="gtfsEffectiveFrom" type="date" />
+            <label for="calendarEffectiveFrom">Data entrada em vigor (calendários)</label>
+            <input id="calendarEffectiveFrom" type="date" />
+            <button type="button" id="saveGtfsEffectiveDatesBtn">Guardar datas de entrada em vigor</button>
+            <button type="button" id="exportGtfsModifiedBtn">Exportar GTFS modificado (.zip)</button>
+          </section>
+          <section class="card card-top-gap">
+            <h3>Calendários do feed</h3>
+            <button type="button" id="refreshGtfsCalendarsBtn">Atualizar calendários</button>
+            <div id="gtfsCalendarsList" class="service-cards"></div>
           </section>
           <section class="card card-top-gap">
             <h3>Adicionar paragem à trip</h3>
