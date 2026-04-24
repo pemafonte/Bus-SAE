@@ -910,7 +910,7 @@ function logoutSupervisor() {
 }
 
 function setSupervisorModule(moduleId, options = {}) {
-  const { preserveCurrentTab = false } = options;
+  const { preserveCurrentTab = false, skipTabActivation = false } = options;
   if (!moduleId) return;
   const moduleButtons = document.querySelectorAll(".module-nav-btn");
   moduleButtons.forEach((btn) => {
@@ -930,6 +930,7 @@ function setSupervisorModule(moduleId, options = {}) {
     }
   });
 
+  if (skipTabActivation) return;
   if (preserveCurrentTab && activeVisibleTabId) return;
   if (!firstVisibleTabId) return;
   openSupervisorTab(activeVisibleTabId || firstVisibleTabId);
@@ -939,7 +940,8 @@ function openSupervisorTab(tabId) {
   if (!tabId) return;
   const moduleId = TAB_MODULE_MAP[tabId];
   if (moduleId) {
-    setSupervisorModule(moduleId, { preserveCurrentTab: true });
+    // Avoid recursive tab->module->tab activation loops.
+    setSupervisorModule(moduleId, { preserveCurrentTab: true, skipTabActivation: true });
   }
   const tabButtons = document.querySelectorAll(".tab-btn");
   const tabPanels = document.querySelectorAll(".tab-panel");

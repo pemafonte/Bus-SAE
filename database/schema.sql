@@ -29,6 +29,7 @@ CREATE TABLE IF NOT EXISTS planned_services (
   line_code VARCHAR(50) NOT NULL,
   start_location VARCHAR(120),
   end_location VARCHAR(120),
+  kms_carga NUMERIC(12,3),
   fleet_number VARCHAR(50) NOT NULL,
   plate_number VARCHAR(50) NOT NULL,
   service_schedule VARCHAR(80) NOT NULL,
@@ -39,6 +40,8 @@ ALTER TABLE planned_services
   ADD COLUMN IF NOT EXISTS start_location VARCHAR(120);
 ALTER TABLE planned_services
   ADD COLUMN IF NOT EXISTS end_location VARCHAR(120);
+ALTER TABLE planned_services
+  ADD COLUMN IF NOT EXISTS kms_carga NUMERIC(12,3);
 
 CREATE TABLE IF NOT EXISTS daily_roster (
   id SERIAL PRIMARY KEY,

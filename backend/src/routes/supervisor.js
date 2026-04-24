@@ -675,6 +675,14 @@ async function enrichServiceRowsForExport(rows) {
   return enriched;
 }
 
+async function enrichServiceRowsForExportSafe(rows) {
+  try {
+    return await enrichServiceRowsForExport(rows);
+  } catch (_error) {
+    return Array.isArray(rows) ? rows : [];
+  }
+}
+
 function extractRosterAssignmentsFromOperationalPdf(pdfText, context) {
   const lines = String(pdfText || "")
     .split(/\r?\n/)
@@ -2695,6 +2703,7 @@ router.get("/services", async (req, res) => {
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
   try {
+    await ensurePlannedServiceLocationColumns();
     const selectCloseMode = (await hasServiceCloseModeColumn()) ? "s.close_mode" : "NULL::text AS close_mode";
     const result = await db.query(
       `SELECT
@@ -2720,7 +2729,7 @@ router.get("/services", async (req, res) => {
        ORDER BY s.started_at DESC`,
       values
     );
-    const rowsWithMetrics = await enrichServiceRowsForExport(result.rows);
+    const rowsWithMetrics = await enrichServiceRowsForExportSafe(result.rows);
     return res.json(rowsWithMetrics);
   } catch (error) {
     return res.status(500).json({ message: "Erro ao listar servicos do dashboard." });
@@ -3539,6 +3548,7 @@ router.get("/services/export.csv", async (req, res) => {
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
   try {
+    await ensurePlannedServiceLocationColumns();
     const result = await db.query(
       `SELECT
          s.id,
@@ -3559,7 +3569,7 @@ router.get("/services/export.csv", async (req, res) => {
        ORDER BY s.started_at DESC`,
       values
     );
-    const rowsWithMetrics = await enrichServiceRowsForExport(result.rows);
+    const rowsWithMetrics = await enrichServiceRowsForExportSafe(result.rows);
 
     const header = [
       "service_id",
@@ -3650,6 +3660,7 @@ router.get("/services/export.xlsx", async (req, res) => {
   const whereSql = where.length ? `WHERE ${where.join(" AND ")}` : "";
 
   try {
+    await ensurePlannedServiceLocationColumns();
     const result = await db.query(
       `SELECT
          s.id,
@@ -3670,7 +3681,7 @@ router.get("/services/export.xlsx", async (req, res) => {
        ORDER BY s.started_at DESC`,
       values
     );
-    const rowsWithMetrics = await enrichServiceRowsForExport(result.rows);
+    const rowsWithMetrics = await enrichServiceRowsForExportSafe(result.rows);
 
     const servicesRows = rowsWithMetrics.map((r) => ({
       service_id: r.id,
