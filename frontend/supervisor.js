@@ -2540,6 +2540,23 @@ function drawGtfsAnalyticsTrip(trip) {
   L.circleMarker(latLngs[latLngs.length - 1], { radius: 6, color: "#991b1b", fillColor: "#ef4444", fillOpacity: 0.9 }).addTo(
     gtfsAnalyticsRouteLayer
   );
+  const tripStops = Array.isArray(trip?.stops) ? trip.stops : [];
+  tripStops.forEach((stop) => {
+    const lat = Number(stop.lat);
+    const lng = Number(stop.lng);
+    if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+    const marker = L.circleMarker([lat, lng], {
+      radius: 4,
+      color: "#111827",
+      weight: 1,
+      fillColor: "#facc15",
+      fillOpacity: 0.9,
+    });
+    marker.bindPopup(
+      `<strong>#${stop.stop_sequence || "-"}</strong> ${stop.stop_name || stop.stop_id || "-"}<br/>${stop.departure_time || stop.arrival_time || "-"}`
+    );
+    marker.addTo(gtfsAnalyticsRouteLayer);
+  });
   if (gtfsAnalyticsMap) {
     gtfsAnalyticsMap.fitBounds(line.getBounds(), { padding: [20, 20] });
   }
@@ -2551,6 +2568,7 @@ function drawGtfsAnalyticsTrip(trip) {
       `Service ID: ${trip.service_id || "-"}`,
       `Paragens: ${trip.stops_count || 0}`,
       `Pontos shape: ${latLngs.length}`,
+      `Paragens desenhadas: ${tripStops.length}`,
     ].join("\n")
   );
 }

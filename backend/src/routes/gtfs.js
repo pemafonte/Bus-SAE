@@ -1132,6 +1132,17 @@ router.get("/analytics/overview", async (req, res) => {
           )
           AND cd_add.exception_type = 1
           AND cd_add.calendar_date BETWEEN p.start_date AND p.end_date
+        UNION ALL
+        SELECT
+          tc.feed_key,
+          tc.route_id,
+          tc.trip_id,
+          tc.trip_km,
+          gs.d::date AS op_date
+        FROM trip_calendar tc
+        CROSS JOIN period p
+        JOIN LATERAL generate_series(p.start_date, p.end_date, INTERVAL '1 day') gs(d) ON TRUE
+        WHERE tc.calendar_service_id IS NULL
        ),
        trip_day_counts AS (
          SELECT
@@ -1155,15 +1166,16 @@ router.get("/analytics/overview", async (req, res) => {
            sr.route_id,
            COALESCE(NULLIF(TRIM(sr.route_short_name), ''), sr.route_id) AS route_label,
            COALESCE(NULLIF(TRIM(sr.route_long_name), ''), '-') AS route_long_name,
-           COUNT(DISTINCT tdc.trip_id)::int AS trips_count,
-           AVG(tdc.trip_km)::numeric(12,3) AS avg_trip_km,
+           COUNT(DISTINCT ts.trip_id)::int AS trips_count,
+           AVG(ts.trip_km)::numeric(12,3) AS avg_trip_km,
            COALESCE(SUM(tdc.weekday_days), 0)::int AS weekday_ops,
            COALESCE(SUM(tdc.saturday_days), 0)::int AS saturday_ops,
            COALESCE(SUM(tdc.sunday_days), 0)::int AS sunday_ops,
            COALESCE(SUM(tdc.total_active_days), 0)::int AS total_ops_days,
            COALESCE(SUM(tdc.trip_km * tdc.total_active_days), 0)::numeric(12,3) AS gtfs_year_km
          FROM selected_routes sr
-         LEFT JOIN trip_day_counts tdc ON tdc.route_id = sr.route_id
+         LEFT JOIN trip_shapes ts ON ts.route_id = sr.route_id
+         LEFT JOIN trip_day_counts tdc ON tdc.trip_id = ts.trip_id
          GROUP BY sr.feed_key, sr.route_id, route_label, route_long_name
        ),
        realized_by_line AS (
@@ -1242,6 +1254,27 @@ router.get("/analytics/line-detail", async (req, res) => {
        ORDER BY t.trip_id ASC`,
       [routeId]
     );
+    const tripIds = tripsRes.rows.map((r) => String(r.trip_id || "").trim()).filter(Boolean);
+    let stopsRows = [];
+    if (tripIds.length) {
+      const stopsRes = await db.query(
+        `SELECT
+           st.trip_id,
+           st.stop_sequence,
+           st.arrival_time,
+           st.departure_time,
+           st.stop_id,
+           s.stop_name,
+           s.stop_lat,
+           s.stop_lon
+         FROM gtfs_stop_times st
+         LEFT JOIN gtfs_stops s ON s.stop_id = st.stop_id
+         WHERE st.trip_id = ANY($1::text[])
+         ORDER BY st.trip_id ASC, st.stop_sequence ASC`,
+        [tripIds]
+      );
+      stopsRows = stopsRes.rows;
+    }
     const shapeIds = Array.from(
       new Set(tripsRes.rows.map((r) => String(r.shape_id || "").trim()).filter(Boolean))
     );
@@ -1266,6 +1299,20 @@ router.get("/analytics/line-detail", async (req, res) => {
         sequence: Number(row.shape_pt_sequence),
       });
     });
+    const stopsByTrip = new Map();
+    stopsRows.forEach((row) => {
+      const tripId = String(row.trip_id || "");
+      if (!stopsByTrip.has(tripId)) stopsByTrip.set(tripId, []);
+      stopsByTrip.get(tripId).push({
+        stop_sequence: Number(row.stop_sequence),
+        stop_id: row.stop_id || "",
+        stop_name: row.stop_name || "",
+        arrival_time: row.arrival_time || "",
+        departure_time: row.departure_time || "",
+        lat: row.stop_lat == null ? null : Number(row.stop_lat),
+        lng: row.stop_lon == null ? null : Number(row.stop_lon),
+      });
+    });
     const trips = tripsRes.rows.map((trip) => ({
       trip_id: trip.trip_id,
       trip_headsign: trip.trip_headsign || "",
@@ -1274,6 +1321,7 @@ router.get("/analytics/line-detail", async (req, res) => {
       shape_id: trip.shape_id || "",
       stops_count: Number(trip.stops_count || 0),
       shape_points: pointsByShape.get(String(trip.shape_id || "")) || [],
+      stops: stopsByTrip.get(String(trip.trip_id || "")) || [],
     }));
     const tripCount = trips.length;
     const avgStops = tripCount ? Number((trips.reduce((acc, t) => acc + Number(t.stops_count || 0), 0) / tripCount).toFixed(2)) : 0;
@@ -1429,6 +1477,17 @@ router.get("/analytics/export.xlsx", async (req, res) => {
           )
           AND cd_add.exception_type = 1
           AND cd_add.calendar_date BETWEEN p.start_date AND p.end_date
+        UNION ALL
+        SELECT
+          tc.feed_key,
+          tc.route_id,
+          tc.trip_id,
+          tc.trip_km,
+          gs.d::date AS op_date
+        FROM trip_calendar tc
+        CROSS JOIN period p
+        JOIN LATERAL generate_series(p.start_date, p.end_date, INTERVAL '1 day') gs(d) ON TRUE
+        WHERE tc.calendar_service_id IS NULL
        ),
        trip_day_counts AS (
          SELECT
@@ -1452,15 +1511,16 @@ router.get("/analytics/export.xlsx", async (req, res) => {
            sr.route_id,
            COALESCE(NULLIF(TRIM(sr.route_short_name), ''), sr.route_id) AS route_label,
            COALESCE(NULLIF(TRIM(sr.route_long_name), ''), '-') AS route_long_name,
-           COUNT(DISTINCT tdc.trip_id)::int AS trips_count,
-           AVG(tdc.trip_km)::numeric(12,3) AS avg_trip_km,
+           COUNT(DISTINCT ts.trip_id)::int AS trips_count,
+           AVG(ts.trip_km)::numeric(12,3) AS avg_trip_km,
            COALESCE(SUM(tdc.weekday_days), 0)::int AS weekday_ops,
            COALESCE(SUM(tdc.saturday_days), 0)::int AS saturday_ops,
            COALESCE(SUM(tdc.sunday_days), 0)::int AS sunday_ops,
            COALESCE(SUM(tdc.total_active_days), 0)::int AS total_ops_days,
            COALESCE(SUM(tdc.trip_km * tdc.total_active_days), 0)::numeric(12,3) AS gtfs_year_km
          FROM selected_routes sr
-         LEFT JOIN trip_day_counts tdc ON tdc.route_id = sr.route_id
+         LEFT JOIN trip_shapes ts ON ts.route_id = sr.route_id
+         LEFT JOIN trip_day_counts tdc ON tdc.trip_id = ts.trip_id
          GROUP BY sr.feed_key, sr.route_id, route_label, route_long_name
        ),
        realized_by_line AS (
@@ -1698,10 +1758,20 @@ router.get("/analytics/export.xlsx", async (req, res) => {
           AND cd_add.exception_type = 1
           AND cd_add.calendar_date BETWEEN p.start_date AND p.end_date
        ),
+      assumed_days AS (
+        SELECT
+          tc.feed_key, tc.route_id, tc.trip_id, tc.trip_km, gs.d::date AS op_date
+        FROM trip_calendar tc
+        CROSS JOIN period p
+        JOIN LATERAL generate_series(p.start_date, p.end_date, INTERVAL '1 day') gs(d) ON TRUE
+        WHERE tc.calendar_service_id IS NULL
+      ),
        all_days AS (
          SELECT DISTINCT feed_key, route_id, trip_id, trip_km, op_date FROM base_days
          UNION
          SELECT DISTINCT feed_key, route_id, trip_id, trip_km, op_date FROM added_days
+        UNION
+        SELECT DISTINCT feed_key, route_id, trip_id, trip_km, op_date FROM assumed_days
        )
        SELECT
          ad.op_date,
