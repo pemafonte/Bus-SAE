@@ -124,8 +124,10 @@ const gtfsEditorApplyScopeEl = document.getElementById("gtfsEditorApplyScope");
 const gtfsAnalyticsFeedSelectEl = document.getElementById("gtfsAnalyticsFeedSelect");
 const gtfsAnalyticsStartDateEl = document.getElementById("gtfsAnalyticsStartDate");
 const gtfsAnalyticsEndDateEl = document.getElementById("gtfsAnalyticsEndDate");
+const gtfsAnalyticsMunicipalHolidayEl = document.getElementById("gtfsAnalyticsMunicipalHoliday");
 const gtfsAnalyticsSummaryEl = document.getElementById("gtfsAnalyticsSummary");
 const gtfsAnalyticsTableBodyEl = document.getElementById("gtfsAnalyticsTableBody");
+const gtfsAnalyticsTotalsRowEl = document.getElementById("gtfsAnalyticsTotalsRow");
 const gtfsAnalyticsLineSelectEl = document.getElementById("gtfsAnalyticsLineSelect");
 const gtfsAnalyticsTripSelectEl = document.getElementById("gtfsAnalyticsTripSelect");
 const gtfsLineDetailSummaryEl = document.getElementById("gtfsLineDetailSummary");
@@ -2454,10 +2456,12 @@ function renderGtfsLineDetailSummary(text) {
 function buildGtfsAnalyticsPeriodParams() {
   const startDate = String(gtfsAnalyticsStartDateEl?.value || "").trim();
   const endDate = String(gtfsAnalyticsEndDateEl?.value || "").trim();
+  const municipalHoliday = String(gtfsAnalyticsMunicipalHolidayEl?.value || "").trim();
   const params = new URLSearchParams();
   if (startDate) params.set("startDate", startDate);
   if (endDate) params.set("endDate", endDate);
-  return { startDate, endDate, params };
+  if (municipalHoliday) params.set("municipalHoliday", municipalHoliday);
+  return { startDate, endDate, municipalHoliday, params };
 }
 
 function setGtfsAnalyticsYearRange(offsetYears = 0) {
@@ -2475,7 +2479,7 @@ function fillGtfsAnalyticsLineSelect(rows) {
   rows.forEach((row) => {
     const option = document.createElement("option");
     option.value = row.route_id;
-    option.textContent = `${row.route_label || row.route_id} | trips ${row.trips_count || 0} | km ano ${formatNumberPt(row.gtfs_year_km, 1)}`;
+    option.textContent = `${row.route_label || row.route_id} | trips útil ${formatNumberPt(row.trips_per_weekday, 1)} | km ano ${formatNumberPt(row.gtfs_year_km, 1)}`;
     gtfsAnalyticsLineSelectEl.appendChild(option);
   });
 }
@@ -2483,19 +2487,24 @@ function fillGtfsAnalyticsLineSelect(rows) {
 function renderGtfsAnalyticsRows(rows) {
   if (!gtfsAnalyticsTableBodyEl) return;
   if (!Array.isArray(rows) || !rows.length) {
-    gtfsAnalyticsTableBodyEl.innerHTML = '<tr><td colspan="12">Sem linhas para o feed selecionado.</td></tr>';
+    gtfsAnalyticsTableBodyEl.innerHTML = '<tr><td colspan="13">Sem linhas para o feed selecionado.</td></tr>';
     fillGtfsAnalyticsLineSelect([]);
+    if (gtfsAnalyticsTotalsRowEl) {
+      gtfsAnalyticsTotalsRowEl.innerHTML =
+        "<td><strong>Totais</strong></td><td>0,0</td><td>0,00</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0</td><td>0,0</td><td>0,0</td><td>0,0</td><td>0,0%</td><td>-</td>";
+    }
     return;
   }
   gtfsAnalyticsTableBodyEl.innerHTML = rows
     .map(
       (row) => `<tr>
         <td>${row.route_label || row.route_id}</td>
-        <td>${row.trips_count || 0}</td>
+        <td>${formatNumberPt(row.trips_per_weekday, 1)}</td>
         <td>${formatNumberPt(row.avg_trip_km, 2)}</td>
         <td>${row.weekday_ops || 0}</td>
         <td>${row.saturday_ops || 0}</td>
         <td>${row.sunday_ops || 0}</td>
+        <td>${row.holiday_ops || 0}</td>
         <td>${row.total_ops_days || 0}</td>
         <td>${formatNumberPt(row.gtfs_year_km, 1)}</td>
         <td>${formatNumberPt(row.realized_km, 1)}</td>
@@ -2505,6 +2514,52 @@ function renderGtfsAnalyticsRows(rows) {
       </tr>`
     )
     .join("");
+  if (gtfsAnalyticsTotalsRowEl) {
+    const totals = rows.reduce(
+      (acc, row) => {
+        acc.weekdayOps += Number(row.weekday_ops || 0);
+        acc.saturdayOps += Number(row.saturday_ops || 0);
+        acc.sundayOps += Number(row.sunday_ops || 0);
+        acc.holidayOps += Number(row.holiday_ops || 0);
+        acc.totalOps += Number(row.total_ops_days || 0);
+        acc.gtfsYearKm += Number(row.gtfs_year_km || 0);
+        acc.realizedKm += Number(row.realized_km || 0);
+        acc.gapKm += Number(row.km_gap_vs_realized || 0);
+        acc.weekdayServiceDays += Number(row.weekday_service_days || 0);
+        return acc;
+      },
+      {
+        weekdayOps: 0,
+        saturdayOps: 0,
+        sundayOps: 0,
+        holidayOps: 0,
+        totalOps: 0,
+        gtfsYearKm: 0,
+        realizedKm: 0,
+        gapKm: 0,
+        weekdayServiceDays: 0,
+      }
+    );
+    const totalTripsPerWeekday =
+      totals.weekdayServiceDays > 0 ? Number((totals.weekdayOps / totals.weekdayServiceDays).toFixed(1)) : 0;
+    const totalAvgTripKm = totals.totalOps > 0 ? Number((totals.gtfsYearKm / totals.totalOps).toFixed(2)) : 0;
+    const totalPct = totals.gtfsYearKm > 0 ? Number(((totals.realizedKm / totals.gtfsYearKm) * 100).toFixed(1)) : 0;
+    gtfsAnalyticsTotalsRowEl.innerHTML = `
+      <td><strong>Totais</strong></td>
+      <td><strong>${formatNumberPt(totalTripsPerWeekday, 1)}</strong></td>
+      <td><strong>${formatNumberPt(totalAvgTripKm, 2)}</strong></td>
+      <td><strong>${formatNumberPt(totals.weekdayOps, 0)}</strong></td>
+      <td><strong>${formatNumberPt(totals.saturdayOps, 0)}</strong></td>
+      <td><strong>${formatNumberPt(totals.sundayOps, 0)}</strong></td>
+      <td><strong>${formatNumberPt(totals.holidayOps, 0)}</strong></td>
+      <td><strong>${formatNumberPt(totals.totalOps, 0)}</strong></td>
+      <td><strong>${formatNumberPt(totals.gtfsYearKm, 1)}</strong></td>
+      <td><strong>${formatNumberPt(totals.realizedKm, 1)}</strong></td>
+      <td><strong>${formatNumberPt(totals.gapKm, 1)}</strong></td>
+      <td><strong>${formatNumberPt(totalPct, 1)}%</strong></td>
+      <td>-</td>
+    `;
+  }
   fillGtfsAnalyticsLineSelect(rows);
 }
 
@@ -2576,7 +2631,7 @@ function drawGtfsAnalyticsTrip(trip) {
 async function loadGtfsAnalyticsOverview() {
   if (!supToken || !gtfsAnalyticsTableBodyEl) return;
   const feedKey = String(gtfsAnalyticsFeedSelectEl?.value || selectedGtfsAnalyticsFeedKey || "").trim();
-  const { startDate, endDate, params } = buildGtfsAnalyticsPeriodParams();
+  const { startDate, endDate, municipalHoliday, params } = buildGtfsAnalyticsPeriodParams();
   selectedGtfsAnalyticsFeedKey = feedKey;
   renderGtfsAnalyticsSummary("A carregar análise GTFS...");
   gtfsAnalyticsTableBodyEl.innerHTML = '<tr><td colspan="12">A carregar...</td></tr>';
@@ -2600,6 +2655,8 @@ async function loadGtfsAnalyticsOverview() {
     [
       `Linhas analisadas: ${rows.length}`,
       `Período: ${startDate || data.assumptions?.startDate || "-"} até ${endDate || data.assumptions?.endDate || "-"}`,
+      `Feriado municipal: ${municipalHoliday || data.assumptions?.municipalHoliday || "-"}`,
+      `Timezone: ${data.assumptions?.timezone || "Europe/Lisbon"} (DST automático)`,
       `${data.assumptions?.period || "1 ano operacional por calendário GTFS"}`,
     ].join("\n")
   );

@@ -55,6 +55,101 @@ function parseIsoDateInput(raw) {
   return text;
 }
 
+function parseMunicipalHolidayInput(raw) {
+  const text = String(raw || "").trim();
+  if (!text) return null;
+  let day;
+  let month;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+    month = Number(text.slice(5, 7));
+    day = Number(text.slice(8, 10));
+  } else if (/^\d{2}-\d{2}$/.test(text)) {
+    day = Number(text.slice(0, 2));
+    month = Number(text.slice(3, 5));
+  } else {
+    return null;
+  }
+  if (!Number.isFinite(day) || !Number.isFinite(month) || day < 1 || day > 31 || month < 1 || month > 12) {
+    return null;
+  }
+  return { day, month, label: `${String(day).padStart(2, "0")}-${String(month).padStart(2, "0")}` };
+}
+
+function formatDateIsoUtc(date) {
+  return date.toISOString().slice(0, 10);
+}
+
+function computeEasterSundayUtc(year) {
+  const a = year % 19;
+  const b = Math.floor(year / 100);
+  const c = year % 100;
+  const d = Math.floor(b / 4);
+  const e = b % 4;
+  const f = Math.floor((b + 8) / 25);
+  const g = Math.floor((b - f + 1) / 3);
+  const h = (19 * a + b - d - g + 15) % 30;
+  const i = Math.floor(c / 4);
+  const k = c % 4;
+  const l = (32 + 2 * e + 2 * i - h - k) % 7;
+  const m = Math.floor((a + 11 * h + 22 * l) / 451);
+  const month = Math.floor((h + l - 7 * m + 114) / 31);
+  const day = ((h + l - 7 * m + 114) % 31) + 1;
+  return new Date(Date.UTC(year, month - 1, day));
+}
+
+function addDaysUtc(date, days) {
+  const copy = new Date(date.getTime());
+  copy.setUTCDate(copy.getUTCDate() + days);
+  return copy;
+}
+
+function buildHolidayDateList(startIso, endIso, municipalHoliday) {
+  const start = new Date(`${startIso}T00:00:00.000Z`);
+  const end = new Date(`${endIso}T00:00:00.000Z`);
+  const years = [];
+  for (let y = start.getUTCFullYear(); y <= end.getUTCFullYear(); y += 1) years.push(y);
+  const fixedNational = [
+    [1, 1],
+    [25, 4],
+    [1, 5],
+    [10, 6],
+    [15, 8],
+    [5, 10],
+    [1, 11],
+    [1, 12],
+    [8, 12],
+    [25, 12],
+  ];
+  const set = new Set();
+  years.forEach((year) => {
+    fixedNational.forEach(([day, month]) => {
+      set.add(`${year}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`);
+    });
+    const easter = computeEasterSundayUtc(year);
+    set.add(formatDateIsoUtc(addDaysUtc(easter, -2))); // Sexta-feira Santa
+    set.add(formatDateIsoUtc(addDaysUtc(easter, 60))); // Corpo de Deus
+    if (municipalHoliday?.day && municipalHoliday?.month) {
+      set.add(`${year}-${String(municipalHoliday.month).padStart(2, "0")}-${String(municipalHoliday.day).padStart(2, "0")}`);
+    }
+  });
+  return Array.from(set)
+    .filter((iso) => iso >= startIso && iso <= endIso)
+    .sort();
+}
+
+async function resolveAnalyticsPeriod(feedKey, startDate, endDate) {
+  let baseStart = startDate || null;
+  if (!baseStart) {
+    const baseRes = await db.query(
+      `SELECT COALESCE((SELECT gtfs_effective_from FROM gtfs_feeds WHERE feed_key = $1), CURRENT_DATE)::date AS d`,
+      [feedKey]
+    );
+    baseStart = String(baseRes.rows[0]?.d || "").slice(0, 10) || parseIsoDateInput(new Date().toISOString().slice(0, 10));
+  }
+  const resolvedEnd = endDate || String(addDaysUtc(new Date(`${baseStart}T00:00:00.000Z`), 364).toISOString().slice(0, 10));
+  return { startDate: baseStart, endDate: resolvedEnd };
+}
+
 function formatGtfsDate(raw) {
   const text = String(raw || "").trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return "";
@@ -999,11 +1094,14 @@ router.get("/analytics/overview", async (req, res) => {
   try {
     await ensureGtfsEditorIndexes();
     const feedKey = normalizeFeedKey(req.query.feedKey || "");
-    const startDate = parseIsoDateInput(req.query.startDate);
-    const endDate = parseIsoDateInput(req.query.endDate);
-    if (startDate && endDate && startDate > endDate) {
+    const startDateInput = parseIsoDateInput(req.query.startDate);
+    const endDateInput = parseIsoDateInput(req.query.endDate);
+    const municipalHoliday = parseMunicipalHolidayInput(req.query.municipalHoliday);
+    if (startDateInput && endDateInput && startDateInput > endDateInput) {
       return res.status(400).json({ message: "Intervalo inválido: startDate maior que endDate." });
     }
+    const { startDate, endDate } = await resolveAnalyticsPeriod(feedKey, startDateInput, endDateInput);
+    const holidayDates = buildHolidayDateList(startDate, endDate, municipalHoliday);
     const result = await db.query(
       `WITH selected_routes AS (
          SELECT r.feed_key, r.route_id, r.route_short_name, r.route_long_name
@@ -1014,11 +1112,11 @@ router.get("/analytics/overview", async (req, res) => {
        ),
        period AS (
          SELECT
-           COALESCE($2::date, COALESCE((SELECT gf.gtfs_effective_from FROM gtfs_feeds gf WHERE gf.feed_key = $1), CURRENT_DATE)::date) AS start_date,
+           COALESCE($2::date, CURRENT_DATE)::date AS start_date,
            COALESCE(
              $3::date,
              (
-               COALESCE($2::date, COALESCE((SELECT gf.gtfs_effective_from FROM gtfs_feeds gf WHERE gf.feed_key = $1), CURRENT_DATE)::date)
+               COALESCE($2::date, CURRENT_DATE::date)
                + INTERVAL '1 year' - INTERVAL '1 day'
              )::date
            ) AS end_date
@@ -1150,9 +1248,10 @@ router.get("/analytics/overview", async (req, res) => {
            tad.route_id,
            tad.trip_id,
            MAX(tad.trip_km)::numeric(12,3) AS trip_km,
-           COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) BETWEEN 1 AND 5)::int AS weekday_days,
+           COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) BETWEEN 1 AND 5 AND NOT (tad.op_date = ANY($4::date[])))::int AS weekday_days,
            COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) = 6)::int AS saturday_days,
            COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) = 7)::int AS sunday_days,
+           COUNT(*) FILTER (WHERE tad.op_date = ANY($4::date[]))::int AS holiday_days,
            COUNT(*)::int AS total_active_days
          FROM (
            SELECT DISTINCT feed_key, route_id, trip_id, trip_km, op_date
@@ -1160,23 +1259,44 @@ router.get("/analytics/overview", async (req, res) => {
          ) tad
          GROUP BY tad.feed_key, tad.route_id, tad.trip_id
        ),
+       route_service_days AS (
+         SELECT
+           tad.feed_key,
+           tad.route_id,
+           COUNT(DISTINCT tad.op_date) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) BETWEEN 1 AND 5 AND NOT (tad.op_date = ANY($4::date[])))::int AS weekday_service_days,
+           COUNT(DISTINCT tad.op_date) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) = 6)::int AS saturday_service_days,
+           COUNT(DISTINCT tad.op_date) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) = 7)::int AS sunday_service_days,
+           COUNT(DISTINCT tad.op_date) FILTER (WHERE tad.op_date = ANY($4::date[]))::int AS holiday_service_days
+         FROM (
+           SELECT DISTINCT feed_key, route_id, op_date
+           FROM trip_active_dates
+         ) tad
+         GROUP BY tad.feed_key, tad.route_id
+       ),
        route_agg AS (
          SELECT
            sr.feed_key,
            sr.route_id,
            COALESCE(NULLIF(TRIM(sr.route_short_name), ''), sr.route_id) AS route_label,
            COALESCE(NULLIF(TRIM(sr.route_long_name), ''), '-') AS route_long_name,
-           COUNT(DISTINCT ts.trip_id)::int AS trips_count,
+           COUNT(DISTINCT ts.trip_id)::int AS trips_defined,
            AVG(ts.trip_km)::numeric(12,3) AS avg_trip_km,
+           COALESCE(rsd.weekday_service_days, 0)::int AS weekday_service_days,
+           COALESCE(rsd.saturday_service_days, 0)::int AS saturday_service_days,
+           COALESCE(rsd.sunday_service_days, 0)::int AS sunday_service_days,
+           COALESCE(rsd.holiday_service_days, 0)::int AS holiday_service_days,
            COALESCE(SUM(tdc.weekday_days), 0)::int AS weekday_ops,
            COALESCE(SUM(tdc.saturday_days), 0)::int AS saturday_ops,
            COALESCE(SUM(tdc.sunday_days), 0)::int AS sunday_ops,
+           COALESCE(SUM(tdc.holiday_days), 0)::int AS holiday_ops,
            COALESCE(SUM(tdc.total_active_days), 0)::int AS total_ops_days,
            COALESCE(SUM(tdc.trip_km * tdc.total_active_days), 0)::numeric(12,3) AS gtfs_year_km
          FROM selected_routes sr
          LEFT JOIN trip_shapes ts ON ts.route_id = sr.route_id
          LEFT JOIN trip_day_counts tdc ON tdc.trip_id = ts.trip_id
+         LEFT JOIN route_service_days rsd ON rsd.feed_key = sr.feed_key AND rsd.route_id = sr.route_id
          GROUP BY sr.feed_key, sr.route_id, route_label, route_long_name
+           , rsd.weekday_service_days, rsd.saturday_service_days, rsd.sunday_service_days, rsd.holiday_service_days
        ),
        realized_by_line AS (
          SELECT
@@ -1191,11 +1311,32 @@ router.get("/analytics/overview", async (req, res) => {
          ra.route_id,
          ra.route_label,
          ra.route_long_name,
-         ra.trips_count,
+         ra.trips_defined,
          COALESCE(ra.avg_trip_km, 0)::numeric(12,3) AS avg_trip_km,
+         CASE
+           WHEN COALESCE(ra.weekday_service_days, 0) <= 0 THEN 0::numeric(12,3)
+           ELSE (ra.weekday_ops::numeric / ra.weekday_service_days::numeric)::numeric(12,3)
+         END AS trips_per_weekday,
+         CASE
+           WHEN COALESCE(ra.saturday_service_days, 0) <= 0 THEN 0::numeric(12,3)
+           ELSE (ra.saturday_ops::numeric / ra.saturday_service_days::numeric)::numeric(12,3)
+         END AS trips_per_saturday,
+         CASE
+           WHEN COALESCE(ra.sunday_service_days, 0) <= 0 THEN 0::numeric(12,3)
+           ELSE (ra.sunday_ops::numeric / ra.sunday_service_days::numeric)::numeric(12,3)
+         END AS trips_per_sunday,
+         CASE
+           WHEN COALESCE(ra.holiday_service_days, 0) <= 0 THEN 0::numeric(12,3)
+           ELSE (ra.holiday_ops::numeric / ra.holiday_service_days::numeric)::numeric(12,3)
+         END AS trips_per_holiday,
+         ra.weekday_service_days,
+         ra.saturday_service_days,
+         ra.sunday_service_days,
+         ra.holiday_service_days,
          ra.weekday_ops,
          ra.saturday_ops,
          ra.sunday_ops,
+         ra.holiday_ops,
          ra.total_ops_days,
          COALESCE(ra.gtfs_year_km, 0)::numeric(12,3) AS gtfs_year_km,
          (COALESCE(ra.gtfs_year_km, 0) / 12.0)::numeric(12,3) AS gtfs_month_avg_km,
@@ -1211,13 +1352,16 @@ router.get("/analytics/overview", async (req, res) => {
          ON rbl.line_key = LOWER(TRIM(COALESCE(ra.route_label, '')))
          OR rbl.line_key = LOWER(TRIM(COALESCE(ra.route_id, '')))
        ORDER BY route_label ASC, route_id ASC`,
-      [feedKey, startDate, endDate]
+      [feedKey, startDate, endDate, holidayDates]
     );
     return res.json({
       assumptions: {
         period: "1 ano operacional baseado no calendario GTFS",
-        startDate: startDate || null,
-        endDate: endDate || null,
+        startDate,
+        endDate,
+        municipalHoliday: municipalHoliday?.label || null,
+        timezone: "Europe/Lisbon",
+        dstAuto: true,
       },
       lines: result.rows,
     });
@@ -1343,11 +1487,14 @@ router.get("/analytics/export.xlsx", async (req, res) => {
     await ensureGtfsEditorIndexes();
     const feedKey = normalizeFeedKey(req.query.feedKey || "");
     const routeId = String(req.query.routeId || "").trim();
-    const startDate = parseIsoDateInput(req.query.startDate);
-    const endDate = parseIsoDateInput(req.query.endDate);
-    if (startDate && endDate && startDate > endDate) {
+    const startDateInput = parseIsoDateInput(req.query.startDate);
+    const endDateInput = parseIsoDateInput(req.query.endDate);
+    const municipalHoliday = parseMunicipalHolidayInput(req.query.municipalHoliday);
+    if (startDateInput && endDateInput && startDateInput > endDateInput) {
       return res.status(400).json({ message: "Intervalo inválido: startDate maior que endDate." });
     }
+    const { startDate, endDate } = await resolveAnalyticsPeriod(feedKey, startDateInput, endDateInput);
+    const holidayDates = buildHolidayDateList(startDate, endDate, municipalHoliday);
 
     const overviewRes = await db.query(
       `WITH selected_routes AS (
@@ -1359,11 +1506,11 @@ router.get("/analytics/export.xlsx", async (req, res) => {
        ),
        period AS (
          SELECT
-           COALESCE($2::date, COALESCE((SELECT gf.gtfs_effective_from FROM gtfs_feeds gf WHERE gf.feed_key = $1), CURRENT_DATE)::date) AS start_date,
+           COALESCE($2::date, CURRENT_DATE)::date AS start_date,
            COALESCE(
              $3::date,
              (
-               COALESCE($2::date, COALESCE((SELECT gf.gtfs_effective_from FROM gtfs_feeds gf WHERE gf.feed_key = $1), CURRENT_DATE)::date)
+               COALESCE($2::date, CURRENT_DATE::date)
                + INTERVAL '1 year' - INTERVAL '1 day'
              )::date
            ) AS end_date
@@ -1495,9 +1642,10 @@ router.get("/analytics/export.xlsx", async (req, res) => {
            tad.route_id,
            tad.trip_id,
            MAX(tad.trip_km)::numeric(12,3) AS trip_km,
-           COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) BETWEEN 1 AND 5)::int AS weekday_days,
+           COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) BETWEEN 1 AND 5 AND NOT (tad.op_date = ANY($4::date[])))::int AS weekday_days,
            COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) = 6)::int AS saturday_days,
            COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) = 7)::int AS sunday_days,
+           COUNT(*) FILTER (WHERE tad.op_date = ANY($4::date[]))::int AS holiday_days,
            COUNT(*)::int AS total_active_days
          FROM (
            SELECT DISTINCT feed_key, route_id, trip_id, trip_km, op_date
@@ -1505,23 +1653,44 @@ router.get("/analytics/export.xlsx", async (req, res) => {
          ) tad
          GROUP BY tad.feed_key, tad.route_id, tad.trip_id
        ),
+       route_service_days AS (
+         SELECT
+           tad.feed_key,
+           tad.route_id,
+           COUNT(DISTINCT tad.op_date) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) BETWEEN 1 AND 5 AND NOT (tad.op_date = ANY($4::date[])))::int AS weekday_service_days,
+           COUNT(DISTINCT tad.op_date) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) = 6)::int AS saturday_service_days,
+           COUNT(DISTINCT tad.op_date) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) = 7)::int AS sunday_service_days,
+           COUNT(DISTINCT tad.op_date) FILTER (WHERE tad.op_date = ANY($4::date[]))::int AS holiday_service_days
+         FROM (
+           SELECT DISTINCT feed_key, route_id, op_date
+           FROM trip_active_dates
+         ) tad
+         GROUP BY tad.feed_key, tad.route_id
+       ),
        route_agg AS (
          SELECT
            sr.feed_key,
            sr.route_id,
            COALESCE(NULLIF(TRIM(sr.route_short_name), ''), sr.route_id) AS route_label,
            COALESCE(NULLIF(TRIM(sr.route_long_name), ''), '-') AS route_long_name,
-           COUNT(DISTINCT ts.trip_id)::int AS trips_count,
+           COUNT(DISTINCT ts.trip_id)::int AS trips_defined,
            AVG(ts.trip_km)::numeric(12,3) AS avg_trip_km,
+           COALESCE(rsd.weekday_service_days, 0)::int AS weekday_service_days,
+           COALESCE(rsd.saturday_service_days, 0)::int AS saturday_service_days,
+           COALESCE(rsd.sunday_service_days, 0)::int AS sunday_service_days,
+           COALESCE(rsd.holiday_service_days, 0)::int AS holiday_service_days,
            COALESCE(SUM(tdc.weekday_days), 0)::int AS weekday_ops,
            COALESCE(SUM(tdc.saturday_days), 0)::int AS saturday_ops,
            COALESCE(SUM(tdc.sunday_days), 0)::int AS sunday_ops,
+           COALESCE(SUM(tdc.holiday_days), 0)::int AS holiday_ops,
            COALESCE(SUM(tdc.total_active_days), 0)::int AS total_ops_days,
            COALESCE(SUM(tdc.trip_km * tdc.total_active_days), 0)::numeric(12,3) AS gtfs_year_km
          FROM selected_routes sr
          LEFT JOIN trip_shapes ts ON ts.route_id = sr.route_id
          LEFT JOIN trip_day_counts tdc ON tdc.trip_id = ts.trip_id
+         LEFT JOIN route_service_days rsd ON rsd.feed_key = sr.feed_key AND rsd.route_id = sr.route_id
          GROUP BY sr.feed_key, sr.route_id, route_label, route_long_name
+           , rsd.weekday_service_days, rsd.saturday_service_days, rsd.sunday_service_days, rsd.holiday_service_days
        ),
        realized_by_line AS (
          SELECT
@@ -1536,11 +1705,32 @@ router.get("/analytics/export.xlsx", async (req, res) => {
          ra.route_id,
          ra.route_label,
          ra.route_long_name,
-         ra.trips_count,
+         ra.trips_defined,
          COALESCE(ra.avg_trip_km, 0)::numeric(12,3) AS avg_trip_km,
+         CASE
+           WHEN COALESCE(ra.weekday_service_days, 0) <= 0 THEN 0::numeric(12,3)
+           ELSE (ra.weekday_ops::numeric / ra.weekday_service_days::numeric)::numeric(12,3)
+         END AS trips_per_weekday,
+         CASE
+           WHEN COALESCE(ra.saturday_service_days, 0) <= 0 THEN 0::numeric(12,3)
+           ELSE (ra.saturday_ops::numeric / ra.saturday_service_days::numeric)::numeric(12,3)
+         END AS trips_per_saturday,
+         CASE
+           WHEN COALESCE(ra.sunday_service_days, 0) <= 0 THEN 0::numeric(12,3)
+           ELSE (ra.sunday_ops::numeric / ra.sunday_service_days::numeric)::numeric(12,3)
+         END AS trips_per_sunday,
+         CASE
+           WHEN COALESCE(ra.holiday_service_days, 0) <= 0 THEN 0::numeric(12,3)
+           ELSE (ra.holiday_ops::numeric / ra.holiday_service_days::numeric)::numeric(12,3)
+         END AS trips_per_holiday,
+         ra.weekday_service_days,
+         ra.saturday_service_days,
+         ra.sunday_service_days,
+         ra.holiday_service_days,
          ra.weekday_ops,
          ra.saturday_ops,
          ra.sunday_ops,
+         ra.holiday_ops,
          ra.total_ops_days,
          COALESCE(ra.gtfs_year_km, 0)::numeric(12,3) AS gtfs_year_km,
          (COALESCE(ra.gtfs_year_km, 0) / 12.0)::numeric(12,3) AS gtfs_month_avg_km,
@@ -1556,7 +1746,7 @@ router.get("/analytics/export.xlsx", async (req, res) => {
          ON rbl.line_key = LOWER(TRIM(COALESCE(ra.route_label, '')))
          OR rbl.line_key = LOWER(TRIM(COALESCE(ra.route_id, '')))
        ORDER BY route_label ASC, route_id ASC`,
-      [feedKey, startDate, endDate]
+      [feedKey, startDate, endDate, holidayDates]
     );
 
     const detailsRes = await db.query(
@@ -1613,11 +1803,20 @@ router.get("/analytics/export.xlsx", async (req, res) => {
       route_id: row.route_id || "",
       route_label: row.route_label || "",
       route_long_name: row.route_long_name || "",
-      trips_count: Number(row.trips_count || 0),
+      trips_defined: Number(row.trips_defined || 0),
+      trips_per_weekday: Number(row.trips_per_weekday || 0),
+      trips_per_saturday: Number(row.trips_per_saturday || 0),
+      trips_per_sunday: Number(row.trips_per_sunday || 0),
+      trips_per_holiday: Number(row.trips_per_holiday || 0),
+      weekday_service_days: Number(row.weekday_service_days || 0),
+      saturday_service_days: Number(row.saturday_service_days || 0),
+      sunday_service_days: Number(row.sunday_service_days || 0),
+      holiday_service_days: Number(row.holiday_service_days || 0),
       avg_trip_km: Number(row.avg_trip_km || 0),
       weekday_ops: Number(row.weekday_ops || 0),
       saturday_ops: Number(row.saturday_ops || 0),
       sunday_ops: Number(row.sunday_ops || 0),
+      holiday_ops: Number(row.holiday_ops || 0),
       total_ops_days: Number(row.total_ops_days || 0),
       gtfs_year_km: Number(row.gtfs_year_km || 0),
       gtfs_month_avg_km: Number(row.gtfs_month_avg_km || 0),
@@ -1646,6 +1845,9 @@ router.get("/analytics/export.xlsx", async (req, res) => {
       { key: "routeId", value: routeId || "(all routes)" },
       { key: "startDate", value: startDate || "" },
       { key: "endDate", value: endDate || "" },
+      { key: "municipalHoliday", value: municipalHoliday?.label || "" },
+      { key: "timezone", value: "Europe/Lisbon" },
+      { key: "dstAuto", value: "true" },
     ];
 
     const planRowsRes = await db.query(

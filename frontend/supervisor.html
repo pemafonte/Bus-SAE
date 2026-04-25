@@ -394,6 +394,8 @@
             <input id="gtfsAnalyticsStartDate" type="date" />
             <label for="gtfsAnalyticsEndDate">Período fim</label>
             <input id="gtfsAnalyticsEndDate" type="date" />
+            <label for="gtfsAnalyticsMunicipalHoliday">Feriado municipal (DD-MM ou AAAA-MM-DD)</label>
+            <input id="gtfsAnalyticsMunicipalHoliday" type="text" placeholder="Ex.: 29-06" />
             <button type="button" id="gtfsAnalyticsCurrentYearBtn">Ano atual</button>
             <button type="button" id="gtfsAnalyticsNextYearBtn">Próximo ano</button>
             <button type="button" id="loadGtfsAnalyticsBtn">Carregar análise</button>
@@ -404,11 +406,12 @@
                 <thead>
                   <tr>
                     <th>Linha</th>
-                    <th>Trips</th>
+                    <th>Trips/dia útil</th>
                     <th>Km médio/trip</th>
                     <th>Ops úteis</th>
                     <th>Ops sábado</th>
                     <th>Ops domingo</th>
+                    <th>Ops feriado</th>
                     <th>Ops totais</th>
                     <th>Km GTFS ano</th>
                     <th>Km realizados</th>
@@ -418,8 +421,25 @@
                   </tr>
                 </thead>
                 <tbody id="gtfsAnalyticsTableBody">
-                  <tr><td colspan="12">Sem dados.</td></tr>
+                  <tr><td colspan="13">Sem dados.</td></tr>
                 </tbody>
+                <tfoot>
+                  <tr id="gtfsAnalyticsTotalsRow">
+                    <td><strong>Totais</strong></td>
+                    <td>0,0</td>
+                    <td>0,00</td>
+                    <td>0</td>
+                    <td>0</td>
+                    <td>0</td>
+                    <td>0</td>
+                    <td>0</td>
+                    <td>0,0</td>
+                    <td>0,0</td>
+                    <td>0,0</td>
+                    <td>0,0%</td>
+                    <td>-</td>
+                  </tr>
+                </tfoot>
               </table>
             </div>
           </section>
