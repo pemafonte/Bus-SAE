@@ -3872,7 +3872,20 @@ async function saveTrackerDevice(event) {
   trackerDeviceFormEl.reset();
   document.getElementById("trackerIsActive").value = "true";
   await loadTrackerDevices();
+  syncVehicleFormFromTrackerDevice(data);
+  await loadVehicleRegistry();
   alert(`Dispositivo ${data.imei} guardado com sucesso.`);
+}
+
+function syncVehicleFormFromTrackerDevice(device) {
+  const imeiInput = document.getElementById("vehicleImei");
+  const fleetInput = document.getElementById("vehicleFleetNumber");
+  const plateInput = document.getElementById("vehiclePlateNumber");
+  const activeInput = document.getElementById("vehicleIsActive");
+  if (imeiInput) imeiInput.value = normalizeImeiDigits(device?.imei || "");
+  if (fleetInput) fleetInput.value = String(device?.fleet_number || "").trim();
+  if (plateInput) plateInput.value = String(device?.plate_number || "").trim();
+  if (activeInput) activeInput.value = asPgBool(device?.is_active) ? "true" : "false";
 }
 
 function formatVehicleKm(value) {
