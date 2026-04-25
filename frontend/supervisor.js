@@ -2521,11 +2521,11 @@ function renderGtfsAnalyticsRows(rows) {
         acc.saturdayOps += Number(row.saturday_ops || 0);
         acc.sundayOps += Number(row.sunday_ops || 0);
         acc.holidayOps += Number(row.holiday_ops || 0);
+        acc.tripsPerWeekday += Number(row.trips_per_weekday || 0);
         acc.totalOps += Number(row.total_ops_days || 0);
         acc.gtfsYearKm += Number(row.gtfs_year_km || 0);
         acc.realizedKm += Number(row.realized_km || 0);
         acc.gapKm += Number(row.km_gap_vs_realized || 0);
-        acc.weekdayServiceDays += Number(row.weekday_service_days || 0);
         return acc;
       },
       {
@@ -2533,15 +2533,14 @@ function renderGtfsAnalyticsRows(rows) {
         saturdayOps: 0,
         sundayOps: 0,
         holidayOps: 0,
+        tripsPerWeekday: 0,
         totalOps: 0,
         gtfsYearKm: 0,
         realizedKm: 0,
         gapKm: 0,
-        weekdayServiceDays: 0,
       }
     );
-    const totalTripsPerWeekday =
-      totals.weekdayServiceDays > 0 ? Number((totals.weekdayOps / totals.weekdayServiceDays).toFixed(1)) : 0;
+    const totalTripsPerWeekday = Number(totals.tripsPerWeekday.toFixed(1));
     const totalAvgTripKm = totals.totalOps > 0 ? Number((totals.gtfsYearKm / totals.totalOps).toFixed(2)) : 0;
     const totalPct = totals.gtfsYearKm > 0 ? Number(((totals.realizedKm / totals.gtfsYearKm) * 100).toFixed(1)) : 0;
     gtfsAnalyticsTotalsRowEl.innerHTML = `
@@ -2634,7 +2633,7 @@ async function loadGtfsAnalyticsOverview() {
   const { startDate, endDate, municipalHoliday, params } = buildGtfsAnalyticsPeriodParams();
   selectedGtfsAnalyticsFeedKey = feedKey;
   renderGtfsAnalyticsSummary("A carregar análise GTFS...");
-  gtfsAnalyticsTableBodyEl.innerHTML = '<tr><td colspan="12">A carregar...</td></tr>';
+  gtfsAnalyticsTableBodyEl.innerHTML = '<tr><td colspan="13">A carregar...</td></tr>';
   if (feedKey) params.set("feedKey", feedKey);
   const query = params.toString() ? `?${params.toString()}` : "";
   const response = await fetch(`${API_BASE}/gtfs/analytics/overview${query}`, { headers: getAuthHeaders() });

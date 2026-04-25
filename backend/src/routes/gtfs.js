@@ -1285,6 +1285,10 @@ router.get("/analytics/overview", async (req, res) => {
            COALESCE(rsd.saturday_service_days, 0)::int AS saturday_service_days,
            COALESCE(rsd.sunday_service_days, 0)::int AS sunday_service_days,
            COALESCE(rsd.holiday_service_days, 0)::int AS holiday_service_days,
+           COUNT(DISTINCT CASE WHEN COALESCE(tdc.weekday_days, 0) > 0 THEN ts.trip_id END)::int AS weekday_trips_defined,
+           COUNT(DISTINCT CASE WHEN COALESCE(tdc.saturday_days, 0) > 0 THEN ts.trip_id END)::int AS saturday_trips_defined,
+           COUNT(DISTINCT CASE WHEN COALESCE(tdc.sunday_days, 0) > 0 THEN ts.trip_id END)::int AS sunday_trips_defined,
+           COUNT(DISTINCT CASE WHEN COALESCE(tdc.holiday_days, 0) > 0 THEN ts.trip_id END)::int AS holiday_trips_defined,
            COALESCE(SUM(tdc.weekday_days), 0)::int AS weekday_ops,
            COALESCE(SUM(tdc.saturday_days), 0)::int AS saturday_ops,
            COALESCE(SUM(tdc.sunday_days), 0)::int AS sunday_ops,
@@ -1313,22 +1317,10 @@ router.get("/analytics/overview", async (req, res) => {
          ra.route_long_name,
          ra.trips_defined,
          COALESCE(ra.avg_trip_km, 0)::numeric(12,3) AS avg_trip_km,
-         CASE
-           WHEN COALESCE(ra.weekday_service_days, 0) <= 0 THEN 0::numeric(12,3)
-           ELSE (ra.weekday_ops::numeric / ra.weekday_service_days::numeric)::numeric(12,3)
-         END AS trips_per_weekday,
-         CASE
-           WHEN COALESCE(ra.saturday_service_days, 0) <= 0 THEN 0::numeric(12,3)
-           ELSE (ra.saturday_ops::numeric / ra.saturday_service_days::numeric)::numeric(12,3)
-         END AS trips_per_saturday,
-         CASE
-           WHEN COALESCE(ra.sunday_service_days, 0) <= 0 THEN 0::numeric(12,3)
-           ELSE (ra.sunday_ops::numeric / ra.sunday_service_days::numeric)::numeric(12,3)
-         END AS trips_per_sunday,
-         CASE
-           WHEN COALESCE(ra.holiday_service_days, 0) <= 0 THEN 0::numeric(12,3)
-           ELSE (ra.holiday_ops::numeric / ra.holiday_service_days::numeric)::numeric(12,3)
-         END AS trips_per_holiday,
+         COALESCE(ra.weekday_trips_defined, 0)::numeric(12,3) AS trips_per_weekday,
+         COALESCE(ra.saturday_trips_defined, 0)::numeric(12,3) AS trips_per_saturday,
+         COALESCE(ra.sunday_trips_defined, 0)::numeric(12,3) AS trips_per_sunday,
+         COALESCE(ra.holiday_trips_defined, 0)::numeric(12,3) AS trips_per_holiday,
          ra.weekday_service_days,
          ra.saturday_service_days,
          ra.sunday_service_days,
@@ -1679,6 +1671,10 @@ router.get("/analytics/export.xlsx", async (req, res) => {
            COALESCE(rsd.saturday_service_days, 0)::int AS saturday_service_days,
            COALESCE(rsd.sunday_service_days, 0)::int AS sunday_service_days,
            COALESCE(rsd.holiday_service_days, 0)::int AS holiday_service_days,
+           COUNT(DISTINCT CASE WHEN COALESCE(tdc.weekday_days, 0) > 0 THEN ts.trip_id END)::int AS weekday_trips_defined,
+           COUNT(DISTINCT CASE WHEN COALESCE(tdc.saturday_days, 0) > 0 THEN ts.trip_id END)::int AS saturday_trips_defined,
+           COUNT(DISTINCT CASE WHEN COALESCE(tdc.sunday_days, 0) > 0 THEN ts.trip_id END)::int AS sunday_trips_defined,
+           COUNT(DISTINCT CASE WHEN COALESCE(tdc.holiday_days, 0) > 0 THEN ts.trip_id END)::int AS holiday_trips_defined,
            COALESCE(SUM(tdc.weekday_days), 0)::int AS weekday_ops,
            COALESCE(SUM(tdc.saturday_days), 0)::int AS saturday_ops,
            COALESCE(SUM(tdc.sunday_days), 0)::int AS sunday_ops,
@@ -1707,22 +1703,10 @@ router.get("/analytics/export.xlsx", async (req, res) => {
          ra.route_long_name,
          ra.trips_defined,
          COALESCE(ra.avg_trip_km, 0)::numeric(12,3) AS avg_trip_km,
-         CASE
-           WHEN COALESCE(ra.weekday_service_days, 0) <= 0 THEN 0::numeric(12,3)
-           ELSE (ra.weekday_ops::numeric / ra.weekday_service_days::numeric)::numeric(12,3)
-         END AS trips_per_weekday,
-         CASE
-           WHEN COALESCE(ra.saturday_service_days, 0) <= 0 THEN 0::numeric(12,3)
-           ELSE (ra.saturday_ops::numeric / ra.saturday_service_days::numeric)::numeric(12,3)
-         END AS trips_per_saturday,
-         CASE
-           WHEN COALESCE(ra.sunday_service_days, 0) <= 0 THEN 0::numeric(12,3)
-           ELSE (ra.sunday_ops::numeric / ra.sunday_service_days::numeric)::numeric(12,3)
-         END AS trips_per_sunday,
-         CASE
-           WHEN COALESCE(ra.holiday_service_days, 0) <= 0 THEN 0::numeric(12,3)
-           ELSE (ra.holiday_ops::numeric / ra.holiday_service_days::numeric)::numeric(12,3)
-         END AS trips_per_holiday,
+         COALESCE(ra.weekday_trips_defined, 0)::numeric(12,3) AS trips_per_weekday,
+         COALESCE(ra.saturday_trips_defined, 0)::numeric(12,3) AS trips_per_saturday,
+         COALESCE(ra.sunday_trips_defined, 0)::numeric(12,3) AS trips_per_sunday,
+         COALESCE(ra.holiday_trips_defined, 0)::numeric(12,3) AS trips_per_holiday,
          ra.weekday_service_days,
          ra.saturday_service_days,
          ra.sunday_service_days,
