@@ -138,16 +138,36 @@ function buildHolidayDateList(startIso, endIso, municipalHoliday) {
 }
 
 async function resolveAnalyticsPeriod(feedKey, startDate, endDate) {
+  const feedEffectiveRes = await db.query(
+    `SELECT
+       GREATEST(
+         COALESCE(gtfs_effective_from, DATE '1900-01-01'),
+         COALESCE(calendar_effective_from, DATE '1900-01-01')
+       )::date AS effective_start,
+       gtfs_effective_from,
+       calendar_effective_from
+     FROM gtfs_feeds
+     WHERE feed_key = $1
+     LIMIT 1`,
+    [feedKey]
+  );
+  const feedEffectiveStart =
+    String(feedEffectiveRes.rows[0]?.effective_start || "").slice(0, 10) ||
+    parseIsoDateInput(new Date().toISOString().slice(0, 10));
   let baseStart = startDate || null;
   if (!baseStart) {
-    const baseRes = await db.query(
-      `SELECT COALESCE((SELECT gtfs_effective_from FROM gtfs_feeds WHERE feed_key = $1), CURRENT_DATE)::date AS d`,
-      [feedKey]
-    );
-    baseStart = String(baseRes.rows[0]?.d || "").slice(0, 10) || parseIsoDateInput(new Date().toISOString().slice(0, 10));
+    baseStart = feedEffectiveStart;
+  } else if (baseStart < feedEffectiveStart) {
+    baseStart = feedEffectiveStart;
   }
   const resolvedEnd = endDate || String(addDaysUtc(new Date(`${baseStart}T00:00:00.000Z`), 364).toISOString().slice(0, 10));
-  return { startDate: baseStart, endDate: resolvedEnd };
+  return {
+    startDate: baseStart,
+    endDate: resolvedEnd,
+    effectiveStartDate: feedEffectiveStart,
+    gtfsEffectiveFrom: String(feedEffectiveRes.rows[0]?.gtfs_effective_from || "").slice(0, 10) || null,
+    calendarEffectiveFrom: String(feedEffectiveRes.rows[0]?.calendar_effective_from || "").slice(0, 10) || null,
+  };
 }
 
 function toUtcDate(iso) {
@@ -1870,7 +1890,8 @@ router.get("/analytics/overview", async (req, res) => {
     if (startDateInput && endDateInput && startDateInput > endDateInput) {
       return res.status(400).json({ message: "Intervalo inválido: startDate maior que endDate." });
     }
-    const { startDate, endDate } = await resolveAnalyticsPeriod(feedKey, startDateInput, endDateInput);
+    const { startDate, endDate, effectiveStartDate, gtfsEffectiveFrom, calendarEffectiveFrom } =
+      await resolveAnalyticsPeriod(feedKey, startDateInput, endDateInput);
     const holidayDates = buildHolidayDateList(startDate, endDate, municipalHoliday);
     const result = await db.query(
       `WITH selected_routes AS (
@@ -2152,6 +2173,9 @@ router.get("/analytics/overview", async (req, res) => {
         period: "1 ano operacional baseado no calendario GTFS",
         startDate,
         endDate,
+        effectiveStartDate,
+        gtfsEffectiveFrom,
+        calendarEffectiveFrom,
         municipalHoliday: municipalHoliday?.label || null,
         timezone: "Europe/Lisbon",
         dstAuto: true,
@@ -2286,7 +2310,8 @@ router.get("/analytics/export.xlsx", async (req, res) => {
     if (startDateInput && endDateInput && startDateInput > endDateInput) {
       return res.status(400).json({ message: "Intervalo inválido: startDate maior que endDate." });
     }
-    const { startDate, endDate } = await resolveAnalyticsPeriod(feedKey, startDateInput, endDateInput);
+    const { startDate, endDate, effectiveStartDate, gtfsEffectiveFrom, calendarEffectiveFrom } =
+      await resolveAnalyticsPeriod(feedKey, startDateInput, endDateInput);
     const holidayDates = buildHolidayDateList(startDate, endDate, municipalHoliday);
     const overviewRes = await db.query(
       `WITH selected_routes AS (
@@ -2660,6 +2685,9 @@ router.get("/analytics/export.xlsx", async (req, res) => {
       { key: "routeId", value: routeId || "(all routes)" },
       { key: "startDate", value: startDate || "" },
       { key: "endDate", value: endDate || "" },
+      { key: "effectiveStartDate", value: effectiveStartDate || "" },
+      { key: "gtfsEffectiveFrom", value: gtfsEffectiveFrom || "" },
+      { key: "calendarEffectiveFrom", value: calendarEffectiveFrom || "" },
       { key: "municipalHoliday", value: municipalHoliday?.label || "" },
       { key: "timezone", value: "Europe/Lisbon" },
       { key: "dstAuto", value: "true" },

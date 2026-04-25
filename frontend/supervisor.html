@@ -348,6 +348,14 @@
           </section>
           <section class="card card-top-gap">
             <h3>Calendários do feed</h3>
+            <div class="gtfs-calendar-legend">
+              <strong>Legenda dos calendários:</strong>
+              <div><code>A-U</code> Dias úteis (2ª a 6ª, exclui feriados)</div>
+              <div><code>A-S</code> Sábados</div>
+              <div><code>A-DF</code> Domingos e feriados</div>
+              <div><code>JA-U</code> Dias úteis, apenas julho e agosto</div>
+              <div><code>XJA1-U</code> Dias úteis, exceto julho e agosto</div>
+            </div>
             <button type="button" id="refreshGtfsCalendarsBtn">Atualizar calendários</button>
             <div id="gtfsCalendarsList" class="service-cards"></div>
           </section>
@@ -496,6 +504,7 @@
 
         <div id="tabListaMotoristas" class="tab-panel">
           <h2>Lista de utilizadores</h2>
+          <input id="driversSearchInput" type="text" placeholder="Buscar rápido: nome, utilizador, email, mecânico, empresa..." />
           <button id="refreshDriversBtn">Atualizar utilizadores</button>
           <ul id="driversList"></ul>
         </div>

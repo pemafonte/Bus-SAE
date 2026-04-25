@@ -53,6 +53,7 @@ const AUTH_SESSION_KEY = "auth_session";
 const overviewEl = document.getElementById("overview");
 const serviceCardsEl = document.getElementById("supServiceCards");
 const driversListEl = document.getElementById("driversList");
+const driversSearchInputEl = document.getElementById("driversSearchInput");
 const sessionWelcomeEl = document.getElementById("sessionWelcome");
 const logoutBtnEl = document.getElementById("logoutBtn");
 const loginCardEl = document.getElementById("supLoginCard");
@@ -179,6 +180,7 @@ let gtfsAnalyticsRouteLayer = null;
 let gtfsAnalyticsSelectedRouteId = "";
 let gtfsEditorMap = null;
 let gtfsEditorMapLayer = null;
+let gtfsEditorRouteDrawRequestId = 0;
 let supervisorAlertsPollTimer = null;
 let supervisorAlertBaselineReady = false;
 let lastSupervisorAlertSignature = "";
@@ -2661,7 +2663,8 @@ async function loadGtfsAnalyticsOverview() {
   renderGtfsAnalyticsSummary(
     [
       `Linhas analisadas: ${rows.length}`,
-      `Período: ${startDate || data.assumptions?.startDate || "-"} até ${endDate || data.assumptions?.endDate || "-"}`,
+      `Período: ${data.assumptions?.startDate || startDate || "-"} até ${data.assumptions?.endDate || endDate || "-"}`,
+      `Entrada em vigor aplicada: ${data.assumptions?.effectiveStartDate || data.assumptions?.startDate || "-"}`,
       `Feriado municipal: ${municipalHoliday || data.assumptions?.municipalHoliday || "-"}`,
       `Timezone: ${data.assumptions?.timezone || "Europe/Lisbon"} (DST automático)`,
       `${data.assumptions?.period || "1 ano operacional por calendário GTFS"}`,
@@ -2883,6 +2886,8 @@ function initGtfsEditorMap() {
 function drawGtfsEditorStopsMap(rows) {
   initGtfsEditorMap();
   if (!gtfsEditorMapLayer) return;
+  gtfsEditorRouteDrawRequestId += 1;
+  const requestId = gtfsEditorRouteDrawRequestId;
   gtfsEditorMapLayer.clearLayers();
   const points = (Array.isArray(rows) ? rows : [])
     .map((s) => ({
@@ -2896,21 +2901,48 @@ function drawGtfsEditorStopsMap(rows) {
     .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon))
     .sort((a, b) => a.seq - b.seq);
   if (!points.length) return;
-  const latlngs = points.map((p) => [p.lat, p.lon]);
-  const line = L.polyline(latlngs, { color: "#2563eb", weight: 4, opacity: 0.85 }).addTo(gtfsEditorMapLayer);
-  points.forEach((p) => {
-    L.circleMarker([p.lat, p.lon], {
-      radius: 6,
-      color: "#0f172a",
-      weight: 1,
-      fillColor: "#f59e0b",
-      fillOpacity: 0.95,
+  const straightLatlngs = points.map((p) => [p.lat, p.lon]);
+  const drawWithLatLngs = (routeLatLngs) => {
+    if (requestId !== gtfsEditorRouteDrawRequestId) return;
+    gtfsEditorMapLayer.clearLayers();
+    const line = L.polyline(routeLatLngs, { color: "#2563eb", weight: 4, opacity: 0.85 }).addTo(gtfsEditorMapLayer);
+    points.forEach((p) => {
+      L.circleMarker([p.lat, p.lon], {
+        radius: 6,
+        color: "#0f172a",
+        weight: 1,
+        fillColor: "#f59e0b",
+        fillOpacity: 0.95,
+      })
+        .bindPopup(`<strong>#${p.seq}</strong> ${p.name}<br/>Chegada: ${p.arr}<br/>Partida: ${p.dep}`)
+        .bindTooltip(`#${p.seq}`, { permanent: true, direction: "top", offset: [0, -8] })
+        .addTo(gtfsEditorMapLayer);
+    });
+    gtfsEditorMap.fitBounds(line.getBounds(), { padding: [24, 24] });
+  };
+
+  // Se houver pontos a mais para URL GET, usa fallback em linha reta.
+  if (points.length > 60) {
+    drawWithLatLngs(straightLatlngs);
+    return;
+  }
+
+  const coords = points.map((p) => `${p.lon},${p.lat}`).join(";");
+  const routeUrl = `https://router.project-osrm.org/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`;
+  fetch(routeUrl)
+    .then((r) => (r.ok ? r.json() : null))
+    .then((data) => {
+      const routeCoords = data?.routes?.[0]?.geometry?.coordinates;
+      if (!Array.isArray(routeCoords) || !routeCoords.length) {
+        drawWithLatLngs(straightLatlngs);
+        return;
+      }
+      const roadLatLngs = routeCoords
+        .map((c) => [Number(c[1]), Number(c[0])])
+        .filter((c) => Number.isFinite(c[0]) && Number.isFinite(c[1]));
+      drawWithLatLngs(roadLatLngs.length ? roadLatLngs : straightLatlngs);
     })
-      .bindPopup(`<strong>#${p.seq}</strong> ${p.name}<br/>Chegada: ${p.arr}<br/>Partida: ${p.dep}`)
-      .bindTooltip(`#${p.seq}`, { permanent: true, direction: "top", offset: [0, -8] })
-      .addTo(gtfsEditorMapLayer);
-  });
-  gtfsEditorMap.fitBounds(line.getBounds(), { padding: [24, 24] });
+    .catch(() => drawWithLatLngs(straightLatlngs));
 }
 
 function syncGtfsEditorScopeWithMode() {
@@ -3351,9 +3383,30 @@ async function toggleAccessUserActive(userId, currentActive) {
 
 let inlineResetUserId = null;
 
+function filterUsersBySearch(rows) {
+  const term = String(driversSearchInputEl?.value || "")
+    .trim()
+    .toLowerCase();
+  if (!term) return Array.isArray(rows) ? rows : [];
+  return (Array.isArray(rows) ? rows : []).filter((user) => {
+    const haystack = [
+      user.name,
+      user.username,
+      user.email,
+      user.mechanic_number,
+      user.company_name,
+      user.role,
+    ]
+      .map((v) => String(v || "").toLowerCase())
+      .join(" ");
+    return haystack.includes(term);
+  });
+}
+
 function renderUsersList() {
   driversListEl.innerHTML = "";
-  usersCache.forEach((d) => {
+  const visibleUsers = filterUsersBySearch(usersCache);
+  visibleUsers.forEach((d) => {
     const role = String(d.role || "").toLowerCase();
     const li = document.createElement("li");
     li.className = "user-row-item";
@@ -3430,6 +3483,12 @@ function renderUsersList() {
 
     driversListEl.appendChild(li);
   });
+  if (!visibleUsers.length) {
+    const li = document.createElement("li");
+    li.className = "user-row-item";
+    li.textContent = "Sem resultados para a pesquisa.";
+    driversListEl.appendChild(li);
+  }
 }
 
 async function loadStopPassages() {
@@ -4149,6 +4208,9 @@ bindById("downloadDriversTemplateXlsxBtn", "click", downloadDriversTemplateXlsx)
 bindById("exportDriversCsvBtn", "click", exportDriversCsv);
 bindById("exportDriversXlsxBtn", "click", exportDriversXlsx);
 bindById("refreshDriversBtn", "click", loadDrivers);
+if (driversSearchInputEl) {
+  driversSearchInputEl.addEventListener("input", renderUsersList);
+}
 if (trackerDeviceFormEl) {
   trackerDeviceFormEl.addEventListener("submit", saveTrackerDevice);
 }
