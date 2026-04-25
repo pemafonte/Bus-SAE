@@ -353,6 +353,11 @@
           </section>
           <section class="card card-top-gap">
             <h3>Adicionar paragem à trip</h3>
+            <label for="gtfsEditorOperationMode">Modo operacional</label>
+            <select id="gtfsEditorOperationMode">
+              <option value="urban">Urbano (aplicar a todas as trips da linha)</option>
+              <option value="interurban">Interurbano (permitir edição por trip)</option>
+            </select>
             <label for="gtfsEditorApplyScope">Aplicar alterações em</label>
             <select id="gtfsEditorApplyScope">
               <option value="trip">Apenas nesta trip selecionada</option>
@@ -360,6 +365,9 @@
             </select>
             <p class="field-help field-help-tight">
               Em modo carreira completa, a paragem é adicionada/removida em todas as trips da linha da trip selecionada.
+            </p>
+            <p id="gtfsEditorScopeHint" class="field-help field-help-tight">
+              Modo urbano ativo: alterações serão aplicadas à carreira completa por defeito.
             </p>
             <form id="gtfsEditorAddStopForm">
               <input id="gtfsEditorAddStopId" type="text" placeholder="stop_id existente (opcional)" />
@@ -401,6 +409,14 @@
             <button type="button" id="loadGtfsAnalyticsBtn">Carregar análise</button>
             <button type="button" id="exportGtfsAnalyticsExcelBtn">Exportar Excel detalhado</button>
             <pre id="gtfsAnalyticsSummary">Sem análise carregada.</pre>
+            <div class="gtfs-calendar-legend">
+              <strong>Legenda dos calendários:</strong>
+              <div><code>A-U</code> Dias úteis (2ª a 6ª, exclui feriados)</div>
+              <div><code>A-S</code> Sábados</div>
+              <div><code>A-DF</code> Domingos e feriados</div>
+              <div><code>JA-U</code> Dias úteis, apenas julho e agosto</div>
+              <div><code>XJA1-U</code> Dias úteis, exceto julho e agosto</div>
+            </div>
             <div class="ops-table-wrap">
               <table class="ops-table">
                 <thead>

@@ -121,6 +121,8 @@ const gtfsEditorTripSelectEl = document.getElementById("gtfsEditorTripSelect");
 const gtfsEditorSummaryEl = document.getElementById("gtfsEditorSummary");
 const gtfsEditorStopsListEl = document.getElementById("gtfsEditorStopsList");
 const gtfsEditorApplyScopeEl = document.getElementById("gtfsEditorApplyScope");
+const gtfsEditorOperationModeEl = document.getElementById("gtfsEditorOperationMode");
+const gtfsEditorScopeHintEl = document.getElementById("gtfsEditorScopeHint");
 const gtfsAnalyticsFeedSelectEl = document.getElementById("gtfsAnalyticsFeedSelect");
 const gtfsAnalyticsStartDateEl = document.getElementById("gtfsAnalyticsStartDate");
 const gtfsAnalyticsEndDateEl = document.getElementById("gtfsAnalyticsEndDate");
@@ -2562,6 +2564,7 @@ function renderGtfsAnalyticsRows(rows) {
   fillGtfsAnalyticsLineSelect(rows);
 }
 
+
 function renderGtfsTripOptions(trips) {
   if (!gtfsAnalyticsTripSelectEl) return;
   gtfsAnalyticsTripSelectEl.innerHTML = '<option value="">-- Escolher trip --</option>';
@@ -2853,6 +2856,18 @@ function renderGtfsEditorSummary(text) {
   if (gtfsEditorSummaryEl) gtfsEditorSummaryEl.textContent = text || "";
 }
 
+function syncGtfsEditorScopeWithMode() {
+  if (!gtfsEditorApplyScopeEl || !gtfsEditorOperationModeEl) return;
+  const mode = String(gtfsEditorOperationModeEl.value || "urban").trim().toLowerCase();
+  const isUrban = mode === "urban";
+  gtfsEditorApplyScopeEl.value = isUrban ? "route" : "trip";
+  if (gtfsEditorScopeHintEl) {
+    gtfsEditorScopeHintEl.textContent = isUrban
+      ? "Modo urbano ativo: alterações serão aplicadas à carreira completa por defeito."
+      : "Modo interurbano ativo: pode editar uma trip específica sem afetar as restantes.";
+  }
+}
+
 async function loadGtfsEditorLines() {
   if (!supToken || !gtfsEditorRouteSelectEl) return;
   renderGtfsEditorSummary("A carregar linhas GTFS...");
@@ -2870,6 +2885,8 @@ async function loadGtfsEditorLines() {
     option.value = r.route_id;
     const short = String(r.route_short_name || "").trim();
     const long = String(r.route_long_name || "").trim();
+    option.dataset.routeShortName = short;
+    option.dataset.routeLongName = long;
     option.textContent = `[${r.feed_key || "default"}] ${short || r.route_id}${long ? ` - ${long}` : ""} | trips ${r.trips_count || 0} | paragens ${r.stops_count || 0}`;
     gtfsEditorRouteSelectEl.appendChild(option);
   });
@@ -2883,6 +2900,14 @@ async function loadGtfsEditorLines() {
 async function loadGtfsEditorTripsByRoute() {
   if (!supToken || !gtfsEditorRouteSelectEl || !gtfsEditorTripSelectEl) return;
   const routeId = String(gtfsEditorRouteSelectEl.value || "").trim();
+  const selectedOption = gtfsEditorRouteSelectEl.selectedOptions?.[0] || null;
+  if (selectedOption && gtfsEditorOperationModeEl) {
+    const longName = String(selectedOption.dataset.routeLongName || "").toLowerCase();
+    const shortName = String(selectedOption.dataset.routeShortName || "").toLowerCase();
+    const looksInterurban = longName.includes("interurb") || shortName.includes("interurb");
+    gtfsEditorOperationModeEl.value = looksInterurban ? "interurban" : "urban";
+    syncGtfsEditorScopeWithMode();
+  }
   gtfsEditorTripSelectEl.innerHTML = '<option value="">-- Selecionar trip --</option>';
   if (!routeId) {
     renderGtfsEditorSummary("Selecione uma linha GTFS para listar trips.");
@@ -4099,6 +4124,10 @@ if (gtfsAnalyticsTripSelectEl) {
 if (gtfsEditorRouteSelectEl) {
   gtfsEditorRouteSelectEl.addEventListener("change", loadGtfsEditorTripsByRoute);
 }
+if (gtfsEditorOperationModeEl) {
+  gtfsEditorOperationModeEl.addEventListener("change", syncGtfsEditorScopeWithMode);
+}
+syncGtfsEditorScopeWithMode();
 const loadGtfsEditorTripStopsBtn = document.getElementById("loadGtfsEditorTripStopsBtn");
 if (loadGtfsEditorTripStopsBtn) {
   loadGtfsEditorTripStopsBtn.addEventListener("click", loadGtfsEditorTripStops);
