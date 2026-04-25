@@ -122,6 +122,8 @@ const gtfsEditorSummaryEl = document.getElementById("gtfsEditorSummary");
 const gtfsEditorStopsListEl = document.getElementById("gtfsEditorStopsList");
 const gtfsEditorApplyScopeEl = document.getElementById("gtfsEditorApplyScope");
 const gtfsAnalyticsFeedSelectEl = document.getElementById("gtfsAnalyticsFeedSelect");
+const gtfsAnalyticsStartDateEl = document.getElementById("gtfsAnalyticsStartDate");
+const gtfsAnalyticsEndDateEl = document.getElementById("gtfsAnalyticsEndDate");
 const gtfsAnalyticsSummaryEl = document.getElementById("gtfsAnalyticsSummary");
 const gtfsAnalyticsTableBodyEl = document.getElementById("gtfsAnalyticsTableBody");
 const gtfsAnalyticsLineSelectEl = document.getElementById("gtfsAnalyticsLineSelect");
@@ -2449,13 +2451,31 @@ function renderGtfsLineDetailSummary(text) {
   if (gtfsLineDetailSummaryEl) gtfsLineDetailSummaryEl.textContent = text || "";
 }
 
+function buildGtfsAnalyticsPeriodParams() {
+  const startDate = String(gtfsAnalyticsStartDateEl?.value || "").trim();
+  const endDate = String(gtfsAnalyticsEndDateEl?.value || "").trim();
+  const params = new URLSearchParams();
+  if (startDate) params.set("startDate", startDate);
+  if (endDate) params.set("endDate", endDate);
+  return { startDate, endDate, params };
+}
+
+function setGtfsAnalyticsYearRange(offsetYears = 0) {
+  const today = new Date();
+  const targetYear = today.getFullYear() + Number(offsetYears || 0);
+  const start = `${targetYear}-01-01`;
+  const end = `${targetYear}-12-31`;
+  if (gtfsAnalyticsStartDateEl) gtfsAnalyticsStartDateEl.value = start;
+  if (gtfsAnalyticsEndDateEl) gtfsAnalyticsEndDateEl.value = end;
+}
+
 function fillGtfsAnalyticsLineSelect(rows) {
   if (!gtfsAnalyticsLineSelectEl) return;
   gtfsAnalyticsLineSelectEl.innerHTML = '<option value="">-- Escolher linha da tabela --</option>';
   rows.forEach((row) => {
     const option = document.createElement("option");
     option.value = row.route_id;
-    option.textContent = `${row.route_label || row.route_id} | trips ${row.trips_count || 0} | km/mês ${formatNumberPt(row.estimated_month_km, 1)}`;
+    option.textContent = `${row.route_label || row.route_id} | trips ${row.trips_count || 0} | km ano ${formatNumberPt(row.gtfs_year_km, 1)}`;
     gtfsAnalyticsLineSelectEl.appendChild(option);
   });
 }
@@ -2463,7 +2483,7 @@ function fillGtfsAnalyticsLineSelect(rows) {
 function renderGtfsAnalyticsRows(rows) {
   if (!gtfsAnalyticsTableBodyEl) return;
   if (!Array.isArray(rows) || !rows.length) {
-    gtfsAnalyticsTableBodyEl.innerHTML = '<tr><td colspan="11">Sem linhas para o feed selecionado.</td></tr>';
+    gtfsAnalyticsTableBodyEl.innerHTML = '<tr><td colspan="12">Sem linhas para o feed selecionado.</td></tr>';
     fillGtfsAnalyticsLineSelect([]);
     return;
   }
@@ -2473,13 +2493,14 @@ function renderGtfsAnalyticsRows(rows) {
         <td>${row.route_label || row.route_id}</td>
         <td>${row.trips_count || 0}</td>
         <td>${formatNumberPt(row.avg_trip_km, 2)}</td>
-        <td>${row.weekday_trips || 0}</td>
-        <td>${row.saturday_trips || 0}</td>
-        <td>${row.sunday_trips || 0}</td>
-        <td>${row.holiday_trips || 0}</td>
-        <td>${formatNumberPt(row.estimated_month_km, 1)}</td>
-        <td>${formatNumberPt(row.estimated_semester_km, 1)}</td>
-        <td>${formatNumberPt(row.estimated_year_km, 1)}</td>
+        <td>${row.weekday_ops || 0}</td>
+        <td>${row.saturday_ops || 0}</td>
+        <td>${row.sunday_ops || 0}</td>
+        <td>${row.total_ops_days || 0}</td>
+        <td>${formatNumberPt(row.gtfs_year_km, 1)}</td>
+        <td>${formatNumberPt(row.realized_km, 1)}</td>
+        <td>${formatNumberPt(row.km_gap_vs_realized, 1)}</td>
+        <td>${formatNumberPt(row.realized_vs_gtfs_pct, 1)}%</td>
         <td><button type="button" class="adjust-btn" data-gtfs-analytics-route="${row.route_id}">Ver mapa</button></td>
       </tr>`
     )
@@ -2537,10 +2558,12 @@ function drawGtfsAnalyticsTrip(trip) {
 async function loadGtfsAnalyticsOverview() {
   if (!supToken || !gtfsAnalyticsTableBodyEl) return;
   const feedKey = String(gtfsAnalyticsFeedSelectEl?.value || selectedGtfsAnalyticsFeedKey || "").trim();
+  const { startDate, endDate, params } = buildGtfsAnalyticsPeriodParams();
   selectedGtfsAnalyticsFeedKey = feedKey;
   renderGtfsAnalyticsSummary("A carregar análise GTFS...");
-  gtfsAnalyticsTableBodyEl.innerHTML = '<tr><td colspan="11">A carregar...</td></tr>';
-  const query = feedKey ? `?feedKey=${encodeURIComponent(feedKey)}` : "";
+  gtfsAnalyticsTableBodyEl.innerHTML = '<tr><td colspan="12">A carregar...</td></tr>';
+  if (feedKey) params.set("feedKey", feedKey);
+  const query = params.toString() ? `?${params.toString()}` : "";
   const response = await fetch(`${API_BASE}/gtfs/analytics/overview${query}`, { headers: getAuthHeaders() });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -2558,7 +2581,8 @@ async function loadGtfsAnalyticsOverview() {
   renderGtfsAnalyticsSummary(
     [
       `Linhas analisadas: ${rows.length}`,
-      `Pressupostos: dias úteis/mês ${data.assumptions?.monthWeekdays ?? 22}, sábados ${data.assumptions?.monthSaturdays ?? 4}, domingos ${data.assumptions?.monthSundays ?? 4}, feriados ${data.assumptions?.monthHolidays ?? 1}`,
+      `Período: ${startDate || data.assumptions?.startDate || "-"} até ${endDate || data.assumptions?.endDate || "-"}`,
+      `${data.assumptions?.period || "1 ano operacional por calendário GTFS"}`,
     ].join("\n")
   );
 }
@@ -2598,7 +2622,7 @@ async function exportGtfsAnalyticsExcel() {
   if (!supToken) return;
   const feedKey = String(gtfsAnalyticsFeedSelectEl?.value || selectedGtfsAnalyticsFeedKey || "").trim();
   const routeId = String(gtfsAnalyticsLineSelectEl?.value || gtfsAnalyticsSelectedRouteId || "").trim();
-  const params = new URLSearchParams();
+  const { params } = buildGtfsAnalyticsPeriodParams();
   if (feedKey) params.set("feedKey", feedKey);
   if (routeId) params.set("routeId", routeId);
   const query = params.toString();
@@ -3961,6 +3985,14 @@ bindById("exportGtfsModifiedBtn", "click", exportGtfsModified);
 bindById("loadGtfsAnalyticsBtn", "click", loadGtfsAnalyticsOverview);
 bindById("loadGtfsLineDetailBtn", "click", () => loadGtfsLineDetail());
 bindById("exportGtfsAnalyticsExcelBtn", "click", exportGtfsAnalyticsExcel);
+bindById("gtfsAnalyticsCurrentYearBtn", "click", () => {
+  setGtfsAnalyticsYearRange(0);
+  loadGtfsAnalyticsOverview();
+});
+bindById("gtfsAnalyticsNextYearBtn", "click", () => {
+  setGtfsAnalyticsYearRange(1);
+  loadGtfsAnalyticsOverview();
+});
 const refreshGtfsEditorLinesBtn = document.getElementById("refreshGtfsEditorLinesBtn");
 if (refreshGtfsEditorLinesBtn) {
   refreshGtfsEditorLinesBtn.addEventListener("click", loadGtfsEditorLines);

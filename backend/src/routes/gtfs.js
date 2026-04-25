@@ -49,6 +49,12 @@ function parseGtfsDate(raw) {
   return `${text.slice(0, 4)}-${text.slice(4, 6)}-${text.slice(6, 8)}`;
 }
 
+function parseIsoDateInput(raw) {
+  const text = String(raw || "").trim();
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  return text;
+}
+
 function formatGtfsDate(raw) {
   const text = String(raw || "").trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return "";
@@ -65,12 +71,6 @@ function toCsv(rows, columns) {
   const header = columns.map((c) => csvEscape(c)).join(",");
   const body = rows.map((row) => columns.map((c) => csvEscape(row[c])).join(",")).join("\n");
   return `${header}\n${body}\n`;
-}
-
-function clampPositiveNumber(value, fallback) {
-  const parsed = Number(value);
-  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
-  return parsed;
 }
 
 async function ensureGtfsMultiFeedInfra() {
@@ -999,10 +999,11 @@ router.get("/analytics/overview", async (req, res) => {
   try {
     await ensureGtfsEditorIndexes();
     const feedKey = normalizeFeedKey(req.query.feedKey || "");
-    const monthWeekdays = clampPositiveNumber(req.query.monthWeekdays, 22);
-    const monthSaturdays = clampPositiveNumber(req.query.monthSaturdays, 4);
-    const monthSundays = clampPositiveNumber(req.query.monthSundays, 4);
-    const monthHolidays = clampPositiveNumber(req.query.monthHolidays, 1);
+    const startDate = parseIsoDateInput(req.query.startDate);
+    const endDate = parseIsoDateInput(req.query.endDate);
+    if (startDate && endDate && startDate > endDate) {
+      return res.status(400).json({ message: "Intervalo inválido: startDate maior que endDate." });
+    }
     const result = await db.query(
       `WITH selected_routes AS (
          SELECT r.feed_key, r.route_id, r.route_short_name, r.route_long_name
@@ -1010,6 +1011,17 @@ router.get("/analytics/overview", async (req, res) => {
          JOIN gtfs_feeds f ON f.feed_key = r.feed_key
          WHERE ($1::text = '' OR r.feed_key = $1)
            AND f.is_active = TRUE
+       ),
+       period AS (
+         SELECT
+           COALESCE($2::date, COALESCE((SELECT gf.gtfs_effective_from FROM gtfs_feeds gf WHERE gf.feed_key = $1), CURRENT_DATE)::date) AS start_date,
+           COALESCE(
+             $3::date,
+             (
+               COALESCE($2::date, COALESCE((SELECT gf.gtfs_effective_from FROM gtfs_feeds gf WHERE gf.feed_key = $1), CURRENT_DATE)::date)
+               + INTERVAL '1 year' - INTERVAL '1 day'
+             )::date
+           ) AS end_date
        ),
        trip_shapes AS (
          SELECT
@@ -1049,22 +1061,93 @@ router.get("/analytics/overview", async (req, res) => {
          ) gs ON gs.feed_key = t.feed_key AND gs.shape_id = t.shape_id
          GROUP BY t.feed_key, t.route_id, t.trip_id, t.service_id, t.shape_id
        ),
-       service_day_flags AS (
+       trip_calendar AS (
          SELECT
+           ts.feed_key,
+           ts.route_id,
            ts.trip_id,
-           CASE WHEN c.monday = 1 OR c.tuesday = 1 OR c.wednesday = 1 OR c.thursday = 1 OR c.friday = 1 THEN 1 ELSE 0 END AS has_weekday,
-           CASE WHEN c.saturday = 1 THEN 1 ELSE 0 END AS has_saturday,
-           CASE WHEN c.sunday = 1 THEN 1 ELSE 0 END AS has_sunday
+           ts.trip_km,
+           ts.service_id,
+           c.service_id AS calendar_service_id,
+           c.monday, c.tuesday, c.wednesday, c.thursday, c.friday, c.saturday, c.sunday,
+           c.start_date,
+           c.end_date
          FROM trip_shapes ts
-         LEFT JOIN gtfs_calendars c ON c.feed_key = ts.feed_key AND c.service_id = ts.service_id
+         LEFT JOIN gtfs_calendars c
+           ON c.feed_key = ts.feed_key
+          AND (
+            c.service_id = ts.service_id
+            OR c.service_id = (ts.feed_key || '::' || ts.service_id)
+            OR ts.service_id = (ts.feed_key || '::' || c.service_id)
+          )
        ),
-       holiday_flags AS (
+       trip_active_dates AS (
          SELECT
-           ts.trip_id,
-           CASE WHEN COUNT(*) FILTER (WHERE cd.exception_type = 1) > 0 THEN 1 ELSE 0 END AS has_holiday
-         FROM trip_shapes ts
-         LEFT JOIN gtfs_calendar_dates cd ON cd.feed_key = ts.feed_key AND cd.service_id = ts.service_id
-         GROUP BY ts.trip_id
+           tc.feed_key,
+           tc.route_id,
+           tc.trip_id,
+           tc.trip_km,
+           gs.d::date AS op_date
+         FROM trip_calendar tc
+         CROSS JOIN period p
+         JOIN LATERAL generate_series(
+           GREATEST(COALESCE(tc.start_date, p.start_date), p.start_date),
+           LEAST(COALESCE(tc.end_date, p.end_date), p.end_date),
+           INTERVAL '1 day'
+         ) gs(d) ON TRUE
+         LEFT JOIN gtfs_calendar_dates cd_remove
+           ON cd_remove.feed_key = tc.feed_key
+          AND (
+            cd_remove.service_id = tc.service_id
+            OR cd_remove.service_id = COALESCE(tc.calendar_service_id, '')
+            OR cd_remove.service_id = (tc.feed_key || '::' || tc.service_id)
+          )
+          AND cd_remove.calendar_date = gs.d::date
+          AND cd_remove.exception_type = 2
+         WHERE (
+             (EXTRACT(ISODOW FROM gs.d) = 1 AND COALESCE(tc.monday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 2 AND COALESCE(tc.tuesday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 3 AND COALESCE(tc.wednesday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 4 AND COALESCE(tc.thursday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 5 AND COALESCE(tc.friday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 6 AND COALESCE(tc.saturday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 7 AND COALESCE(tc.sunday, 0) = 1)
+           )
+           AND cd_remove.id IS NULL
+         UNION ALL
+         SELECT
+           tc.feed_key,
+           tc.route_id,
+           tc.trip_id,
+           tc.trip_km,
+           cd_add.calendar_date::date AS op_date
+         FROM trip_calendar tc
+         JOIN period p ON TRUE
+         JOIN gtfs_calendar_dates cd_add
+           ON cd_add.feed_key = tc.feed_key
+          AND (
+            cd_add.service_id = tc.service_id
+            OR cd_add.service_id = COALESCE(tc.calendar_service_id, '')
+            OR cd_add.service_id = (tc.feed_key || '::' || tc.service_id)
+          )
+          AND cd_add.exception_type = 1
+          AND cd_add.calendar_date BETWEEN p.start_date AND p.end_date
+       ),
+       trip_day_counts AS (
+         SELECT
+           tad.feed_key,
+           tad.route_id,
+           tad.trip_id,
+           MAX(tad.trip_km)::numeric(12,3) AS trip_km,
+           COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) BETWEEN 1 AND 5)::int AS weekday_days,
+           COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) = 6)::int AS saturday_days,
+           COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) = 7)::int AS sunday_days,
+           COUNT(*)::int AS total_active_days
+         FROM (
+           SELECT DISTINCT feed_key, route_id, trip_id, trip_km, op_date
+           FROM trip_active_dates
+         ) tad
+         GROUP BY tad.feed_key, tad.route_id, tad.trip_id
        ),
        route_agg AS (
          SELECT
@@ -1072,63 +1155,57 @@ router.get("/analytics/overview", async (req, res) => {
            sr.route_id,
            COALESCE(NULLIF(TRIM(sr.route_short_name), ''), sr.route_id) AS route_label,
            COALESCE(NULLIF(TRIM(sr.route_long_name), ''), '-') AS route_long_name,
-           COUNT(DISTINCT ts.trip_id)::int AS trips_count,
-           AVG(ts.trip_km)::numeric(12,3) AS avg_trip_km,
-           COALESCE(SUM(sdf.has_weekday), 0)::int AS weekday_trips,
-           COALESCE(SUM(sdf.has_saturday), 0)::int AS saturday_trips,
-           COALESCE(SUM(sdf.has_sunday), 0)::int AS sunday_trips,
-           COALESCE(SUM(hf.has_holiday), 0)::int AS holiday_trips
+           COUNT(DISTINCT tdc.trip_id)::int AS trips_count,
+           AVG(tdc.trip_km)::numeric(12,3) AS avg_trip_km,
+           COALESCE(SUM(tdc.weekday_days), 0)::int AS weekday_ops,
+           COALESCE(SUM(tdc.saturday_days), 0)::int AS saturday_ops,
+           COALESCE(SUM(tdc.sunday_days), 0)::int AS sunday_ops,
+           COALESCE(SUM(tdc.total_active_days), 0)::int AS total_ops_days,
+           COALESCE(SUM(tdc.trip_km * tdc.total_active_days), 0)::numeric(12,3) AS gtfs_year_km
          FROM selected_routes sr
-         LEFT JOIN trip_shapes ts ON ts.route_id = sr.route_id
-         LEFT JOIN service_day_flags sdf ON sdf.trip_id = ts.trip_id
-         LEFT JOIN holiday_flags hf ON hf.trip_id = ts.trip_id
+         LEFT JOIN trip_day_counts tdc ON tdc.route_id = sr.route_id
          GROUP BY sr.feed_key, sr.route_id, route_label, route_long_name
+       ),
+       realized_by_line AS (
+         SELECT
+           LOWER(TRIM(COALESCE(s.line_code, ''))) AS line_key,
+           COALESCE(SUM(COALESCE(s.total_km, 0)), 0)::numeric(12,3) AS realized_km
+         FROM services s
+         WHERE LOWER(TRIM(COALESCE(s.status::text, ''))) = 'completed'
+         GROUP BY LOWER(TRIM(COALESCE(s.line_code, '')))
        )
        SELECT
-         feed_key,
-         route_id,
-         route_label,
-         route_long_name,
-         trips_count,
-         COALESCE(avg_trip_km, 0)::numeric(12,3) AS avg_trip_km,
-         weekday_trips,
-         saturday_trips,
-         sunday_trips,
-         holiday_trips,
-         (
-           COALESCE(avg_trip_km, 0) * (
-             weekday_trips * $2::numeric +
-             saturday_trips * $3::numeric +
-             sunday_trips * $4::numeric +
-             holiday_trips * $5::numeric
-           )
-         )::numeric(12,3) AS estimated_month_km,
-         (
-           COALESCE(avg_trip_km, 0) * (
-             weekday_trips * $2::numeric +
-             saturday_trips * $3::numeric +
-             sunday_trips * $4::numeric +
-             holiday_trips * $5::numeric
-           ) * 6
-         )::numeric(12,3) AS estimated_semester_km,
-         (
-           COALESCE(avg_trip_km, 0) * (
-             weekday_trips * $2::numeric +
-             saturday_trips * $3::numeric +
-             sunday_trips * $4::numeric +
-             holiday_trips * $5::numeric
-           ) * 12
-         )::numeric(12,3) AS estimated_year_km
-       FROM route_agg
+         ra.feed_key,
+         ra.route_id,
+         ra.route_label,
+         ra.route_long_name,
+         ra.trips_count,
+         COALESCE(ra.avg_trip_km, 0)::numeric(12,3) AS avg_trip_km,
+         ra.weekday_ops,
+         ra.saturday_ops,
+         ra.sunday_ops,
+         ra.total_ops_days,
+         COALESCE(ra.gtfs_year_km, 0)::numeric(12,3) AS gtfs_year_km,
+         (COALESCE(ra.gtfs_year_km, 0) / 12.0)::numeric(12,3) AS gtfs_month_avg_km,
+         (COALESCE(ra.gtfs_year_km, 0) / 2.0)::numeric(12,3) AS gtfs_semester_avg_km,
+         COALESCE(rbl.realized_km, 0)::numeric(12,3) AS realized_km,
+         (COALESCE(ra.gtfs_year_km, 0) - COALESCE(rbl.realized_km, 0))::numeric(12,3) AS km_gap_vs_realized,
+         CASE
+           WHEN COALESCE(ra.gtfs_year_km, 0) <= 0 THEN 0::numeric(6,2)
+           ELSE ((COALESCE(rbl.realized_km, 0) / ra.gtfs_year_km) * 100)::numeric(6,2)
+         END AS realized_vs_gtfs_pct
+       FROM route_agg ra
+       LEFT JOIN realized_by_line rbl
+         ON rbl.line_key = LOWER(TRIM(COALESCE(ra.route_label, '')))
+         OR rbl.line_key = LOWER(TRIM(COALESCE(ra.route_id, '')))
        ORDER BY route_label ASC, route_id ASC`,
-      [feedKey, monthWeekdays, monthSaturdays, monthSundays, monthHolidays]
+      [feedKey, startDate, endDate]
     );
     return res.json({
       assumptions: {
-        monthWeekdays,
-        monthSaturdays,
-        monthSundays,
-        monthHolidays,
+        period: "1 ano operacional baseado no calendario GTFS",
+        startDate: startDate || null,
+        endDate: endDate || null,
       },
       lines: result.rows,
     });
@@ -1217,11 +1294,12 @@ router.get("/analytics/export.xlsx", async (req, res) => {
   try {
     await ensureGtfsEditorIndexes();
     const feedKey = normalizeFeedKey(req.query.feedKey || "");
-    const monthWeekdays = clampPositiveNumber(req.query.monthWeekdays, 22);
-    const monthSaturdays = clampPositiveNumber(req.query.monthSaturdays, 4);
-    const monthSundays = clampPositiveNumber(req.query.monthSundays, 4);
-    const monthHolidays = clampPositiveNumber(req.query.monthHolidays, 1);
     const routeId = String(req.query.routeId || "").trim();
+    const startDate = parseIsoDateInput(req.query.startDate);
+    const endDate = parseIsoDateInput(req.query.endDate);
+    if (startDate && endDate && startDate > endDate) {
+      return res.status(400).json({ message: "Intervalo inválido: startDate maior que endDate." });
+    }
 
     const overviewRes = await db.query(
       `WITH selected_routes AS (
@@ -1230,6 +1308,17 @@ router.get("/analytics/export.xlsx", async (req, res) => {
          JOIN gtfs_feeds f ON f.feed_key = r.feed_key
          WHERE ($1::text = '' OR r.feed_key = $1)
            AND f.is_active = TRUE
+       ),
+       period AS (
+         SELECT
+           COALESCE($2::date, COALESCE((SELECT gf.gtfs_effective_from FROM gtfs_feeds gf WHERE gf.feed_key = $1), CURRENT_DATE)::date) AS start_date,
+           COALESCE(
+             $3::date,
+             (
+               COALESCE($2::date, COALESCE((SELECT gf.gtfs_effective_from FROM gtfs_feeds gf WHERE gf.feed_key = $1), CURRENT_DATE)::date)
+               + INTERVAL '1 year' - INTERVAL '1 day'
+             )::date
+           ) AS end_date
        ),
        trip_shapes AS (
          SELECT
@@ -1269,22 +1358,93 @@ router.get("/analytics/export.xlsx", async (req, res) => {
          ) gs ON gs.feed_key = t.feed_key AND gs.shape_id = t.shape_id
          GROUP BY t.feed_key, t.route_id, t.trip_id, t.service_id, t.shape_id
        ),
-       service_day_flags AS (
+       trip_calendar AS (
          SELECT
+           ts.feed_key,
+           ts.route_id,
            ts.trip_id,
-           CASE WHEN c.monday = 1 OR c.tuesday = 1 OR c.wednesday = 1 OR c.thursday = 1 OR c.friday = 1 THEN 1 ELSE 0 END AS has_weekday,
-           CASE WHEN c.saturday = 1 THEN 1 ELSE 0 END AS has_saturday,
-           CASE WHEN c.sunday = 1 THEN 1 ELSE 0 END AS has_sunday
+           ts.trip_km,
+           ts.service_id,
+           c.service_id AS calendar_service_id,
+           c.monday, c.tuesday, c.wednesday, c.thursday, c.friday, c.saturday, c.sunday,
+           c.start_date,
+           c.end_date
          FROM trip_shapes ts
-         LEFT JOIN gtfs_calendars c ON c.feed_key = ts.feed_key AND c.service_id = ts.service_id
+         LEFT JOIN gtfs_calendars c
+           ON c.feed_key = ts.feed_key
+          AND (
+            c.service_id = ts.service_id
+            OR c.service_id = (ts.feed_key || '::' || ts.service_id)
+            OR ts.service_id = (ts.feed_key || '::' || c.service_id)
+          )
        ),
-       holiday_flags AS (
+       trip_active_dates AS (
          SELECT
-           ts.trip_id,
-           CASE WHEN COUNT(*) FILTER (WHERE cd.exception_type = 1) > 0 THEN 1 ELSE 0 END AS has_holiday
-         FROM trip_shapes ts
-         LEFT JOIN gtfs_calendar_dates cd ON cd.feed_key = ts.feed_key AND cd.service_id = ts.service_id
-         GROUP BY ts.trip_id
+           tc.feed_key,
+           tc.route_id,
+           tc.trip_id,
+           tc.trip_km,
+           gs.d::date AS op_date
+         FROM trip_calendar tc
+         CROSS JOIN period p
+         JOIN LATERAL generate_series(
+           GREATEST(COALESCE(tc.start_date, p.start_date), p.start_date),
+           LEAST(COALESCE(tc.end_date, p.end_date), p.end_date),
+           INTERVAL '1 day'
+         ) gs(d) ON TRUE
+         LEFT JOIN gtfs_calendar_dates cd_remove
+           ON cd_remove.feed_key = tc.feed_key
+          AND (
+            cd_remove.service_id = tc.service_id
+            OR cd_remove.service_id = COALESCE(tc.calendar_service_id, '')
+            OR cd_remove.service_id = (tc.feed_key || '::' || tc.service_id)
+          )
+          AND cd_remove.calendar_date = gs.d::date
+          AND cd_remove.exception_type = 2
+         WHERE (
+             (EXTRACT(ISODOW FROM gs.d) = 1 AND COALESCE(tc.monday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 2 AND COALESCE(tc.tuesday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 3 AND COALESCE(tc.wednesday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 4 AND COALESCE(tc.thursday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 5 AND COALESCE(tc.friday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 6 AND COALESCE(tc.saturday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 7 AND COALESCE(tc.sunday, 0) = 1)
+           )
+           AND cd_remove.id IS NULL
+         UNION ALL
+         SELECT
+           tc.feed_key,
+           tc.route_id,
+           tc.trip_id,
+           tc.trip_km,
+           cd_add.calendar_date::date AS op_date
+         FROM trip_calendar tc
+         JOIN period p ON TRUE
+         JOIN gtfs_calendar_dates cd_add
+           ON cd_add.feed_key = tc.feed_key
+          AND (
+            cd_add.service_id = tc.service_id
+            OR cd_add.service_id = COALESCE(tc.calendar_service_id, '')
+            OR cd_add.service_id = (tc.feed_key || '::' || tc.service_id)
+          )
+          AND cd_add.exception_type = 1
+          AND cd_add.calendar_date BETWEEN p.start_date AND p.end_date
+       ),
+       trip_day_counts AS (
+         SELECT
+           tad.feed_key,
+           tad.route_id,
+           tad.trip_id,
+           MAX(tad.trip_km)::numeric(12,3) AS trip_km,
+           COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) BETWEEN 1 AND 5)::int AS weekday_days,
+           COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) = 6)::int AS saturday_days,
+           COUNT(*) FILTER (WHERE EXTRACT(ISODOW FROM tad.op_date) = 7)::int AS sunday_days,
+           COUNT(*)::int AS total_active_days
+         FROM (
+           SELECT DISTINCT feed_key, route_id, trip_id, trip_km, op_date
+           FROM trip_active_dates
+         ) tad
+         GROUP BY tad.feed_key, tad.route_id, tad.trip_id
        ),
        route_agg AS (
          SELECT
@@ -1292,49 +1452,51 @@ router.get("/analytics/export.xlsx", async (req, res) => {
            sr.route_id,
            COALESCE(NULLIF(TRIM(sr.route_short_name), ''), sr.route_id) AS route_label,
            COALESCE(NULLIF(TRIM(sr.route_long_name), ''), '-') AS route_long_name,
-           COUNT(DISTINCT ts.trip_id)::int AS trips_count,
-           AVG(ts.trip_km)::numeric(12,3) AS avg_trip_km,
-           COALESCE(SUM(sdf.has_weekday), 0)::int AS weekday_trips,
-           COALESCE(SUM(sdf.has_saturday), 0)::int AS saturday_trips,
-           COALESCE(SUM(sdf.has_sunday), 0)::int AS sunday_trips,
-           COALESCE(SUM(hf.has_holiday), 0)::int AS holiday_trips
+           COUNT(DISTINCT tdc.trip_id)::int AS trips_count,
+           AVG(tdc.trip_km)::numeric(12,3) AS avg_trip_km,
+           COALESCE(SUM(tdc.weekday_days), 0)::int AS weekday_ops,
+           COALESCE(SUM(tdc.saturday_days), 0)::int AS saturday_ops,
+           COALESCE(SUM(tdc.sunday_days), 0)::int AS sunday_ops,
+           COALESCE(SUM(tdc.total_active_days), 0)::int AS total_ops_days,
+           COALESCE(SUM(tdc.trip_km * tdc.total_active_days), 0)::numeric(12,3) AS gtfs_year_km
          FROM selected_routes sr
-         LEFT JOIN trip_shapes ts ON ts.route_id = sr.route_id
-         LEFT JOIN service_day_flags sdf ON sdf.trip_id = ts.trip_id
-         LEFT JOIN holiday_flags hf ON hf.trip_id = ts.trip_id
+         LEFT JOIN trip_day_counts tdc ON tdc.route_id = sr.route_id
          GROUP BY sr.feed_key, sr.route_id, route_label, route_long_name
+       ),
+       realized_by_line AS (
+         SELECT
+           LOWER(TRIM(COALESCE(s.line_code, ''))) AS line_key,
+           COALESCE(SUM(COALESCE(s.total_km, 0)), 0)::numeric(12,3) AS realized_km
+         FROM services s
+         WHERE LOWER(TRIM(COALESCE(s.status::text, ''))) = 'completed'
+         GROUP BY LOWER(TRIM(COALESCE(s.line_code, '')))
        )
        SELECT
-         feed_key, route_id, route_label, route_long_name, trips_count,
-         COALESCE(avg_trip_km, 0)::numeric(12,3) AS avg_trip_km,
-         weekday_trips, saturday_trips, sunday_trips, holiday_trips,
-         (
-           COALESCE(avg_trip_km, 0) * (
-             weekday_trips * $2::numeric +
-             saturday_trips * $3::numeric +
-             sunday_trips * $4::numeric +
-             holiday_trips * $5::numeric
-           )
-         )::numeric(12,3) AS estimated_month_km,
-         (
-           COALESCE(avg_trip_km, 0) * (
-             weekday_trips * $2::numeric +
-             saturday_trips * $3::numeric +
-             sunday_trips * $4::numeric +
-             holiday_trips * $5::numeric
-           ) * 6
-         )::numeric(12,3) AS estimated_semester_km,
-         (
-           COALESCE(avg_trip_km, 0) * (
-             weekday_trips * $2::numeric +
-             saturday_trips * $3::numeric +
-             sunday_trips * $4::numeric +
-             holiday_trips * $5::numeric
-           ) * 12
-         )::numeric(12,3) AS estimated_year_km
-       FROM route_agg
+         ra.feed_key,
+         ra.route_id,
+         ra.route_label,
+         ra.route_long_name,
+         ra.trips_count,
+         COALESCE(ra.avg_trip_km, 0)::numeric(12,3) AS avg_trip_km,
+         ra.weekday_ops,
+         ra.saturday_ops,
+         ra.sunday_ops,
+         ra.total_ops_days,
+         COALESCE(ra.gtfs_year_km, 0)::numeric(12,3) AS gtfs_year_km,
+         (COALESCE(ra.gtfs_year_km, 0) / 12.0)::numeric(12,3) AS gtfs_month_avg_km,
+         (COALESCE(ra.gtfs_year_km, 0) / 2.0)::numeric(12,3) AS gtfs_semester_avg_km,
+         COALESCE(rbl.realized_km, 0)::numeric(12,3) AS realized_km,
+         (COALESCE(ra.gtfs_year_km, 0) - COALESCE(rbl.realized_km, 0))::numeric(12,3) AS km_gap_vs_realized,
+         CASE
+           WHEN COALESCE(ra.gtfs_year_km, 0) <= 0 THEN 0::numeric(6,2)
+           ELSE ((COALESCE(rbl.realized_km, 0) / ra.gtfs_year_km) * 100)::numeric(6,2)
+         END AS realized_vs_gtfs_pct
+       FROM route_agg ra
+       LEFT JOIN realized_by_line rbl
+         ON rbl.line_key = LOWER(TRIM(COALESCE(ra.route_label, '')))
+         OR rbl.line_key = LOWER(TRIM(COALESCE(ra.route_id, '')))
        ORDER BY route_label ASC, route_id ASC`,
-      [feedKey, monthWeekdays, monthSaturdays, monthSundays, monthHolidays]
+      [feedKey, startDate, endDate]
     );
 
     const detailsRes = await db.query(
@@ -1363,6 +1525,29 @@ router.get("/analytics/export.xlsx", async (req, res) => {
       [feedKey, routeId]
     );
 
+    const calendarsRes = await db.query(
+      `SELECT
+         c.feed_key,
+         c.service_id,
+         c.monday, c.tuesday, c.wednesday, c.thursday, c.friday, c.saturday, c.sunday,
+         c.start_date, c.end_date, c.is_active
+       FROM gtfs_calendars c
+       WHERE ($1::text = '' OR c.feed_key = $1)
+       ORDER BY c.service_id ASC`,
+      [feedKey]
+    );
+    const calendarDatesRes = await db.query(
+      `SELECT
+         cd.feed_key,
+         cd.service_id,
+         cd.calendar_date,
+         cd.exception_type
+       FROM gtfs_calendar_dates cd
+       WHERE ($1::text = '' OR cd.feed_key = $1)
+       ORDER BY cd.service_id ASC, cd.calendar_date ASC`,
+      [feedKey]
+    );
+
     const overviewRows = overviewRes.rows.map((row) => ({
       feed_key: row.feed_key || "",
       route_id: row.route_id || "",
@@ -1370,13 +1555,16 @@ router.get("/analytics/export.xlsx", async (req, res) => {
       route_long_name: row.route_long_name || "",
       trips_count: Number(row.trips_count || 0),
       avg_trip_km: Number(row.avg_trip_km || 0),
-      weekday_trips: Number(row.weekday_trips || 0),
-      saturday_trips: Number(row.saturday_trips || 0),
-      sunday_trips: Number(row.sunday_trips || 0),
-      holiday_trips: Number(row.holiday_trips || 0),
-      estimated_month_km: Number(row.estimated_month_km || 0),
-      estimated_semester_km: Number(row.estimated_semester_km || 0),
-      estimated_year_km: Number(row.estimated_year_km || 0),
+      weekday_ops: Number(row.weekday_ops || 0),
+      saturday_ops: Number(row.saturday_ops || 0),
+      sunday_ops: Number(row.sunday_ops || 0),
+      total_ops_days: Number(row.total_ops_days || 0),
+      gtfs_year_km: Number(row.gtfs_year_km || 0),
+      gtfs_month_avg_km: Number(row.gtfs_month_avg_km || 0),
+      gtfs_semester_avg_km: Number(row.gtfs_semester_avg_km || 0),
+      realized_km: Number(row.realized_km || 0),
+      km_gap_vs_realized: Number(row.km_gap_vs_realized || 0),
+      realized_vs_gtfs_pct: Number(row.realized_vs_gtfs_pct || 0),
     }));
 
     const detailRows = detailsRes.rows.map((row) => ({
@@ -1393,17 +1581,189 @@ router.get("/analytics/export.xlsx", async (req, res) => {
     }));
 
     const assumptionsRows = [
-      { key: "monthWeekdays", value: monthWeekdays },
-      { key: "monthSaturdays", value: monthSaturdays },
-      { key: "monthSundays", value: monthSundays },
-      { key: "monthHolidays", value: monthHolidays },
+      { key: "period", value: "1 ano operacional baseado no calendario GTFS" },
       { key: "feedKey", value: feedKey || "(active feeds)" },
       { key: "routeId", value: routeId || "(all routes)" },
+      { key: "startDate", value: startDate || "" },
+      { key: "endDate", value: endDate || "" },
     ];
+
+    const planRowsRes = await db.query(
+      `WITH selected_routes AS (
+         SELECT r.feed_key, r.route_id, COALESCE(NULLIF(TRIM(r.route_short_name), ''), r.route_id) AS route_label
+         FROM gtfs_routes r
+         JOIN gtfs_feeds f ON f.feed_key = r.feed_key
+         WHERE ($1::text = '' OR r.feed_key = $1)
+           AND ($2::text = '' OR r.route_id = $2)
+           AND f.is_active = TRUE
+       ),
+       period AS (
+         SELECT
+           COALESCE($3::date, COALESCE((SELECT gf.gtfs_effective_from FROM gtfs_feeds gf WHERE gf.feed_key = $1), CURRENT_DATE)::date) AS start_date,
+           COALESCE(
+             $4::date,
+             (
+               COALESCE($3::date, COALESCE((SELECT gf.gtfs_effective_from FROM gtfs_feeds gf WHERE gf.feed_key = $1), CURRENT_DATE)::date)
+               + INTERVAL '1 year' - INTERVAL '1 day'
+             )::date
+           ) AS end_date
+       ),
+       trip_shapes AS (
+         SELECT
+           t.feed_key, t.route_id, t.trip_id, t.service_id,
+           COALESCE(
+             SUM(
+               CASE
+                 WHEN prev_lat IS NULL OR prev_lon IS NULL THEN 0
+                 ELSE
+                   6371 * 2 * ASIN(
+                     SQRT(
+                       POWER(SIN(RADIANS((gs.shape_pt_lat - prev_lat) / 2)), 2) +
+                       COS(RADIANS(prev_lat)) * COS(RADIANS(gs.shape_pt_lat)) *
+                       POWER(SIN(RADIANS((gs.shape_pt_lon - prev_lon) / 2)), 2)
+                     )
+                   )
+               END
+             ),
+             0
+           )::numeric(12,3) AS trip_km
+         FROM gtfs_trips t
+         JOIN selected_routes sr ON sr.route_id = t.route_id
+         LEFT JOIN (
+           SELECT
+             feed_key, shape_id, shape_pt_sequence, shape_pt_lat, shape_pt_lon,
+             LAG(shape_pt_lat) OVER (PARTITION BY feed_key, shape_id ORDER BY shape_pt_sequence ASC) AS prev_lat,
+             LAG(shape_pt_lon) OVER (PARTITION BY feed_key, shape_id ORDER BY shape_pt_sequence ASC) AS prev_lon
+           FROM gtfs_shapes
+         ) gs ON gs.feed_key = t.feed_key AND gs.shape_id = t.shape_id
+         GROUP BY t.feed_key, t.route_id, t.trip_id, t.service_id
+       ),
+       trip_calendar AS (
+         SELECT
+           ts.feed_key, ts.route_id, ts.trip_id, ts.trip_km, ts.service_id,
+           c.service_id AS calendar_service_id,
+           c.monday, c.tuesday, c.wednesday, c.thursday, c.friday, c.saturday, c.sunday,
+           c.start_date, c.end_date
+         FROM trip_shapes ts
+         LEFT JOIN gtfs_calendars c
+           ON c.feed_key = ts.feed_key
+          AND (
+            c.service_id = ts.service_id
+            OR c.service_id = (ts.feed_key || '::' || ts.service_id)
+            OR ts.service_id = (ts.feed_key || '::' || c.service_id)
+          )
+       ),
+       base_days AS (
+         SELECT
+           tc.feed_key, tc.route_id, tc.trip_id, tc.trip_km, gs.d::date AS op_date
+         FROM trip_calendar tc
+         CROSS JOIN period p
+         JOIN LATERAL generate_series(
+           GREATEST(COALESCE(tc.start_date, p.start_date), p.start_date),
+           LEAST(COALESCE(tc.end_date, p.end_date), p.end_date),
+           INTERVAL '1 day'
+         ) gs(d) ON TRUE
+         LEFT JOIN gtfs_calendar_dates cd_remove
+           ON cd_remove.feed_key = tc.feed_key
+          AND (
+            cd_remove.service_id = tc.service_id
+            OR cd_remove.service_id = COALESCE(tc.calendar_service_id, '')
+            OR cd_remove.service_id = (tc.feed_key || '::' || tc.service_id)
+          )
+          AND cd_remove.calendar_date = gs.d::date
+          AND cd_remove.exception_type = 2
+         WHERE (
+             (EXTRACT(ISODOW FROM gs.d) = 1 AND COALESCE(tc.monday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 2 AND COALESCE(tc.tuesday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 3 AND COALESCE(tc.wednesday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 4 AND COALESCE(tc.thursday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 5 AND COALESCE(tc.friday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 6 AND COALESCE(tc.saturday, 0) = 1) OR
+             (EXTRACT(ISODOW FROM gs.d) = 7 AND COALESCE(tc.sunday, 0) = 1)
+           )
+           AND cd_remove.id IS NULL
+       ),
+       added_days AS (
+         SELECT
+           tc.feed_key, tc.route_id, tc.trip_id, tc.trip_km, cd_add.calendar_date::date AS op_date
+         FROM trip_calendar tc
+         JOIN period p ON TRUE
+         JOIN gtfs_calendar_dates cd_add
+           ON cd_add.feed_key = tc.feed_key
+          AND (
+            cd_add.service_id = tc.service_id
+            OR cd_add.service_id = COALESCE(tc.calendar_service_id, '')
+            OR cd_add.service_id = (tc.feed_key || '::' || tc.service_id)
+          )
+          AND cd_add.exception_type = 1
+          AND cd_add.calendar_date BETWEEN p.start_date AND p.end_date
+       ),
+       all_days AS (
+         SELECT DISTINCT feed_key, route_id, trip_id, trip_km, op_date FROM base_days
+         UNION
+         SELECT DISTINCT feed_key, route_id, trip_id, trip_km, op_date FROM added_days
+       )
+       SELECT
+         ad.op_date,
+         sr.route_label,
+         ad.route_id,
+         COUNT(DISTINCT ad.trip_id)::int AS trips_count,
+         COALESCE(SUM(ad.trip_km), 0)::numeric(12,3) AS km_day
+       FROM all_days ad
+       JOIN selected_routes sr ON sr.route_id = ad.route_id
+       GROUP BY ad.op_date, sr.route_label, ad.route_id
+       ORDER BY ad.op_date ASC, sr.route_label ASC, ad.route_id ASC`,
+      [feedKey, routeId, startDate, endDate]
+    );
 
     const wb = XLSX.utils.book_new();
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(overviewRows), "linhas");
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detailRows), "trips_detalhe");
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(
+        calendarsRes.rows.map((r) => ({
+          feed_key: r.feed_key || "",
+          service_id: r.service_id || "",
+          monday: Number(r.monday || 0),
+          tuesday: Number(r.tuesday || 0),
+          wednesday: Number(r.wednesday || 0),
+          thursday: Number(r.thursday || 0),
+          friday: Number(r.friday || 0),
+          saturday: Number(r.saturday || 0),
+          sunday: Number(r.sunday || 0),
+          start_date: r.start_date || "",
+          end_date: r.end_date || "",
+          is_active: r.is_active === true,
+        }))
+      ),
+      "calendar"
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(
+        calendarDatesRes.rows.map((r) => ({
+          feed_key: r.feed_key || "",
+          service_id: r.service_id || "",
+          calendar_date: r.calendar_date || "",
+          exception_type: Number(r.exception_type || 0),
+        }))
+      ),
+      "calendar_dates"
+    );
+    XLSX.utils.book_append_sheet(
+      wb,
+      XLSX.utils.json_to_sheet(
+        planRowsRes.rows.map((r) => ({
+          op_date: r.op_date,
+          route_label: r.route_label || "",
+          route_id: r.route_id || "",
+          trips_count: Number(r.trips_count || 0),
+          km_day: Number(r.km_day || 0),
+        }))
+      ),
+      "plano_operacao_dia"
+    );
     XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(assumptionsRows), "parametros");
     const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");

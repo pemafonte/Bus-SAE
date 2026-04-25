@@ -390,6 +390,12 @@
             <select id="gtfsAnalyticsFeedSelect">
               <option value="">-- Feed ativo (automático) --</option>
             </select>
+            <label for="gtfsAnalyticsStartDate">Período início</label>
+            <input id="gtfsAnalyticsStartDate" type="date" />
+            <label for="gtfsAnalyticsEndDate">Período fim</label>
+            <input id="gtfsAnalyticsEndDate" type="date" />
+            <button type="button" id="gtfsAnalyticsCurrentYearBtn">Ano atual</button>
+            <button type="button" id="gtfsAnalyticsNextYearBtn">Próximo ano</button>
             <button type="button" id="loadGtfsAnalyticsBtn">Carregar análise</button>
             <button type="button" id="exportGtfsAnalyticsExcelBtn">Exportar Excel detalhado</button>
             <pre id="gtfsAnalyticsSummary">Sem análise carregada.</pre>
@@ -400,18 +406,19 @@
                     <th>Linha</th>
                     <th>Trips</th>
                     <th>Km médio/trip</th>
-                    <th>Útil</th>
-                    <th>Sábado</th>
-                    <th>Domingo</th>
-                    <th>Feriado</th>
-                    <th>Km/mês</th>
-                    <th>Km/semestre</th>
-                    <th>Km/ano</th>
+                    <th>Ops úteis</th>
+                    <th>Ops sábado</th>
+                    <th>Ops domingo</th>
+                    <th>Ops totais</th>
+                    <th>Km GTFS ano</th>
+                    <th>Km realizados</th>
+                    <th>Gap (GTFS-real)</th>
+                    <th>% realizado</th>
                     <th>Ação</th>
                   </tr>
                 </thead>
                 <tbody id="gtfsAnalyticsTableBody">
-                  <tr><td colspan="11">Sem dados.</td></tr>
+                  <tr><td colspan="12">Sem dados.</td></tr>
                 </tbody>
               </table>
             </div>
