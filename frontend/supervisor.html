@@ -47,6 +47,7 @@
             <button type="button" class="tab-btn" data-module="administracao" data-tab-target="tabCriarAcesso">Criar acesso</button>
             <button type="button" class="tab-btn" data-module="dados" data-tab-target="tabImportarMotoristas">Importar dados</button>
             <button type="button" class="tab-btn" data-module="dados" data-tab-target="tabEditorGtfs">Editor GTFS</button>
+            <button type="button" class="tab-btn" data-module="dados" data-tab-target="tabAnaliseGtfs">Análise GTFS</button>
             <button type="button" class="tab-btn" data-module="dados" data-tab-target="tabExportarMotoristas">Exportar dados</button>
             <button type="button" class="tab-btn" data-module="administracao" data-tab-target="tabListaMotoristas">Lista de motoristas</button>
             <button type="button" class="tab-btn" data-module="dados" data-tab-target="tabViaturas">Viaturas</button>
@@ -375,6 +376,59 @@
             <h3>Paragens da trip (remoção)</h3>
             <p class="field-help">Use "Remover" numa paragem para retirar da trip; a sequência será normalizada automaticamente.</p>
             <div id="gtfsEditorStopsList" class="service-cards"></div>
+          </section>
+        </div>
+
+        <div id="tabAnaliseGtfs" class="tab-panel">
+          <h2>Análise GTFS por linha</h2>
+          <p class="field-help field-help-tight">
+            Explore os feeds GTFS carregados, selecione uma linha e veja serviços por tipo de dia e estimativas de quilometragem mensal, semestral e anual.
+          </p>
+          <section class="card">
+            <h3>Filtros e resumo por linha</h3>
+            <label for="gtfsAnalyticsFeedSelect">Feed GTFS</label>
+            <select id="gtfsAnalyticsFeedSelect">
+              <option value="">-- Feed ativo (automático) --</option>
+            </select>
+            <button type="button" id="loadGtfsAnalyticsBtn">Carregar análise</button>
+            <button type="button" id="exportGtfsAnalyticsExcelBtn">Exportar Excel detalhado</button>
+            <pre id="gtfsAnalyticsSummary">Sem análise carregada.</pre>
+            <div class="ops-table-wrap">
+              <table class="ops-table">
+                <thead>
+                  <tr>
+                    <th>Linha</th>
+                    <th>Trips</th>
+                    <th>Km médio/trip</th>
+                    <th>Útil</th>
+                    <th>Sábado</th>
+                    <th>Domingo</th>
+                    <th>Feriado</th>
+                    <th>Km/mês</th>
+                    <th>Km/semestre</th>
+                    <th>Km/ano</th>
+                    <th>Ação</th>
+                  </tr>
+                </thead>
+                <tbody id="gtfsAnalyticsTableBody">
+                  <tr><td colspan="11">Sem dados.</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </section>
+          <section class="card card-top-gap">
+            <h3>Mapa da linha e trips</h3>
+            <label for="gtfsAnalyticsLineSelect">Linha</label>
+            <select id="gtfsAnalyticsLineSelect">
+              <option value="">-- Escolher linha da tabela --</option>
+            </select>
+            <button type="button" id="loadGtfsLineDetailBtn">Carregar detalhe da linha</button>
+            <label for="gtfsAnalyticsTripSelect">Trip da linha</label>
+            <select id="gtfsAnalyticsTripSelect">
+              <option value="">-- Escolher trip --</option>
+            </select>
+            <pre id="gtfsLineDetailSummary">Sem detalhe de linha carregado.</pre>
+            <div id="gtfsAnalyticsMap"></div>
           </section>
         </div>
 

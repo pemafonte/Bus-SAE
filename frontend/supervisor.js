@@ -121,6 +121,13 @@ const gtfsEditorTripSelectEl = document.getElementById("gtfsEditorTripSelect");
 const gtfsEditorSummaryEl = document.getElementById("gtfsEditorSummary");
 const gtfsEditorStopsListEl = document.getElementById("gtfsEditorStopsList");
 const gtfsEditorApplyScopeEl = document.getElementById("gtfsEditorApplyScope");
+const gtfsAnalyticsFeedSelectEl = document.getElementById("gtfsAnalyticsFeedSelect");
+const gtfsAnalyticsSummaryEl = document.getElementById("gtfsAnalyticsSummary");
+const gtfsAnalyticsTableBodyEl = document.getElementById("gtfsAnalyticsTableBody");
+const gtfsAnalyticsLineSelectEl = document.getElementById("gtfsAnalyticsLineSelect");
+const gtfsAnalyticsTripSelectEl = document.getElementById("gtfsAnalyticsTripSelect");
+const gtfsLineDetailSummaryEl = document.getElementById("gtfsLineDetailSummary");
+const gtfsAnalyticsMapEl = document.getElementById("gtfsAnalyticsMap");
 const gtfsRtPreviewReportEl = document.getElementById("gtfsRtPreviewReport");
 const gtfsEffectiveFromEl = document.getElementById("gtfsEffectiveFrom");
 const calendarEffectiveFromEl = document.getElementById("calendarEffectiveFrom");
@@ -141,6 +148,8 @@ let rosterDaySelectedDriverId = null;
 let supLiveMap = null;
 let supLiveMarkersLayer = null;
 let supLiveRoutesLayer = null;
+let supLiveRouteByServiceId = new Map();
+let supLiveHighlightedServiceId = null;
 let deadheadMap = null;
 let deadheadRouteLayer = null;
 let supLiveRefreshInterval = null;
@@ -153,6 +162,12 @@ let reportsLoadedOnce = false;
 let selectedOpsDriverId = null;
 let currentSupervisorUserId = null;
 let selectedGtfsFeedKey = "";
+let selectedGtfsAnalyticsFeedKey = "";
+let gtfsAnalyticsRowsCache = [];
+let gtfsLineTripsCache = [];
+let gtfsAnalyticsMap = null;
+let gtfsAnalyticsRouteLayer = null;
+let gtfsAnalyticsSelectedRouteId = "";
 let supervisorAlertsPollTimer = null;
 let supervisorAlertBaselineReady = false;
 let lastSupervisorAlertSignature = "";
@@ -167,6 +182,7 @@ const TAB_MODULE_MAP = {
   tabCriarAcesso: "administracao",
   tabImportarMotoristas: "dados",
   tabEditorGtfs: "dados",
+  tabAnaliseGtfs: "dados",
   tabExportarMotoristas: "dados",
   tabListaMotoristas: "administracao",
   tabViaturas: "dados",
@@ -988,6 +1004,11 @@ function openSupervisorTab(tabId) {
     loadGtfsEditorLines();
     loadGtfsCalendars();
   }
+  if (tabId === "tabAnaliseGtfs") {
+    loadGtfsFeeds();
+    loadGtfsAnalyticsOverview();
+    initGtfsAnalyticsMap();
+  }
   if (tabId === "tabImportarMotoristas") {
     loadGtfsFeeds();
   }
@@ -1417,6 +1438,22 @@ function getLiveServicesFiltered() {
   return list;
 }
 
+function applyLiveServiceRouteHighlight(serviceIdRaw) {
+  const targetId = serviceIdRaw == null ? null : String(serviceIdRaw);
+  supLiveHighlightedServiceId = targetId;
+  if (!(supLiveRouteByServiceId instanceof Map) || !supLiveRouteByServiceId.size) return;
+  supLiveRouteByServiceId.forEach((polyline, serviceId) => {
+    if (!polyline) return;
+    const isTarget = targetId && String(serviceId) === targetId;
+    const bringFront = Boolean(isTarget);
+    polyline.setStyle({
+      weight: isTarget ? 6 : 3,
+      opacity: isTarget ? 0.95 : targetId ? 0.2 : 0.65,
+    });
+    if (bringFront && typeof polyline.bringToFront === "function") polyline.bringToFront();
+  });
+}
+
 async function renderLiveRealtimeView() {
   if (liveServiceFilterSelectEl) {
     const currentValue = String(liveServiceFilterSelectEl.value || "all");
@@ -1441,6 +1478,7 @@ async function renderLiveRealtimeView() {
 
   supLiveMarkersLayer.clearLayers();
   if (supLiveRoutesLayer) supLiveRoutesLayer.clearLayers();
+  supLiveRouteByServiceId = new Map();
   const bounds = [];
   const routeBounds = [];
   list.forEach((svc) => {
@@ -1461,7 +1499,7 @@ async function renderLiveRealtimeView() {
     card.className = "service-card-item";
     const delayMinutes = computeLiveDelayMinutes(svc);
     const delayClass = getDelayClass(delayMinutes);
-    card.innerHTML = `<div><strong>Serviço #${svc.id}</strong> | Linha ${svc.line_code || "-"} | Frota ${svc.fleet_number || "-"} | ${svc.driver_name || "-"}</div>
+    card.innerHTML = `<div><strong>Serviço #${svc.id}</strong> | Linha ${svc.line_code || "-"} | Frota ${svc.fleet_number || "-"} | <span class="live-driver-name" data-live-driver-service-id="${svc.id}">${svc.driver_name || "-"}</span></div>
       <div><small>Desvio horário:</small> <span class="delay-pill ${delayClass}">${formatDelay(delayMinutes)}</span></div>
       <div class="service-card-actions">
         <button type="button" class="stop-passages-shortcut-btn" data-stop-passages-service-id="${svc.id}">Paragens</button>
@@ -1478,13 +1516,15 @@ async function renderLiveRealtimeView() {
           .filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
         if (latLngs.length < 2) continue;
         const lineColor = resolveLineColorHex(svc.route_color, "#f97316");
-        L.polyline(latLngs, { color: lineColor, weight: 3, opacity: 0.65 }).addTo(supLiveRoutesLayer);
+        const polyline = L.polyline(latLngs, { color: lineColor, weight: 3, opacity: 0.65 }).addTo(supLiveRoutesLayer);
+        supLiveRouteByServiceId.set(String(svc.id), polyline);
         routeBounds.push(...latLngs);
       } catch (_e) {
         // ignore
       }
     }
   }
+  applyLiveServiceRouteHighlight(supLiveHighlightedServiceId);
 
   const allBounds = [...bounds, ...routeBounds];
   if (allBounds.length && !supLiveMapUserAdjustedView) {
@@ -2322,6 +2362,9 @@ async function loadGtfsFeeds() {
     const firstActive = rows.find((r) => r.is_active === true);
     selectedGtfsFeedKey = String(firstActive?.feed_key || rows[0]?.feed_key || "");
   }
+  if (!selectedGtfsAnalyticsFeedKey) {
+    selectedGtfsAnalyticsFeedKey = selectedGtfsFeedKey;
+  }
   if (gtfsEditorFeedSelectEl) {
     gtfsEditorFeedSelectEl.innerHTML = '<option value="">-- Feed ativo (automático) --</option>';
     rows.forEach((feed) => {
@@ -2330,6 +2373,16 @@ async function loadGtfsFeeds() {
       option.textContent = `${feed.feed_name || feed.feed_key} (${feed.is_active ? "ativo" : "inativo"})`;
       if (feed.feed_key === selectedGtfsFeedKey) option.selected = true;
       gtfsEditorFeedSelectEl.appendChild(option);
+    });
+  }
+  if (gtfsAnalyticsFeedSelectEl) {
+    gtfsAnalyticsFeedSelectEl.innerHTML = '<option value="">-- Feed ativo (automático) --</option>';
+    rows.forEach((feed) => {
+      const option = document.createElement("option");
+      option.value = feed.feed_key;
+      option.textContent = `${feed.feed_name || feed.feed_key} (${feed.is_active ? "ativo" : "inativo"})`;
+      if (feed.feed_key === selectedGtfsAnalyticsFeedKey) option.selected = true;
+      gtfsAnalyticsFeedSelectEl.appendChild(option);
     });
   }
   const selectedFeed = rows.find((r) => String(r.feed_key) === String(selectedGtfsFeedKey));
@@ -2364,6 +2417,211 @@ async function loadGtfsFeeds() {
     `;
     gtfsFeedsListEl.appendChild(item);
   });
+}
+
+function initGtfsAnalyticsMap() {
+  if (!gtfsAnalyticsMapEl || gtfsAnalyticsMap) return;
+  gtfsAnalyticsMap = L.map(gtfsAnalyticsMapEl).setView([38.7223, -9.1393], 12);
+  const primary = L.tileLayer(`${API_BASE}/map-tiles/{z}/{x}/{y}.png`, {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap contributors",
+  });
+  const fallback = L.tileLayer("https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png", {
+    maxZoom: 20,
+    attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+  });
+  let tileErrors = 0;
+  primary.on("tileerror", () => {
+    tileErrors += 1;
+    if (tileErrors < 4) return;
+    if (gtfsAnalyticsMap.hasLayer(primary)) gtfsAnalyticsMap.removeLayer(primary);
+    if (!gtfsAnalyticsMap.hasLayer(fallback)) fallback.addTo(gtfsAnalyticsMap);
+  });
+  primary.addTo(gtfsAnalyticsMap);
+  gtfsAnalyticsRouteLayer = L.layerGroup().addTo(gtfsAnalyticsMap);
+}
+
+function renderGtfsAnalyticsSummary(text) {
+  if (gtfsAnalyticsSummaryEl) gtfsAnalyticsSummaryEl.textContent = text || "";
+}
+
+function renderGtfsLineDetailSummary(text) {
+  if (gtfsLineDetailSummaryEl) gtfsLineDetailSummaryEl.textContent = text || "";
+}
+
+function fillGtfsAnalyticsLineSelect(rows) {
+  if (!gtfsAnalyticsLineSelectEl) return;
+  gtfsAnalyticsLineSelectEl.innerHTML = '<option value="">-- Escolher linha da tabela --</option>';
+  rows.forEach((row) => {
+    const option = document.createElement("option");
+    option.value = row.route_id;
+    option.textContent = `${row.route_label || row.route_id} | trips ${row.trips_count || 0} | km/mês ${formatNumberPt(row.estimated_month_km, 1)}`;
+    gtfsAnalyticsLineSelectEl.appendChild(option);
+  });
+}
+
+function renderGtfsAnalyticsRows(rows) {
+  if (!gtfsAnalyticsTableBodyEl) return;
+  if (!Array.isArray(rows) || !rows.length) {
+    gtfsAnalyticsTableBodyEl.innerHTML = '<tr><td colspan="11">Sem linhas para o feed selecionado.</td></tr>';
+    fillGtfsAnalyticsLineSelect([]);
+    return;
+  }
+  gtfsAnalyticsTableBodyEl.innerHTML = rows
+    .map(
+      (row) => `<tr>
+        <td>${row.route_label || row.route_id}</td>
+        <td>${row.trips_count || 0}</td>
+        <td>${formatNumberPt(row.avg_trip_km, 2)}</td>
+        <td>${row.weekday_trips || 0}</td>
+        <td>${row.saturday_trips || 0}</td>
+        <td>${row.sunday_trips || 0}</td>
+        <td>${row.holiday_trips || 0}</td>
+        <td>${formatNumberPt(row.estimated_month_km, 1)}</td>
+        <td>${formatNumberPt(row.estimated_semester_km, 1)}</td>
+        <td>${formatNumberPt(row.estimated_year_km, 1)}</td>
+        <td><button type="button" class="adjust-btn" data-gtfs-analytics-route="${row.route_id}">Ver mapa</button></td>
+      </tr>`
+    )
+    .join("");
+  fillGtfsAnalyticsLineSelect(rows);
+}
+
+function renderGtfsTripOptions(trips) {
+  if (!gtfsAnalyticsTripSelectEl) return;
+  gtfsAnalyticsTripSelectEl.innerHTML = '<option value="">-- Escolher trip --</option>';
+  trips.forEach((trip) => {
+    const option = document.createElement("option");
+    option.value = trip.trip_id;
+    option.textContent = `${trip.trip_id} | headsign ${trip.trip_headsign || "-"} | paragens ${trip.stops_count || 0}`;
+    gtfsAnalyticsTripSelectEl.appendChild(option);
+  });
+}
+
+function drawGtfsAnalyticsTrip(trip) {
+  initGtfsAnalyticsMap();
+  if (!gtfsAnalyticsRouteLayer) return;
+  gtfsAnalyticsRouteLayer.clearLayers();
+  const points = Array.isArray(trip?.shape_points) ? trip.shape_points : [];
+  if (!points.length) {
+    renderGtfsLineDetailSummary("Trip sem shape desenhavel.");
+    return;
+  }
+  const latLngs = points
+    .map((p) => [Number(p.lat), Number(p.lng)])
+    .filter((p) => Number.isFinite(p[0]) && Number.isFinite(p[1]));
+  if (!latLngs.length) {
+    renderGtfsLineDetailSummary("Trip sem coordenadas validas.");
+    return;
+  }
+  const line = L.polyline(latLngs, { color: "#2563eb", weight: 5 }).addTo(gtfsAnalyticsRouteLayer);
+  L.circleMarker(latLngs[0], { radius: 6, color: "#15803d", fillColor: "#22c55e", fillOpacity: 0.9 }).addTo(gtfsAnalyticsRouteLayer);
+  L.circleMarker(latLngs[latLngs.length - 1], { radius: 6, color: "#991b1b", fillColor: "#ef4444", fillOpacity: 0.9 }).addTo(
+    gtfsAnalyticsRouteLayer
+  );
+  if (gtfsAnalyticsMap) {
+    gtfsAnalyticsMap.fitBounds(line.getBounds(), { padding: [20, 20] });
+  }
+  renderGtfsLineDetailSummary(
+    [
+      `Trip: ${trip.trip_id}`,
+      `Headsign: ${trip.trip_headsign || "-"}`,
+      `Direction: ${trip.direction_id ?? "-"}`,
+      `Service ID: ${trip.service_id || "-"}`,
+      `Paragens: ${trip.stops_count || 0}`,
+      `Pontos shape: ${latLngs.length}`,
+    ].join("\n")
+  );
+}
+
+async function loadGtfsAnalyticsOverview() {
+  if (!supToken || !gtfsAnalyticsTableBodyEl) return;
+  const feedKey = String(gtfsAnalyticsFeedSelectEl?.value || selectedGtfsAnalyticsFeedKey || "").trim();
+  selectedGtfsAnalyticsFeedKey = feedKey;
+  renderGtfsAnalyticsSummary("A carregar análise GTFS...");
+  gtfsAnalyticsTableBodyEl.innerHTML = '<tr><td colspan="11">A carregar...</td></tr>';
+  const query = feedKey ? `?feedKey=${encodeURIComponent(feedKey)}` : "";
+  const response = await fetch(`${API_BASE}/gtfs/analytics/overview${query}`, { headers: getAuthHeaders() });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    gtfsAnalyticsRowsCache = [];
+    renderGtfsAnalyticsRows([]);
+    renderGtfsAnalyticsSummary(data.message || "Erro ao carregar análise GTFS.");
+    return;
+  }
+  const rows = Array.isArray(data.lines) ? data.lines : [];
+  gtfsAnalyticsRowsCache = rows;
+  renderGtfsAnalyticsRows(rows);
+  if (!rows.length) {
+    gtfsAnalyticsSelectedRouteId = "";
+  }
+  renderGtfsAnalyticsSummary(
+    [
+      `Linhas analisadas: ${rows.length}`,
+      `Pressupostos: dias úteis/mês ${data.assumptions?.monthWeekdays ?? 22}, sábados ${data.assumptions?.monthSaturdays ?? 4}, domingos ${data.assumptions?.monthSundays ?? 4}, feriados ${data.assumptions?.monthHolidays ?? 1}`,
+    ].join("\n")
+  );
+}
+
+async function loadGtfsLineDetail(routeIdRaw) {
+  if (!supToken) return;
+  const routeId = String(routeIdRaw || gtfsAnalyticsLineSelectEl?.value || "").trim();
+  if (!routeId) {
+    alert("Escolha uma linha para ver o mapa.");
+    return;
+  }
+  renderGtfsLineDetailSummary(`A carregar detalhe da linha ${routeId}...`);
+  const response = await fetch(`${API_BASE}/gtfs/analytics/line-detail?routeId=${encodeURIComponent(routeId)}`, {
+    headers: getAuthHeaders(),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    gtfsLineTripsCache = [];
+    renderGtfsTripOptions([]);
+    renderGtfsLineDetailSummary(data.message || "Erro ao carregar detalhe da linha.");
+    return;
+  }
+  const trips = Array.isArray(data.trips) ? data.trips : [];
+  gtfsAnalyticsSelectedRouteId = routeId;
+  gtfsLineTripsCache = trips;
+  renderGtfsTripOptions(trips);
+  if (gtfsAnalyticsLineSelectEl) gtfsAnalyticsLineSelectEl.value = routeId;
+  if (!trips.length) {
+    renderGtfsLineDetailSummary("Linha sem trips desenhaveis.");
+    return;
+  }
+  if (gtfsAnalyticsTripSelectEl) gtfsAnalyticsTripSelectEl.value = trips[0].trip_id;
+  drawGtfsAnalyticsTrip(trips[0]);
+}
+
+async function exportGtfsAnalyticsExcel() {
+  if (!supToken) return;
+  const feedKey = String(gtfsAnalyticsFeedSelectEl?.value || selectedGtfsAnalyticsFeedKey || "").trim();
+  const routeId = String(gtfsAnalyticsLineSelectEl?.value || gtfsAnalyticsSelectedRouteId || "").trim();
+  const params = new URLSearchParams();
+  if (feedKey) params.set("feedKey", feedKey);
+  if (routeId) params.set("routeId", routeId);
+  const query = params.toString();
+  const response = await fetch(`${API_BASE}/gtfs/analytics/export.xlsx${query ? `?${query}` : ""}`, {
+    headers: getAuthHeaders(),
+  });
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    alert(data.message || "Erro ao exportar Excel detalhado de GTFS.");
+    return;
+  }
+  const buffer = await response.arrayBuffer();
+  const blob = new Blob([buffer], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = routeId ? `gtfs_analise_${routeId}.xlsx` : "gtfs_analise_detalhada.xlsx";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 async function toggleGtfsFeed(feedKey, currentlyActive) {
@@ -3700,6 +3958,9 @@ bindById("refreshGtfsFeedsBtn", "click", loadGtfsFeeds);
 bindById("refreshGtfsCalendarsBtn", "click", loadGtfsCalendars);
 bindById("saveGtfsEffectiveDatesBtn", "click", saveGtfsEffectiveDates);
 bindById("exportGtfsModifiedBtn", "click", exportGtfsModified);
+bindById("loadGtfsAnalyticsBtn", "click", loadGtfsAnalyticsOverview);
+bindById("loadGtfsLineDetailBtn", "click", () => loadGtfsLineDetail());
+bindById("exportGtfsAnalyticsExcelBtn", "click", exportGtfsAnalyticsExcel);
 const refreshGtfsEditorLinesBtn = document.getElementById("refreshGtfsEditorLinesBtn");
 if (refreshGtfsEditorLinesBtn) {
   refreshGtfsEditorLinesBtn.addEventListener("click", loadGtfsEditorLines);
@@ -3710,6 +3971,23 @@ if (gtfsEditorFeedSelectEl) {
     loadGtfsFeeds();
     loadGtfsEditorLines();
     loadGtfsCalendars();
+  });
+}
+if (gtfsAnalyticsFeedSelectEl) {
+  gtfsAnalyticsFeedSelectEl.addEventListener("change", () => {
+    selectedGtfsAnalyticsFeedKey = String(gtfsAnalyticsFeedSelectEl.value || "").trim();
+    loadGtfsAnalyticsOverview();
+  });
+}
+if (gtfsAnalyticsLineSelectEl) {
+  gtfsAnalyticsLineSelectEl.addEventListener("change", () => loadGtfsLineDetail());
+}
+if (gtfsAnalyticsTripSelectEl) {
+  gtfsAnalyticsTripSelectEl.addEventListener("change", () => {
+    const tripId = String(gtfsAnalyticsTripSelectEl.value || "").trim();
+    const trip = gtfsLineTripsCache.find((item) => String(item.trip_id) === tripId);
+    if (!trip) return;
+    drawGtfsAnalyticsTrip(trip);
   });
 }
 if (gtfsEditorRouteSelectEl) {
@@ -3741,6 +4019,15 @@ if (gtfsFeedsListEl && !gtfsFeedsListEl.dataset.gtfsFeedsDelegation) {
     const feedKey = String(btn.getAttribute("data-gtfs-feed-toggle") || "");
     const active = btn.getAttribute("data-gtfs-feed-active") === "1";
     toggleGtfsFeed(feedKey, active);
+  });
+}
+if (gtfsAnalyticsTableBodyEl && !gtfsAnalyticsTableBodyEl.dataset.gtfsAnalyticsDelegation) {
+  gtfsAnalyticsTableBodyEl.dataset.gtfsAnalyticsDelegation = "1";
+  gtfsAnalyticsTableBodyEl.addEventListener("click", (event) => {
+    const btn = event.target.closest("button[data-gtfs-analytics-route]");
+    if (!btn) return;
+    const routeId = String(btn.getAttribute("data-gtfs-analytics-route") || "").trim();
+    loadGtfsLineDetail(routeId);
   });
 }
 if (gtfsCalendarsListEl && !gtfsCalendarsListEl.dataset.gtfsCalendarsDelegation) {
@@ -3991,6 +4278,16 @@ if (supLiveServicesListEl && !supLiveServicesListEl.dataset.stopPassagesDelegati
     if (!btn) return;
     e.preventDefault();
     openStopPassagesTabForService(btn.getAttribute("data-stop-passages-service-id"));
+  });
+  supLiveServicesListEl.addEventListener("mouseover", (e) => {
+    const target = e.target.closest("[data-live-driver-service-id]");
+    if (!target) return;
+    applyLiveServiceRouteHighlight(target.getAttribute("data-live-driver-service-id"));
+  });
+  supLiveServicesListEl.addEventListener("mouseout", (e) => {
+    const target = e.target.closest("[data-live-driver-service-id]");
+    if (!target) return;
+    applyLiveServiceRouteHighlight(null);
   });
 }
 

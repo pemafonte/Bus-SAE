@@ -572,6 +572,13 @@ body::after {
   background: #dbeafe;
 }
 
+.live-driver-name {
+  font-weight: 700;
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: dotted;
+}
+
 #driversList {
   list-style: none;
   padding-left: 0;
@@ -1033,6 +1040,14 @@ select:focus-visible,
   border-radius: 8px;
   border: 1px solid #d1d5db;
   margin-top: 8px;
+}
+
+#gtfsAnalyticsMap {
+  width: 100%;
+  height: 360px;
+  border-radius: 8px;
+  border: 1px solid #d1d5db;
+  margin-top: 10px;
 }
 
 pre {

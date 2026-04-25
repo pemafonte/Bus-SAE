@@ -1,6 +1,7 @@
 const express = require("express");
 const AdmZip = require("adm-zip");
 const { parse } = require("csv-parse/sync");
+const XLSX = require("xlsx");
 const db = require("../db");
 const authMiddleware = require("../middleware/auth");
 const { requireRoles } = require("../middleware/roles");
@@ -64,6 +65,12 @@ function toCsv(rows, columns) {
   const header = columns.map((c) => csvEscape(c)).join(",");
   const body = rows.map((row) => columns.map((c) => csvEscape(row[c])).join(",")).join("\n");
   return `${header}\n${body}\n`;
+}
+
+function clampPositiveNumber(value, fallback) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) return fallback;
+  return parsed;
 }
 
 async function ensureGtfsMultiFeedInfra() {
@@ -985,6 +992,425 @@ router.delete("/editor/trip-stops", async (req, res) => {
     return res.status(500).json({ message: "Erro ao remover paragem da trip GTFS." });
   } finally {
     client.release();
+  }
+});
+
+router.get("/analytics/overview", async (req, res) => {
+  try {
+    await ensureGtfsEditorIndexes();
+    const feedKey = normalizeFeedKey(req.query.feedKey || "");
+    const monthWeekdays = clampPositiveNumber(req.query.monthWeekdays, 22);
+    const monthSaturdays = clampPositiveNumber(req.query.monthSaturdays, 4);
+    const monthSundays = clampPositiveNumber(req.query.monthSundays, 4);
+    const monthHolidays = clampPositiveNumber(req.query.monthHolidays, 1);
+    const result = await db.query(
+      `WITH selected_routes AS (
+         SELECT r.feed_key, r.route_id, r.route_short_name, r.route_long_name
+         FROM gtfs_routes r
+         JOIN gtfs_feeds f ON f.feed_key = r.feed_key
+         WHERE ($1::text = '' OR r.feed_key = $1)
+           AND f.is_active = TRUE
+       ),
+       trip_shapes AS (
+         SELECT
+           t.feed_key,
+           t.route_id,
+           t.trip_id,
+           t.service_id,
+           t.shape_id,
+           COALESCE(
+             SUM(
+               CASE
+                 WHEN prev_lat IS NULL OR prev_lon IS NULL THEN 0
+                 ELSE
+                   6371 * 2 * ASIN(
+                     SQRT(
+                       POWER(SIN(RADIANS((gs.shape_pt_lat - prev_lat) / 2)), 2) +
+                       COS(RADIANS(prev_lat)) * COS(RADIANS(gs.shape_pt_lat)) *
+                       POWER(SIN(RADIANS((gs.shape_pt_lon - prev_lon) / 2)), 2)
+                     )
+                   )
+               END
+             ),
+             0
+           )::numeric(12,3) AS trip_km
+         FROM gtfs_trips t
+         JOIN selected_routes sr ON sr.route_id = t.route_id
+         LEFT JOIN (
+           SELECT
+             feed_key,
+             shape_id,
+             shape_pt_sequence,
+             shape_pt_lat,
+             shape_pt_lon,
+             LAG(shape_pt_lat) OVER (PARTITION BY feed_key, shape_id ORDER BY shape_pt_sequence ASC) AS prev_lat,
+             LAG(shape_pt_lon) OVER (PARTITION BY feed_key, shape_id ORDER BY shape_pt_sequence ASC) AS prev_lon
+           FROM gtfs_shapes
+         ) gs ON gs.feed_key = t.feed_key AND gs.shape_id = t.shape_id
+         GROUP BY t.feed_key, t.route_id, t.trip_id, t.service_id, t.shape_id
+       ),
+       service_day_flags AS (
+         SELECT
+           ts.trip_id,
+           CASE WHEN c.monday = 1 OR c.tuesday = 1 OR c.wednesday = 1 OR c.thursday = 1 OR c.friday = 1 THEN 1 ELSE 0 END AS has_weekday,
+           CASE WHEN c.saturday = 1 THEN 1 ELSE 0 END AS has_saturday,
+           CASE WHEN c.sunday = 1 THEN 1 ELSE 0 END AS has_sunday
+         FROM trip_shapes ts
+         LEFT JOIN gtfs_calendars c ON c.feed_key = ts.feed_key AND c.service_id = ts.service_id
+       ),
+       holiday_flags AS (
+         SELECT
+           ts.trip_id,
+           CASE WHEN COUNT(*) FILTER (WHERE cd.exception_type = 1) > 0 THEN 1 ELSE 0 END AS has_holiday
+         FROM trip_shapes ts
+         LEFT JOIN gtfs_calendar_dates cd ON cd.feed_key = ts.feed_key AND cd.service_id = ts.service_id
+         GROUP BY ts.trip_id
+       ),
+       route_agg AS (
+         SELECT
+           sr.feed_key,
+           sr.route_id,
+           COALESCE(NULLIF(TRIM(sr.route_short_name), ''), sr.route_id) AS route_label,
+           COALESCE(NULLIF(TRIM(sr.route_long_name), ''), '-') AS route_long_name,
+           COUNT(DISTINCT ts.trip_id)::int AS trips_count,
+           AVG(ts.trip_km)::numeric(12,3) AS avg_trip_km,
+           COALESCE(SUM(sdf.has_weekday), 0)::int AS weekday_trips,
+           COALESCE(SUM(sdf.has_saturday), 0)::int AS saturday_trips,
+           COALESCE(SUM(sdf.has_sunday), 0)::int AS sunday_trips,
+           COALESCE(SUM(hf.has_holiday), 0)::int AS holiday_trips
+         FROM selected_routes sr
+         LEFT JOIN trip_shapes ts ON ts.route_id = sr.route_id
+         LEFT JOIN service_day_flags sdf ON sdf.trip_id = ts.trip_id
+         LEFT JOIN holiday_flags hf ON hf.trip_id = ts.trip_id
+         GROUP BY sr.feed_key, sr.route_id, route_label, route_long_name
+       )
+       SELECT
+         feed_key,
+         route_id,
+         route_label,
+         route_long_name,
+         trips_count,
+         COALESCE(avg_trip_km, 0)::numeric(12,3) AS avg_trip_km,
+         weekday_trips,
+         saturday_trips,
+         sunday_trips,
+         holiday_trips,
+         (
+           COALESCE(avg_trip_km, 0) * (
+             weekday_trips * $2::numeric +
+             saturday_trips * $3::numeric +
+             sunday_trips * $4::numeric +
+             holiday_trips * $5::numeric
+           )
+         )::numeric(12,3) AS estimated_month_km,
+         (
+           COALESCE(avg_trip_km, 0) * (
+             weekday_trips * $2::numeric +
+             saturday_trips * $3::numeric +
+             sunday_trips * $4::numeric +
+             holiday_trips * $5::numeric
+           ) * 6
+         )::numeric(12,3) AS estimated_semester_km,
+         (
+           COALESCE(avg_trip_km, 0) * (
+             weekday_trips * $2::numeric +
+             saturday_trips * $3::numeric +
+             sunday_trips * $4::numeric +
+             holiday_trips * $5::numeric
+           ) * 12
+         )::numeric(12,3) AS estimated_year_km
+       FROM route_agg
+       ORDER BY route_label ASC, route_id ASC`,
+      [feedKey, monthWeekdays, monthSaturdays, monthSundays, monthHolidays]
+    );
+    return res.json({
+      assumptions: {
+        monthWeekdays,
+        monthSaturdays,
+        monthSundays,
+        monthHolidays,
+      },
+      lines: result.rows,
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao gerar analise GTFS por linha." });
+  }
+});
+
+router.get("/analytics/line-detail", async (req, res) => {
+  const routeId = String(req.query.routeId || "").trim();
+  if (!routeId) return res.status(400).json({ message: "Indique routeId." });
+  try {
+    await ensureGtfsEditorIndexes();
+    const lineRes = await db.query(
+      `SELECT route_id, feed_key, route_short_name, route_long_name
+       FROM gtfs_routes
+       WHERE route_id = $1
+       LIMIT 1`,
+      [routeId]
+    );
+    if (!lineRes.rowCount) return res.status(404).json({ message: "Linha GTFS nao encontrada." });
+    const tripsRes = await db.query(
+      `SELECT
+         t.trip_id,
+         t.trip_headsign,
+         t.direction_id,
+         t.service_id,
+         t.shape_id,
+         COUNT(st.stop_id)::int AS stops_count
+       FROM gtfs_trips t
+       LEFT JOIN gtfs_stop_times st ON st.trip_id = t.trip_id
+       WHERE t.route_id = $1
+       GROUP BY t.trip_id, t.trip_headsign, t.direction_id, t.service_id, t.shape_id
+       ORDER BY t.trip_id ASC`,
+      [routeId]
+    );
+    const shapeIds = Array.from(
+      new Set(tripsRes.rows.map((r) => String(r.shape_id || "").trim()).filter(Boolean))
+    );
+    let shapeRows = [];
+    if (shapeIds.length) {
+      const shapeRes = await db.query(
+        `SELECT shape_id, shape_pt_lat, shape_pt_lon, shape_pt_sequence
+         FROM gtfs_shapes
+         WHERE shape_id = ANY($1::text[])
+         ORDER BY shape_id ASC, shape_pt_sequence ASC`,
+        [shapeIds]
+      );
+      shapeRows = shapeRes.rows;
+    }
+    const pointsByShape = new Map();
+    shapeRows.forEach((row) => {
+      const shapeId = String(row.shape_id || "");
+      if (!pointsByShape.has(shapeId)) pointsByShape.set(shapeId, []);
+      pointsByShape.get(shapeId).push({
+        lat: Number(row.shape_pt_lat),
+        lng: Number(row.shape_pt_lon),
+        sequence: Number(row.shape_pt_sequence),
+      });
+    });
+    const trips = tripsRes.rows.map((trip) => ({
+      trip_id: trip.trip_id,
+      trip_headsign: trip.trip_headsign || "",
+      direction_id: trip.direction_id,
+      service_id: trip.service_id || "",
+      shape_id: trip.shape_id || "",
+      stops_count: Number(trip.stops_count || 0),
+      shape_points: pointsByShape.get(String(trip.shape_id || "")) || [],
+    }));
+    const tripCount = trips.length;
+    const avgStops = tripCount ? Number((trips.reduce((acc, t) => acc + Number(t.stops_count || 0), 0) / tripCount).toFixed(2)) : 0;
+    return res.json({
+      line: lineRes.rows[0],
+      summary: {
+        trip_count: tripCount,
+        avg_stops_count: avgStops,
+      },
+      trips,
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao carregar detalhe da linha GTFS." });
+  }
+});
+
+router.get("/analytics/export.xlsx", async (req, res) => {
+  try {
+    await ensureGtfsEditorIndexes();
+    const feedKey = normalizeFeedKey(req.query.feedKey || "");
+    const monthWeekdays = clampPositiveNumber(req.query.monthWeekdays, 22);
+    const monthSaturdays = clampPositiveNumber(req.query.monthSaturdays, 4);
+    const monthSundays = clampPositiveNumber(req.query.monthSundays, 4);
+    const monthHolidays = clampPositiveNumber(req.query.monthHolidays, 1);
+    const routeId = String(req.query.routeId || "").trim();
+
+    const overviewRes = await db.query(
+      `WITH selected_routes AS (
+         SELECT r.feed_key, r.route_id, r.route_short_name, r.route_long_name
+         FROM gtfs_routes r
+         JOIN gtfs_feeds f ON f.feed_key = r.feed_key
+         WHERE ($1::text = '' OR r.feed_key = $1)
+           AND f.is_active = TRUE
+       ),
+       trip_shapes AS (
+         SELECT
+           t.feed_key,
+           t.route_id,
+           t.trip_id,
+           t.service_id,
+           t.shape_id,
+           COALESCE(
+             SUM(
+               CASE
+                 WHEN prev_lat IS NULL OR prev_lon IS NULL THEN 0
+                 ELSE
+                   6371 * 2 * ASIN(
+                     SQRT(
+                       POWER(SIN(RADIANS((gs.shape_pt_lat - prev_lat) / 2)), 2) +
+                       COS(RADIANS(prev_lat)) * COS(RADIANS(gs.shape_pt_lat)) *
+                       POWER(SIN(RADIANS((gs.shape_pt_lon - prev_lon) / 2)), 2)
+                     )
+                   )
+               END
+             ),
+             0
+           )::numeric(12,3) AS trip_km
+         FROM gtfs_trips t
+         JOIN selected_routes sr ON sr.route_id = t.route_id
+         LEFT JOIN (
+           SELECT
+             feed_key,
+             shape_id,
+             shape_pt_sequence,
+             shape_pt_lat,
+             shape_pt_lon,
+             LAG(shape_pt_lat) OVER (PARTITION BY feed_key, shape_id ORDER BY shape_pt_sequence ASC) AS prev_lat,
+             LAG(shape_pt_lon) OVER (PARTITION BY feed_key, shape_id ORDER BY shape_pt_sequence ASC) AS prev_lon
+           FROM gtfs_shapes
+         ) gs ON gs.feed_key = t.feed_key AND gs.shape_id = t.shape_id
+         GROUP BY t.feed_key, t.route_id, t.trip_id, t.service_id, t.shape_id
+       ),
+       service_day_flags AS (
+         SELECT
+           ts.trip_id,
+           CASE WHEN c.monday = 1 OR c.tuesday = 1 OR c.wednesday = 1 OR c.thursday = 1 OR c.friday = 1 THEN 1 ELSE 0 END AS has_weekday,
+           CASE WHEN c.saturday = 1 THEN 1 ELSE 0 END AS has_saturday,
+           CASE WHEN c.sunday = 1 THEN 1 ELSE 0 END AS has_sunday
+         FROM trip_shapes ts
+         LEFT JOIN gtfs_calendars c ON c.feed_key = ts.feed_key AND c.service_id = ts.service_id
+       ),
+       holiday_flags AS (
+         SELECT
+           ts.trip_id,
+           CASE WHEN COUNT(*) FILTER (WHERE cd.exception_type = 1) > 0 THEN 1 ELSE 0 END AS has_holiday
+         FROM trip_shapes ts
+         LEFT JOIN gtfs_calendar_dates cd ON cd.feed_key = ts.feed_key AND cd.service_id = ts.service_id
+         GROUP BY ts.trip_id
+       ),
+       route_agg AS (
+         SELECT
+           sr.feed_key,
+           sr.route_id,
+           COALESCE(NULLIF(TRIM(sr.route_short_name), ''), sr.route_id) AS route_label,
+           COALESCE(NULLIF(TRIM(sr.route_long_name), ''), '-') AS route_long_name,
+           COUNT(DISTINCT ts.trip_id)::int AS trips_count,
+           AVG(ts.trip_km)::numeric(12,3) AS avg_trip_km,
+           COALESCE(SUM(sdf.has_weekday), 0)::int AS weekday_trips,
+           COALESCE(SUM(sdf.has_saturday), 0)::int AS saturday_trips,
+           COALESCE(SUM(sdf.has_sunday), 0)::int AS sunday_trips,
+           COALESCE(SUM(hf.has_holiday), 0)::int AS holiday_trips
+         FROM selected_routes sr
+         LEFT JOIN trip_shapes ts ON ts.route_id = sr.route_id
+         LEFT JOIN service_day_flags sdf ON sdf.trip_id = ts.trip_id
+         LEFT JOIN holiday_flags hf ON hf.trip_id = ts.trip_id
+         GROUP BY sr.feed_key, sr.route_id, route_label, route_long_name
+       )
+       SELECT
+         feed_key, route_id, route_label, route_long_name, trips_count,
+         COALESCE(avg_trip_km, 0)::numeric(12,3) AS avg_trip_km,
+         weekday_trips, saturday_trips, sunday_trips, holiday_trips,
+         (
+           COALESCE(avg_trip_km, 0) * (
+             weekday_trips * $2::numeric +
+             saturday_trips * $3::numeric +
+             sunday_trips * $4::numeric +
+             holiday_trips * $5::numeric
+           )
+         )::numeric(12,3) AS estimated_month_km,
+         (
+           COALESCE(avg_trip_km, 0) * (
+             weekday_trips * $2::numeric +
+             saturday_trips * $3::numeric +
+             sunday_trips * $4::numeric +
+             holiday_trips * $5::numeric
+           ) * 6
+         )::numeric(12,3) AS estimated_semester_km,
+         (
+           COALESCE(avg_trip_km, 0) * (
+             weekday_trips * $2::numeric +
+             saturday_trips * $3::numeric +
+             sunday_trips * $4::numeric +
+             holiday_trips * $5::numeric
+           ) * 12
+         )::numeric(12,3) AS estimated_year_km
+       FROM route_agg
+       ORDER BY route_label ASC, route_id ASC`,
+      [feedKey, monthWeekdays, monthSaturdays, monthSundays, monthHolidays]
+    );
+
+    const detailsRes = await db.query(
+      `SELECT
+         t.feed_key,
+         t.route_id,
+         COALESCE(NULLIF(TRIM(r.route_short_name), ''), t.route_id) AS route_label,
+         COALESCE(NULLIF(TRIM(r.route_long_name), ''), '-') AS route_long_name,
+         t.trip_id,
+         COALESCE(t.trip_headsign, '') AS trip_headsign,
+         t.direction_id,
+         t.service_id,
+         t.shape_id,
+         COUNT(st.stop_id)::int AS stops_count
+       FROM gtfs_trips t
+       JOIN gtfs_routes r ON r.route_id = t.route_id
+       JOIN gtfs_feeds f ON f.feed_key = t.feed_key
+       LEFT JOIN gtfs_stop_times st ON st.trip_id = t.trip_id
+       WHERE ($1::text = '' OR t.feed_key = $1)
+         AND ($2::text = '' OR t.route_id = $2)
+         AND f.is_active = TRUE
+       GROUP BY
+         t.feed_key, t.route_id, route_label, route_long_name,
+         t.trip_id, t.trip_headsign, t.direction_id, t.service_id, t.shape_id
+       ORDER BY route_label ASC, t.trip_id ASC`,
+      [feedKey, routeId]
+    );
+
+    const overviewRows = overviewRes.rows.map((row) => ({
+      feed_key: row.feed_key || "",
+      route_id: row.route_id || "",
+      route_label: row.route_label || "",
+      route_long_name: row.route_long_name || "",
+      trips_count: Number(row.trips_count || 0),
+      avg_trip_km: Number(row.avg_trip_km || 0),
+      weekday_trips: Number(row.weekday_trips || 0),
+      saturday_trips: Number(row.saturday_trips || 0),
+      sunday_trips: Number(row.sunday_trips || 0),
+      holiday_trips: Number(row.holiday_trips || 0),
+      estimated_month_km: Number(row.estimated_month_km || 0),
+      estimated_semester_km: Number(row.estimated_semester_km || 0),
+      estimated_year_km: Number(row.estimated_year_km || 0),
+    }));
+
+    const detailRows = detailsRes.rows.map((row) => ({
+      feed_key: row.feed_key || "",
+      route_id: row.route_id || "",
+      route_label: row.route_label || "",
+      route_long_name: row.route_long_name || "",
+      trip_id: row.trip_id || "",
+      trip_headsign: row.trip_headsign || "",
+      direction_id: row.direction_id == null ? "" : Number(row.direction_id),
+      service_id: row.service_id || "",
+      shape_id: row.shape_id || "",
+      stops_count: Number(row.stops_count || 0),
+    }));
+
+    const assumptionsRows = [
+      { key: "monthWeekdays", value: monthWeekdays },
+      { key: "monthSaturdays", value: monthSaturdays },
+      { key: "monthSundays", value: monthSundays },
+      { key: "monthHolidays", value: monthHolidays },
+      { key: "feedKey", value: feedKey || "(active feeds)" },
+      { key: "routeId", value: routeId || "(all routes)" },
+    ];
+
+    const wb = XLSX.utils.book_new();
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(overviewRows), "linhas");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(detailRows), "trips_detalhe");
+    XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(assumptionsRows), "parametros");
+    const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", "attachment; filename=gtfs_analise_detalhada.xlsx");
+    return res.status(200).send(buffer);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao exportar análise GTFS em Excel." });
   }
 });
 
