@@ -386,7 +386,13 @@
           <section class="card card-top-gap">
             <h3>Paragens da trip (remoção, ordem e nome)</h3>
             <p class="field-help">Pode remover, mover posição (subir/descer) e renomear paragens existentes. Ao mover, os horários são recalculados automaticamente com base na distância entre paragens.</p>
-            <div id="gtfsEditorStopsList" class="service-cards"></div>
+            <div class="gtfs-editor-layout">
+              <div id="gtfsEditorStopsList" class="service-cards gtfs-editor-stops-spine"></div>
+              <div class="gtfs-editor-map-panel">
+                <h4>Mapa auxiliar da sequência</h4>
+                <div id="gtfsEditorMap"></div>
+              </div>
+            </div>
           </section>
         </div>
 

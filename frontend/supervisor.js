@@ -124,6 +124,7 @@ const gtfsEditorApplyScopeEl = document.getElementById("gtfsEditorApplyScope");
 const gtfsEditorOperationModeEl = document.getElementById("gtfsEditorOperationMode");
 const gtfsEditorScopeHintEl = document.getElementById("gtfsEditorScopeHint");
 const gtfsEditorAddStopIdEl = document.getElementById("gtfsEditorAddStopId");
+const gtfsEditorMapEl = document.getElementById("gtfsEditorMap");
 const gtfsAnalyticsFeedSelectEl = document.getElementById("gtfsAnalyticsFeedSelect");
 const gtfsAnalyticsStartDateEl = document.getElementById("gtfsAnalyticsStartDate");
 const gtfsAnalyticsEndDateEl = document.getElementById("gtfsAnalyticsEndDate");
@@ -175,6 +176,8 @@ let gtfsLineTripsCache = [];
 let gtfsAnalyticsMap = null;
 let gtfsAnalyticsRouteLayer = null;
 let gtfsAnalyticsSelectedRouteId = "";
+let gtfsEditorMap = null;
+let gtfsEditorMapLayer = null;
 let supervisorAlertsPollTimer = null;
 let supervisorAlertBaselineReady = false;
 let lastSupervisorAlertSignature = "";
@@ -2857,6 +2860,58 @@ function renderGtfsEditorSummary(text) {
   if (gtfsEditorSummaryEl) gtfsEditorSummaryEl.textContent = text || "";
 }
 
+function initGtfsEditorMap() {
+  if (!gtfsEditorMapEl || gtfsEditorMap) return;
+  gtfsEditorMap = L.map(gtfsEditorMapEl).setView([39.7436, -8.8071], 12);
+  const tile = L.tileLayer("/map-tiles/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap contributors",
+  });
+  const fallback = L.tileLayer("https://a.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap contributors &copy; CARTO",
+  });
+  tile.on("tileerror", () => {
+    if (gtfsEditorMap.hasLayer(tile)) gtfsEditorMap.removeLayer(tile);
+    if (!gtfsEditorMap.hasLayer(fallback)) fallback.addTo(gtfsEditorMap);
+  });
+  tile.addTo(gtfsEditorMap);
+  gtfsEditorMapLayer = L.layerGroup().addTo(gtfsEditorMap);
+}
+
+function drawGtfsEditorStopsMap(rows) {
+  initGtfsEditorMap();
+  if (!gtfsEditorMapLayer) return;
+  gtfsEditorMapLayer.clearLayers();
+  const points = (Array.isArray(rows) ? rows : [])
+    .map((s) => ({
+      lat: Number(s.stop_lat),
+      lon: Number(s.stop_lon),
+      seq: Number(s.stop_sequence),
+      name: String(s.stop_name || s.stop_id || "-"),
+      arr: String(s.arrival_time || "-"),
+      dep: String(s.departure_time || "-"),
+    }))
+    .filter((p) => Number.isFinite(p.lat) && Number.isFinite(p.lon))
+    .sort((a, b) => a.seq - b.seq);
+  if (!points.length) return;
+  const latlngs = points.map((p) => [p.lat, p.lon]);
+  const line = L.polyline(latlngs, { color: "#2563eb", weight: 4, opacity: 0.85 }).addTo(gtfsEditorMapLayer);
+  points.forEach((p) => {
+    L.circleMarker([p.lat, p.lon], {
+      radius: 6,
+      color: "#0f172a",
+      weight: 1,
+      fillColor: "#f59e0b",
+      fillOpacity: 0.95,
+    })
+      .bindPopup(`<strong>#${p.seq}</strong> ${p.name}<br/>Chegada: ${p.arr}<br/>Partida: ${p.dep}`)
+      .bindTooltip(`#${p.seq}`, { permanent: true, direction: "top", offset: [0, -8] })
+      .addTo(gtfsEditorMapLayer);
+  });
+  gtfsEditorMap.fitBounds(line.getBounds(), { padding: [24, 24] });
+}
+
 function syncGtfsEditorScopeWithMode() {
   if (!gtfsEditorApplyScopeEl || !gtfsEditorOperationModeEl) return;
   const mode = String(gtfsEditorOperationModeEl.value || "urban").trim().toLowerCase();
@@ -2972,7 +3027,10 @@ function renderGtfsEditorStops(rows) {
         <div><small>Hora partida</small><div>${stop.departure_time || "-"}</div></div>
         <div><small>Coordenadas</small><div>${stop.stop_lat ?? "-"}, ${stop.stop_lon ?? "-"}</div></div>
       </div>
-      <div class="service-card-actions">
+      <div class="service-card-actions gtfs-editor-stop-actions">
+        <input type="text" data-gtfs-time-arrival value="${stop.arrival_time || ""}" placeholder="Chegada HH:MM:SS" />
+        <input type="text" data-gtfs-time-departure value="${stop.departure_time || ""}" placeholder="Partida HH:MM:SS" />
+        <button type="button" data-gtfs-save-time-seq="${stop.stop_sequence}">Guardar hora</button>
         <button type="button" data-gtfs-move-seq="${stop.stop_sequence}" data-gtfs-move-dir="up">Subir</button>
         <button type="button" data-gtfs-move-seq="${stop.stop_sequence}" data-gtfs-move-dir="down">Descer</button>
         <input type="text" data-gtfs-rename-stop-id="${stop.stop_id || ""}" data-gtfs-rename-input value="${safeStopName}" placeholder="Novo nome da paragem" />
@@ -2989,6 +3047,7 @@ async function loadGtfsEditorTripStops() {
   const tripId = String(gtfsEditorTripSelectEl.value || "").trim();
   if (!tripId) {
     renderGtfsEditorSummary("Selecione uma trip GTFS.");
+    drawGtfsEditorStopsMap([]);
     return;
   }
   renderGtfsEditorSummary(`A carregar paragens da trip ${tripId}...`);
@@ -2999,9 +3058,11 @@ async function loadGtfsEditorTripStops() {
   if (!response.ok) {
     renderGtfsEditorSummary(data.message || "Erro ao carregar paragens da trip.");
     if (gtfsEditorStopsListEl) gtfsEditorStopsListEl.innerHTML = "";
+    drawGtfsEditorStopsMap([]);
     return;
   }
   renderGtfsEditorStops(data.stops || []);
+  drawGtfsEditorStopsMap(data.stops || []);
   renderGtfsEditorSummary(
     `Trip ${data.trip?.trip_id || tripId} | route ${data.trip?.route_id || "-"} | headsign ${data.trip?.trip_headsign || "-"} | paragens ${Array.isArray(data.stops) ? data.stops.length : 0}`
   );
@@ -3111,6 +3172,31 @@ async function renameGtfsStop(stopId, stopName) {
   alert(data.message || "Paragem renomeada.");
   await loadGtfsEditorTripStops();
   await loadGtfsEditorStopsOptions();
+}
+
+async function updateGtfsEditorStopTime(stopSequence, arrivalTime, departureTime) {
+  if (!supToken || !gtfsEditorTripSelectEl) return;
+  const tripId = String(gtfsEditorTripSelectEl.value || "").trim();
+  if (!tripId) return;
+  const applyScope = String(gtfsEditorApplyScopeEl?.value || "trip").trim().toLowerCase();
+  const response = await fetch(`${API_BASE}/gtfs/editor/trip-stops/time`, {
+    method: "PATCH",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({
+      tripId,
+      stopSequence,
+      arrivalTime: String(arrivalTime || "").trim() || null,
+      departureTime: String(departureTime || "").trim() || null,
+      applyScope,
+    }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao atualizar hora de passagem.");
+    return;
+  }
+  alert(data.message || "Hora de passagem atualizada.");
+  await loadGtfsEditorTripStops();
 }
 
 async function downloadDriversTemplateCsv() {
@@ -4225,6 +4311,18 @@ if (gtfsEditorStopsListEl && !gtfsEditorStopsListEl.dataset.gtfsEditorDelegation
         return;
       }
       renameGtfsStop(stopId, stopName);
+      return;
+    }
+    const timeBtn = e.target.closest("button[data-gtfs-save-time-seq]");
+    if (timeBtn) {
+      const seq = Number(timeBtn.getAttribute("data-gtfs-save-time-seq"));
+      if (!Number.isFinite(seq)) return;
+      const wrapper = timeBtn.closest(".service-card-actions");
+      const arrivalInput = wrapper?.querySelector("input[data-gtfs-time-arrival]");
+      const departureInput = wrapper?.querySelector("input[data-gtfs-time-departure]");
+      const arrivalTime = String(arrivalInput?.value || "").trim();
+      const departureTime = String(departureInput?.value || "").trim();
+      updateGtfsEditorStopTime(seq, arrivalTime, departureTime);
     }
   });
 }
