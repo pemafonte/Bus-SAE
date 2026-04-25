@@ -125,6 +125,7 @@ const gtfsEditorOperationModeEl = document.getElementById("gtfsEditorOperationMo
 const gtfsEditorScopeHintEl = document.getElementById("gtfsEditorScopeHint");
 const gtfsEditorAddStopIdEl = document.getElementById("gtfsEditorAddStopId");
 const gtfsEditorMapEl = document.getElementById("gtfsEditorMap");
+const gtfsEditorAutoAdjustTimeBtnEl = document.getElementById("gtfsEditorAutoAdjustTimeBtn");
 const gtfsAnalyticsFeedSelectEl = document.getElementById("gtfsAnalyticsFeedSelect");
 const gtfsAnalyticsStartDateEl = document.getElementById("gtfsAnalyticsStartDate");
 const gtfsAnalyticsEndDateEl = document.getElementById("gtfsAnalyticsEndDate");
@@ -3199,6 +3200,33 @@ async function updateGtfsEditorStopTime(stopSequence, arrivalTime, departureTime
   await loadGtfsEditorTripStops();
 }
 
+async function autoAdjustGtfsEditorTimes() {
+  if (!supToken || !gtfsEditorTripSelectEl) return;
+  const tripId = String(gtfsEditorTripSelectEl.value || "").trim();
+  if (!tripId) {
+    alert("Selecione uma trip GTFS.");
+    return;
+  }
+  const applyScope = String(gtfsEditorApplyScopeEl?.value || "trip").trim().toLowerCase();
+  const targetLabel =
+    applyScope === "route"
+      ? "todas as trips da carreira"
+      : "apenas a trip selecionada";
+  if (!window.confirm(`Ajustar automaticamente os tempos para ${targetLabel}?`)) return;
+  const response = await fetch(`${API_BASE}/gtfs/editor/trip-stops/time/auto-adjust`, {
+    method: "PATCH",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ tripId, applyScope }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao ajustar tempos automaticamente.");
+    return;
+  }
+  alert(data.message || "Tempos ajustados automaticamente.");
+  await loadGtfsEditorTripStops();
+}
+
 async function downloadDriversTemplateCsv() {
   if (!supToken) return;
   const response = await fetch(`${API_BASE}/supervisor/drivers/import-template.csv`, {
@@ -4281,6 +4309,9 @@ if (loadGtfsEditorTripStopsBtn) {
 const gtfsEditorAddStopForm = document.getElementById("gtfsEditorAddStopForm");
 if (gtfsEditorAddStopForm) {
   gtfsEditorAddStopForm.addEventListener("submit", addGtfsEditorStop);
+}
+if (gtfsEditorAutoAdjustTimeBtnEl) {
+  gtfsEditorAutoAdjustTimeBtnEl.addEventListener("click", autoAdjustGtfsEditorTimes);
 }
 if (gtfsEditorStopsListEl && !gtfsEditorStopsListEl.dataset.gtfsEditorDelegation) {
   gtfsEditorStopsListEl.dataset.gtfsEditorDelegation = "1";

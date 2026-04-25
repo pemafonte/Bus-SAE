@@ -1086,12 +1086,18 @@ pre {
   grid-template-columns: minmax(0, 1.15fr) minmax(300px, 1fr);
   gap: 12px;
   align-items: start;
+  min-height: 540px;
 }
 
 .gtfs-editor-map-panel h4 {
   margin: 0 0 8px;
   font-size: 13px;
   color: #1f2937;
+}
+
+.gtfs-editor-map-panel {
+  position: sticky;
+  top: 10px;
 }
 
 #gtfsEditorMap {
@@ -1104,6 +1110,9 @@ pre {
 .gtfs-editor-stops-spine {
   grid-template-columns: 1fr;
   gap: 8px;
+  max-height: 540px;
+  overflow-y: auto;
+  padding-right: 4px;
 }
 
 .gtfs-editor-stops-spine .service-card-item {

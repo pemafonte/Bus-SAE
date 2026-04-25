@@ -1741,6 +1741,125 @@ router.patch("/editor/trip-stops/time", async (req, res) => {
   }
 });
 
+router.patch("/editor/trip-stops/time/auto-adjust", async (req, res) => {
+  const tripId = String(req.body?.tripId || "").trim();
+  const applyScope = String(req.body?.applyScope || "trip").trim().toLowerCase();
+  if (!tripId) return res.status(400).json({ message: "Indique tripId." });
+  if (!["trip", "route"].includes(applyScope)) {
+    return res.status(400).json({ message: "applyScope inválido (use trip ou route)." });
+  }
+
+  const client = await db.pool.connect();
+  try {
+    await client.query("BEGIN");
+    const tripRes = await client.query(
+      `SELECT trip_id, feed_key, route_id
+       FROM gtfs_trips
+       WHERE trip_id = $1
+       FOR UPDATE`,
+      [tripId]
+    );
+    if (!tripRes.rowCount) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Trip GTFS não encontrada." });
+    }
+    const tripFeedKey = String(tripRes.rows[0].feed_key || "default");
+    const routeId = String(tripRes.rows[0].route_id || "");
+    const targetTripsRes =
+      applyScope === "route"
+        ? await client.query(
+            `SELECT trip_id
+             FROM gtfs_trips
+             WHERE feed_key = $1
+               AND route_id = $2
+             ORDER BY trip_id ASC
+             FOR UPDATE`,
+            [tripFeedKey, routeId]
+          )
+        : { rows: [{ trip_id: tripId }] };
+    const targetTripIds = targetTripsRes.rows.map((r) => String(r.trip_id || "").trim()).filter(Boolean);
+    if (!targetTripIds.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Não foram encontradas trips para atualizar." });
+    }
+    const avgSpeedKmh = 22;
+    const dwellSeconds = 20;
+    let affectedTrips = 0;
+    for (const targetTripId of targetTripIds) {
+      const stopsRes = await client.query(
+        `SELECT
+           st.stop_sequence,
+           st.stop_id,
+           st.arrival_time,
+           st.departure_time,
+           s.stop_lat,
+           s.stop_lon
+         FROM gtfs_stop_times st
+         LEFT JOIN gtfs_stops s ON s.stop_id = st.stop_id
+         WHERE st.trip_id = $1
+         ORDER BY st.stop_sequence ASC`,
+        [targetTripId]
+      );
+      const stops = stopsRes.rows.map((r) => ({
+        seq: Number(r.stop_sequence),
+        stopId: String(r.stop_id || ""),
+        arr: r.arrival_time,
+        dep: r.departure_time,
+        lat: Number(r.stop_lat),
+        lon: Number(r.stop_lon),
+      }));
+      if (!stops.length) continue;
+      let currentSeconds =
+        parseTimeToSeconds(stops[0]?.dep) ??
+        parseTimeToSeconds(stops[0]?.arr) ??
+        6 * 3600;
+      for (let i = 0; i < stops.length; i += 1) {
+        if (i > 0) {
+          const prev = stops[i - 1];
+          const curr = stops[i];
+          let travelSeconds = 60;
+          if (
+            Number.isFinite(prev.lat) &&
+            Number.isFinite(prev.lon) &&
+            Number.isFinite(curr.lat) &&
+            Number.isFinite(curr.lon)
+          ) {
+            const km = haversineKm(prev.lat, prev.lon, curr.lat, curr.lon);
+            travelSeconds = Math.max(45, Math.round((km / avgSpeedKmh) * 3600));
+          }
+          currentSeconds += travelSeconds;
+        }
+        const arr = formatSecondsToTime(currentSeconds);
+        const dep = formatSecondsToTime(currentSeconds + dwellSeconds);
+        await client.query(
+          `UPDATE gtfs_stop_times
+           SET arrival_time = $3,
+               departure_time = $4
+           WHERE trip_id = $1
+             AND stop_sequence = $2`,
+          [targetTripId, stops[i].seq, arr, dep]
+        );
+        currentSeconds += dwellSeconds;
+      }
+      affectedTrips += 1;
+    }
+    await client.query("COMMIT");
+    return res.json({
+      message:
+        applyScope === "route"
+          ? `Tempos ajustados automaticamente em ${affectedTrips} trips da carreira.`
+          : "Tempos ajustados automaticamente na trip.",
+      affectedTrips,
+      applyScope,
+    });
+  } catch (_error) {
+    await client.query("ROLLBACK").catch(() => {});
+    return res.status(500).json({ message: "Erro ao ajustar tempos automaticamente." });
+  } finally {
+    client.release();
+  }
+});
+
 router.get("/analytics/overview", async (req, res) => {
   try {
     await ensureGtfsEditorIndexes();
