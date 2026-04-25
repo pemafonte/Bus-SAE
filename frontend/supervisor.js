@@ -123,6 +123,7 @@ const gtfsEditorStopsListEl = document.getElementById("gtfsEditorStopsList");
 const gtfsEditorApplyScopeEl = document.getElementById("gtfsEditorApplyScope");
 const gtfsEditorOperationModeEl = document.getElementById("gtfsEditorOperationMode");
 const gtfsEditorScopeHintEl = document.getElementById("gtfsEditorScopeHint");
+const gtfsEditorAddStopIdEl = document.getElementById("gtfsEditorAddStopId");
 const gtfsAnalyticsFeedSelectEl = document.getElementById("gtfsAnalyticsFeedSelect");
 const gtfsAnalyticsStartDateEl = document.getElementById("gtfsAnalyticsStartDate");
 const gtfsAnalyticsEndDateEl = document.getElementById("gtfsAnalyticsEndDate");
@@ -2894,7 +2895,24 @@ async function loadGtfsEditorLines() {
     gtfsEditorTripSelectEl.innerHTML = '<option value="">-- Selecionar trip --</option>';
   }
   if (gtfsEditorStopsListEl) gtfsEditorStopsListEl.innerHTML = "";
+  await loadGtfsEditorStopsOptions();
   renderGtfsEditorSummary(`Linhas GTFS carregadas: ${rows.length}`);
+}
+
+async function loadGtfsEditorStopsOptions() {
+  if (!supToken || !gtfsEditorAddStopIdEl) return;
+  const query = selectedGtfsFeedKey ? `?feedKey=${encodeURIComponent(selectedGtfsFeedKey)}` : "";
+  const response = await fetch(`${API_BASE}/gtfs/editor/stops${query}`, { headers: getAuthHeaders() });
+  const data = await response.json().catch(() => ([]));
+  gtfsEditorAddStopIdEl.innerHTML = '<option value="">-- Criar nova paragem (usar campos abaixo) --</option>';
+  if (!response.ok) return;
+  const rows = Array.isArray(data) ? data : [];
+  rows.forEach((stop) => {
+    const option = document.createElement("option");
+    option.value = stop.stop_id;
+    option.textContent = `${stop.stop_name || "-"} (${stop.stop_id || "-"})`;
+    gtfsEditorAddStopIdEl.appendChild(option);
+  });
 }
 
 async function loadGtfsEditorTripsByRoute() {
@@ -2941,6 +2959,7 @@ function renderGtfsEditorStops(rows) {
     return;
   }
   rows.forEach((stop) => {
+    const safeStopName = String(stop.stop_name || "").replace(/"/g, "&quot;");
     const article = document.createElement("article");
     article.className = "service-card-item";
     article.innerHTML = `
@@ -2954,6 +2973,10 @@ function renderGtfsEditorStops(rows) {
         <div><small>Coordenadas</small><div>${stop.stop_lat ?? "-"}, ${stop.stop_lon ?? "-"}</div></div>
       </div>
       <div class="service-card-actions">
+        <button type="button" data-gtfs-move-seq="${stop.stop_sequence}" data-gtfs-move-dir="up">Subir</button>
+        <button type="button" data-gtfs-move-seq="${stop.stop_sequence}" data-gtfs-move-dir="down">Descer</button>
+        <input type="text" data-gtfs-rename-stop-id="${stop.stop_id || ""}" data-gtfs-rename-input value="${safeStopName}" placeholder="Novo nome da paragem" />
+        <button type="button" data-gtfs-rename-stop-id="${stop.stop_id || ""}">Renomear</button>
         <button type="button" class="danger-btn" data-gtfs-remove-seq="${stop.stop_sequence}">Remover</button>
       </div>
     `;
@@ -3024,6 +3047,7 @@ async function addGtfsEditorStop(event) {
   alert(data.message || "Paragem adicionada.");
   event.target.reset();
   await loadGtfsEditorTripStops();
+  await loadGtfsEditorStopsOptions();
 }
 
 async function removeGtfsEditorStop(stopSequence) {
@@ -3051,6 +3075,42 @@ async function removeGtfsEditorStop(stopSequence) {
   }
   alert(data.message || "Paragem removida.");
   await loadGtfsEditorTripStops();
+}
+
+async function moveGtfsEditorStop(stopSequence, direction) {
+  if (!supToken || !gtfsEditorTripSelectEl) return;
+  const tripId = String(gtfsEditorTripSelectEl.value || "").trim();
+  if (!tripId) return;
+  const applyScope = String(gtfsEditorApplyScopeEl?.value || "trip").trim().toLowerCase();
+  const response = await fetch(`${API_BASE}/gtfs/editor/trip-stops/reorder`, {
+    method: "PATCH",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ tripId, stopSequence, direction, applyScope }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao mover paragem.");
+    return;
+  }
+  alert(data.message || "Paragem movida.");
+  await loadGtfsEditorTripStops();
+}
+
+async function renameGtfsStop(stopId, stopName) {
+  if (!supToken || !stopId || !stopName) return;
+  const response = await fetch(`${API_BASE}/gtfs/editor/stops/${encodeURIComponent(stopId)}`, {
+    method: "PATCH",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ stopName }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao renomear paragem.");
+    return;
+  }
+  alert(data.message || "Paragem renomeada.");
+  await loadGtfsEditorTripStops();
+  await loadGtfsEditorStopsOptions();
 }
 
 async function downloadDriversTemplateCsv() {
@@ -4140,10 +4200,32 @@ if (gtfsEditorStopsListEl && !gtfsEditorStopsListEl.dataset.gtfsEditorDelegation
   gtfsEditorStopsListEl.dataset.gtfsEditorDelegation = "1";
   gtfsEditorStopsListEl.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-gtfs-remove-seq]");
-    if (!btn) return;
-    const seq = Number(btn.getAttribute("data-gtfs-remove-seq"));
-    if (!Number.isFinite(seq)) return;
-    removeGtfsEditorStop(seq);
+    if (btn) {
+      const seq = Number(btn.getAttribute("data-gtfs-remove-seq"));
+      if (!Number.isFinite(seq)) return;
+      removeGtfsEditorStop(seq);
+      return;
+    }
+    const moveBtn = e.target.closest("[data-gtfs-move-seq][data-gtfs-move-dir]");
+    if (moveBtn) {
+      const seq = Number(moveBtn.getAttribute("data-gtfs-move-seq"));
+      const direction = String(moveBtn.getAttribute("data-gtfs-move-dir") || "");
+      if (!Number.isFinite(seq) || !direction) return;
+      moveGtfsEditorStop(seq, direction);
+      return;
+    }
+    const renameBtn = e.target.closest("button[data-gtfs-rename-stop-id]");
+    if (renameBtn) {
+      const stopId = String(renameBtn.getAttribute("data-gtfs-rename-stop-id") || "").trim();
+      const wrapper = renameBtn.closest(".service-card-actions");
+      const input = wrapper?.querySelector("input[data-gtfs-rename-input]");
+      const stopName = String(input?.value || "").trim();
+      if (!stopId || !stopName) {
+        alert("Indique um nome válido para a paragem.");
+        return;
+      }
+      renameGtfsStop(stopId, stopName);
+    }
   });
 }
 if (gtfsFeedsListEl && !gtfsFeedsListEl.dataset.gtfsFeedsDelegation) {

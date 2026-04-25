@@ -370,7 +370,10 @@
               Modo urbano ativo: alterações serão aplicadas à carreira completa por defeito.
             </p>
             <form id="gtfsEditorAddStopForm">
-              <input id="gtfsEditorAddStopId" type="text" placeholder="stop_id existente (opcional)" />
+              <label for="gtfsEditorAddStopId">Paragem existente (opcional)</label>
+              <select id="gtfsEditorAddStopId">
+                <option value="">-- Criar nova paragem (usar campos abaixo) --</option>
+              </select>
               <input id="gtfsEditorAddStopName" type="text" placeholder="Nome da nova paragem (se criar nova)" />
               <input id="gtfsEditorAddStopLat" type="number" step="0.000001" placeholder="Latitude (se criar nova)" />
               <input id="gtfsEditorAddStopLon" type="number" step="0.000001" placeholder="Longitude (se criar nova)" />
@@ -381,8 +384,8 @@
             </form>
           </section>
           <section class="card card-top-gap">
-            <h3>Paragens da trip (remoção)</h3>
-            <p class="field-help">Use "Remover" numa paragem para retirar da trip; a sequência será normalizada automaticamente.</p>
+            <h3>Paragens da trip (remoção, ordem e nome)</h3>
+            <p class="field-help">Pode remover, mover posição (subir/descer) e renomear paragens existentes. Ao mover, os horários são recalculados automaticamente com base na distância entre paragens.</p>
             <div id="gtfsEditorStopsList" class="service-cards"></div>
           </section>
         </div>
