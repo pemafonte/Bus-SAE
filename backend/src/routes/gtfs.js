@@ -150,31 +150,63 @@ async function resolveAnalyticsPeriod(feedKey, startDate, endDate) {
          COALESCE(calendar_effective_from, DATE '1900-01-01')
        )::date AS effective_start,
        gtfs_effective_from,
-       calendar_effective_from
+       calendar_effective_from,
+       (
+         SELECT MIN(c.start_date)::date
+         FROM gtfs_calendars c
+         WHERE c.feed_key = gf.feed_key
+       ) AS min_calendar_start,
+       (
+         SELECT MAX(c.end_date)::date
+         FROM gtfs_calendars c
+         WHERE c.feed_key = gf.feed_key
+       ) AS max_calendar_end,
+       (
+         SELECT MIN(cd.calendar_date)::date
+         FROM gtfs_calendar_dates cd
+         WHERE cd.feed_key = gf.feed_key
+       ) AS min_calendar_date,
+       (
+         SELECT MAX(cd.calendar_date)::date
+         FROM gtfs_calendar_dates cd
+         WHERE cd.feed_key = gf.feed_key
+       ) AS max_calendar_date
      FROM gtfs_feeds
+     gf
      WHERE feed_key = $1
      LIMIT 1`,
     [feedKey]
   );
+  const row = feedEffectiveRes.rows[0] || {};
   const todayIso = parseIsoDateInput(new Date().toISOString().slice(0, 10));
-  const feedEffectiveStartRaw = String(feedEffectiveRes.rows[0]?.effective_start || "").slice(0, 10);
-  const feedEffectiveStart = parseIsoDateInput(feedEffectiveStartRaw) || todayIso;
+  const gtfsEffectiveFrom = parseIsoDateInput(String(row.gtfs_effective_from || "").slice(0, 10));
+  const calendarEffectiveFrom = parseIsoDateInput(String(row.calendar_effective_from || "").slice(0, 10));
+  const minCalendarStart = parseIsoDateInput(String(row.min_calendar_start || "").slice(0, 10));
+  const maxCalendarEnd = parseIsoDateInput(String(row.max_calendar_end || "").slice(0, 10));
+  const minCalendarDate = parseIsoDateInput(String(row.min_calendar_date || "").slice(0, 10));
+  const maxCalendarDate = parseIsoDateInput(String(row.max_calendar_date || "").slice(0, 10));
+  const feedEffectiveStartRaw = parseIsoDateInput(String(row.effective_start || "").slice(0, 10));
+  const feedEffectiveStart =
+    feedEffectiveStartRaw && feedEffectiveStartRaw !== "1900-01-01"
+      ? feedEffectiveStartRaw
+      : gtfsEffectiveFrom || calendarEffectiveFrom || minCalendarStart || minCalendarDate || todayIso;
   let baseStart = parseIsoDateInput(startDate) || null;
   if (!baseStart) {
     baseStart = feedEffectiveStart;
   } else if (baseStart < feedEffectiveStart) {
     baseStart = feedEffectiveStart;
   }
-  const resolvedEndRaw = parseIsoDateInput(endDate);
-  const defaultEnd = addDaysUtc(new Date(`${baseStart}T00:00:00.000Z`), 364).toISOString().slice(0, 10);
+  const resolvedEndRaw = parseIsoDateInput(endDate) || null;
+  const defaultEndCandidate = addDaysUtc(new Date(`${baseStart}T00:00:00.000Z`), 364).toISOString().slice(0, 10);
+  const hardMaxEnd = maxCalendarEnd || maxCalendarDate || null;
+  const defaultEnd = hardMaxEnd && hardMaxEnd < defaultEndCandidate ? hardMaxEnd : defaultEndCandidate;
   const resolvedEnd = resolvedEndRaw || defaultEnd;
   return {
     startDate: baseStart,
     endDate: resolvedEnd,
     effectiveStartDate: feedEffectiveStart,
-    gtfsEffectiveFrom: parseIsoDateInput(String(feedEffectiveRes.rows[0]?.gtfs_effective_from || "").slice(0, 10)) || null,
-    calendarEffectiveFrom:
-      parseIsoDateInput(String(feedEffectiveRes.rows[0]?.calendar_effective_from || "").slice(0, 10)) || null,
+    gtfsEffectiveFrom: gtfsEffectiveFrom || null,
+    calendarEffectiveFrom: calendarEffectiveFrom || null,
   };
 }
 
@@ -2730,7 +2762,6 @@ router.get("/analytics/overview", async (req, res) => {
          ) gs(d) ON TRUE
          LEFT JOIN gtfs_calendar_dates cd_remove
            ON cd_remove.feed_key = tc.feed_key
-         AND UPPER(REGEXP_REPLACE(COALESCE(tc.service_id, ''), ('^' || tc.feed_key || '::'), '')) LIKE '%JA%'
           AND (
             cd_remove.service_id = tc.service_id
             OR cd_remove.service_id = COALESCE(tc.calendar_service_id, '')
@@ -3151,7 +3182,6 @@ router.get("/analytics/export.xlsx", async (req, res) => {
          ) gs(d) ON TRUE
          LEFT JOIN gtfs_calendar_dates cd_remove
            ON cd_remove.feed_key = tc.feed_key
-         AND UPPER(REGEXP_REPLACE(COALESCE(tc.service_id, ''), ('^' || tc.feed_key || '::'), '')) LIKE '%JA%'
           AND (
             cd_remove.service_id = tc.service_id
             OR cd_remove.service_id = COALESCE(tc.calendar_service_id, '')
