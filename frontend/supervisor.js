@@ -278,6 +278,52 @@ function getAuthHeaders() {
   };
 }
 
+function sleepMs(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function shouldRetrySupervisorStatus(status) {
+  return [429, 502, 503, 504].includes(Number(status));
+}
+
+async function fetchJsonWithRetry(url, options = {}) {
+  const retries = Math.max(1, Number(options.retries ?? 3));
+  const retryDelayMs = Math.max(200, Number(options.retryDelayMs ?? 800));
+  const timeoutMs = Math.max(1000, Number(options.timeoutMs ?? 12000));
+  const method = options.method || "GET";
+  const headers = options.headers || getAuthHeaders();
+  const body = Object.prototype.hasOwnProperty.call(options, "body") ? options.body : undefined;
+  let lastResponse = null;
+  let lastData = null;
+  let lastError = null;
+  for (let attempt = 1; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        method,
+        headers,
+        body,
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      const data = await response.json().catch(() => null);
+      lastResponse = response;
+      lastData = data;
+      lastError = null;
+      if (response.ok) return { response, data };
+      if (!shouldRetrySupervisorStatus(response.status) || attempt >= retries) return { response, data };
+    } catch (error) {
+      clearTimeout(timeout);
+      lastError = error;
+      if (attempt >= retries) break;
+    }
+    await sleepMs(retryDelayMs * attempt);
+  }
+  if (lastResponse) return { response: lastResponse, data: lastData };
+  throw lastError || new Error("Falha de ligação");
+}
+
 const SUP_ALERT_SOUND_SETTINGS_KEY = "sup_alert_sound_settings_v1";
 
 function loadSupAlertSoundSettings() {
@@ -345,12 +391,16 @@ function applySupAlertSoundSettingsToUi() {
 function updateSupervisorAlertSignature() {
   if (!supToken) return;
   Promise.allSettled([
-    fetch(`${API_BASE}/supervisor/messages/threads`, { headers: getAuthHeaders() }).then((r) =>
-      r.json().then((d) => ({ ok: r.ok, d }))
-    ),
-    fetch(`${API_BASE}/supervisor/handover-alerts`, { headers: getAuthHeaders() }).then((r) =>
-      r.json().then((d) => ({ ok: r.ok, d }))
-    ),
+    fetchJsonWithRetry(`${API_BASE}/supervisor/messages/threads`, {
+      retries: 3,
+      retryDelayMs: 700,
+      timeoutMs: 10000,
+    }).then(({ response, data }) => ({ ok: response.ok, d: data })),
+    fetchJsonWithRetry(`${API_BASE}/supervisor/handover-alerts`, {
+      retries: 3,
+      retryDelayMs: 700,
+      timeoutMs: 10000,
+    }).then(({ response, data }) => ({ ok: response.ok, d: data })),
   ]).then((results) => {
     const threads = results[0]?.status === "fulfilled" && results[0].value.ok ? results[0].value.d : [];
     const handovers = results[1]?.status === "fulfilled" && results[1].value.ok ? results[1].value.d : [];
@@ -1400,16 +1450,21 @@ function buildSupervisorBusIcon(fleetNumber, lineColor) {
 async function loadLiveServicesMap() {
   if (!supToken || !supLiveMapEl || !supLiveServicesListEl) return;
   initSupervisorLiveMap();
-  const response = await fetch(`${API_BASE}/supervisor/services/live`, {
-    headers: getAuthHeaders(),
-  });
-  const data = await response.json().catch(() => ([]));
-  if (!response.ok) {
-    supLiveServicesListEl.innerHTML = `<div>${data.message || "Erro ao carregar serviços em execução."}</div>`;
-    return;
+  try {
+    const { response, data } = await fetchJsonWithRetry(`${API_BASE}/supervisor/services/live`, {
+      retries: 3,
+      retryDelayMs: 900,
+      timeoutMs: 12000,
+    });
+    if (!response.ok) {
+      supLiveServicesListEl.innerHTML = `<div>${data?.message || "Erro ao carregar serviços em execução."}</div>`;
+      return;
+    }
+    currentLiveServices = Array.isArray(data) ? data : [];
+    renderLiveRealtimeView();
+  } catch (_error) {
+    supLiveServicesListEl.innerHTML = "<div>Ligação temporariamente indisponível. A tentar novamente no próximo ciclo.</div>";
   }
-  currentLiveServices = Array.isArray(data) ? data : [];
-  renderLiveRealtimeView();
 }
 
 function computeLiveDelayMinutes(service) {
@@ -1753,10 +1808,11 @@ async function loadOpsThreads() {
   if (!supToken || !opsThreadsListEl) return;
   opsThreadsListEl.innerHTML = "<li>A carregar conversas...</li>";
   try {
-    const response = await fetch(`${API_BASE}/supervisor/messages/threads`, {
-      headers: getAuthHeaders(),
+    const { response, data } = await fetchJsonWithRetry(`${API_BASE}/supervisor/messages/threads`, {
+      retries: 3,
+      retryDelayMs: 700,
+      timeoutMs: 10000,
     });
-    const data = await response.json().catch(() => []);
     if (!response.ok) {
       opsThreadsListEl.innerHTML = `<li>${data.message || "Erro ao listar conversas."}</li>`;
       return;
