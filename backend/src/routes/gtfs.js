@@ -179,7 +179,6 @@ async function resolveAnalyticsPeriod(feedKey, startDate, endDate, periodMode = 
   );
   const row = feedEffectiveRes.rows[0] || {};
   const todayIso = parseIsoDateInput(new Date().toISOString().slice(0, 10));
-  const currentYear = Number(String(todayIso).slice(0, 4)) || new Date().getFullYear();
   const mode = String(periodMode || "").trim().toLowerCase();
   const gtfsEffectiveFrom = parseIsoDateInput(String(row.gtfs_effective_from || "").slice(0, 10));
   const calendarEffectiveFrom = parseIsoDateInput(String(row.calendar_effective_from || "").slice(0, 10));
@@ -192,12 +191,13 @@ async function resolveAnalyticsPeriod(feedKey, startDate, endDate, periodMode = 
     feedEffectiveStartRaw && feedEffectiveStartRaw !== "1900-01-01"
       ? feedEffectiveStartRaw
       : gtfsEffectiveFrom || calendarEffectiveFrom || minCalendarStart || minCalendarDate || todayIso;
+  const feedYear = Number(String(feedEffectiveStart).slice(0, 4)) || Number(String(todayIso).slice(0, 4)) || new Date().getFullYear();
   let baseStart = parseIsoDateInput(startDate) || null;
   if (!baseStart) {
     if (mode === "from_today") {
       baseStart = todayIso;
     } else if (mode === "full_year") {
-      baseStart = `${currentYear}-01-01`;
+      baseStart = `${feedYear}-01-01`;
     } else {
       baseStart = feedEffectiveStart;
     }
@@ -205,7 +205,7 @@ async function resolveAnalyticsPeriod(feedKey, startDate, endDate, periodMode = 
   const resolvedEndRaw = parseIsoDateInput(endDate) || null;
   const defaultEndCandidate =
     mode === "full_year"
-      ? `${String(currentYear)}-12-31`
+      ? `${String(Number(String(baseStart).slice(0, 4)) || feedYear)}-12-31`
       : addDaysUtc(new Date(`${baseStart}T00:00:00.000Z`), 364).toISOString().slice(0, 10);
   const hardMaxEnd = maxCalendarEnd || maxCalendarDate || null;
   const defaultEnd = hardMaxEnd && hardMaxEnd < defaultEndCandidate ? hardMaxEnd : defaultEndCandidate;
@@ -2770,14 +2770,13 @@ router.get("/analytics/overview", async (req, res) => {
            LEAST(COALESCE(tc.end_date, p.end_date), p.end_date),
            INTERVAL '1 day'
          ) gs(d) ON TRUE
-         LEFT JOIN gtfs_calendar_dates cd_remove
-           ON cd_remove.feed_key = tc.feed_key
+        LEFT JOIN gtfs_calendar_dates cd_remove
+          ON cd_remove.feed_key = tc.feed_key
           AND (
             cd_remove.service_id = tc.service_id
             OR cd_remove.service_id = COALESCE(tc.calendar_service_id, '')
             OR cd_remove.service_id = (tc.feed_key || '::' || tc.service_id)
           )
-         AND NOT (cd_remove.calendar_date = ANY($4::date[]))
           AND cd_remove.calendar_date = gs.d::date
           AND cd_remove.exception_type = 2
          WHERE (
@@ -2789,7 +2788,7 @@ router.get("/analytics/overview", async (req, res) => {
              (EXTRACT(ISODOW FROM gs.d) = 6 AND COALESCE(tc.saturday, 0) = 1) OR
              (EXTRACT(ISODOW FROM gs.d) = 7 AND COALESCE(tc.sunday, 0) = 1)
            )
-           AND cd_remove.id IS NULL
+          AND cd_remove.id IS NULL
          UNION ALL
          SELECT
            tc.feed_key,
@@ -2953,6 +2952,55 @@ router.get("/analytics/overview", async (req, res) => {
        ORDER BY route_label ASC, route_id ASC`,
       [feedKey, startDate, endDate, holidayDates]
     );
+    const exceptionsRes = await db.query(
+      `WITH selected_routes AS (
+         SELECT r.feed_key, r.route_id
+         FROM gtfs_routes r
+         JOIN gtfs_feeds f ON f.feed_key = r.feed_key
+         WHERE ($1::text = '' OR r.feed_key = $1)
+           AND f.is_active = TRUE
+       ),
+       selected_services AS (
+         SELECT DISTINCT t.feed_key, t.service_id
+         FROM gtfs_trips t
+         JOIN selected_routes sr ON sr.feed_key = t.feed_key AND sr.route_id = t.route_id
+       ),
+       period AS (
+         SELECT
+           COALESCE($2::date, CURRENT_DATE)::date AS start_date,
+           COALESCE(
+             $3::date,
+             (
+               COALESCE($2::date, CURRENT_DATE::date)
+               + INTERVAL '1 year' - INTERVAL '1 day'
+             )::date
+           ) AS end_date
+       ),
+       matched_exceptions AS (
+         SELECT cd.id, cd.calendar_date, cd.exception_type
+         FROM gtfs_calendar_dates cd
+         JOIN period p ON TRUE
+         WHERE cd.calendar_date BETWEEN p.start_date AND p.end_date
+           AND EXISTS (
+             SELECT 1
+             FROM selected_services ss
+             WHERE ss.feed_key = cd.feed_key
+               AND (
+                 cd.service_id = ss.service_id
+                 OR cd.service_id = (ss.feed_key || '::' || ss.service_id)
+                 OR ss.service_id = (ss.feed_key || '::' || cd.service_id)
+               )
+           )
+       )
+       SELECT
+         COUNT(*) FILTER (WHERE exception_type = 1)::int AS added_entries,
+         COUNT(*) FILTER (WHERE exception_type = 2)::int AS removed_entries,
+         COUNT(DISTINCT calendar_date) FILTER (WHERE exception_type = 1)::int AS added_days,
+         COUNT(DISTINCT calendar_date) FILTER (WHERE exception_type = 2)::int AS removed_days
+       FROM matched_exceptions`,
+      [feedKey, startDate, endDate]
+    );
+    const exceptions = exceptionsRes.rows[0] || {};
     return res.json({
       assumptions: {
         period: "1 ano operacional baseado no calendario GTFS",
@@ -2964,6 +3012,12 @@ router.get("/analytics/overview", async (req, res) => {
         municipalHoliday: municipalHoliday?.label || null,
         timezone: "Europe/Lisbon",
         dstAuto: true,
+      },
+      calendarExceptions: {
+        addedEntries: Number(exceptions.added_entries || 0),
+        removedEntries: Number(exceptions.removed_entries || 0),
+        addedDays: Number(exceptions.added_days || 0),
+        removedDays: Number(exceptions.removed_days || 0),
       },
       lines: result.rows,
     });
@@ -3191,14 +3245,13 @@ router.get("/analytics/export.xlsx", async (req, res) => {
            LEAST(COALESCE(tc.end_date, p.end_date), p.end_date),
            INTERVAL '1 day'
          ) gs(d) ON TRUE
-         LEFT JOIN gtfs_calendar_dates cd_remove
-           ON cd_remove.feed_key = tc.feed_key
+        LEFT JOIN gtfs_calendar_dates cd_remove
+          ON cd_remove.feed_key = tc.feed_key
           AND (
             cd_remove.service_id = tc.service_id
             OR cd_remove.service_id = COALESCE(tc.calendar_service_id, '')
             OR cd_remove.service_id = (tc.feed_key || '::' || tc.service_id)
           )
-         AND NOT (cd_remove.calendar_date = ANY($4::date[]))
           AND cd_remove.calendar_date = gs.d::date
           AND cd_remove.exception_type = 2
          WHERE (
@@ -3210,7 +3263,7 @@ router.get("/analytics/export.xlsx", async (req, res) => {
              (EXTRACT(ISODOW FROM gs.d) = 6 AND COALESCE(tc.saturday, 0) = 1) OR
              (EXTRACT(ISODOW FROM gs.d) = 7 AND COALESCE(tc.sunday, 0) = 1)
            )
-           AND cd_remove.id IS NULL
+          AND cd_remove.id IS NULL
          UNION ALL
          SELECT
            tc.feed_key,

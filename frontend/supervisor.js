@@ -2967,6 +2967,11 @@ function setGtfsAnalyticsYearRange(offsetYears = 0) {
   if (gtfsAnalyticsEndDateEl) gtfsAnalyticsEndDateEl.value = end;
 }
 
+function clearGtfsAnalyticsDateRange() {
+  if (gtfsAnalyticsStartDateEl) gtfsAnalyticsStartDateEl.value = "";
+  if (gtfsAnalyticsEndDateEl) gtfsAnalyticsEndDateEl.value = "";
+}
+
 function setGtfsAnalyticsFromTodayRange(days = 364) {
   const startDate = new Date();
   const endDate = new Date(startDate);
@@ -2983,7 +2988,7 @@ function applyGtfsAnalyticsPeriodModePreset() {
     setGtfsAnalyticsFromTodayRange();
     return;
   }
-  setGtfsAnalyticsYearRange(0);
+  clearGtfsAnalyticsDateRange();
 }
 
 function fillGtfsAnalyticsLineSelect(rows) {
@@ -3169,6 +3174,8 @@ async function loadGtfsAnalyticsOverview() {
       `Linhas analisadas: ${rows.length}`,
       `Período: ${data.assumptions?.startDate || startDate || "-"} até ${data.assumptions?.endDate || endDate || "-"}`,
       `Entrada em vigor aplicada: ${data.assumptions?.effectiveStartDate || data.assumptions?.startDate || "-"}`,
+      `Exceções de calendário (dias sem operação): ${data.calendarExceptions?.removedDays ?? 0} dias | ${data.calendarExceptions?.removedEntries ?? 0} registos`,
+      `Exceções de calendário (dias adicionados): ${data.calendarExceptions?.addedDays ?? 0} dias | ${data.calendarExceptions?.addedEntries ?? 0} registos`,
       `Feriado municipal: ${municipalHoliday || data.assumptions?.municipalHoliday || "-"}`,
       `Timezone: ${data.assumptions?.timezone || "Europe/Lisbon"} (DST automático)`,
       `${data.assumptions?.period || "1 ano operacional por calendário GTFS"}`,
