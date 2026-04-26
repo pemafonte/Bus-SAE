@@ -2777,6 +2777,7 @@ async function importAdminBoundariesAutomatically() {
       `Freguesias: ${data.parishes || 0}`,
       `Municípios com falha temporária: ${data.failedMunicipalities || 0}`,
       `Duração: ${elapsedSec}s`,
+      "Para atualizar a lista de paragens por concelho/freguesia, execute a atribuição por polígonos (ou use o botão 1 clique).",
     ].join("\n");
     alert(text);
     if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = text;

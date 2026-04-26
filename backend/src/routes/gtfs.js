@@ -274,7 +274,9 @@ function extractBBoxFromCoordinates(coordinates, acc = { minLat: 90, maxLat: -90
 }
 
 function normalizeGeoApiMunicipalityPayload(payload) {
-  const feature = payload?.geojson?.type === "Feature" ? payload.geojson : null;
+  const feature =
+    (payload?.geojson?.type === "Feature" ? payload.geojson : null) ||
+    (payload?.geojsons?.municipio?.type === "Feature" ? payload.geojsons.municipio : null);
   if (!feature?.geometry) return null;
   return {
     boundaryName: normalizeGeoText(feature?.properties?.Concelho || payload?.nome || payload?.municipio),
@@ -1692,20 +1694,8 @@ router.post("/editor/admin-boundaries/import-geoapi-pt", async (_req, res) => {
       .map((name) => String(name || "").trim())
       .filter(Boolean);
     const perMunicipality = await mapWithConcurrency(municipalityNames, 10, async (municipalityName) => {
-      let detailPayload = null;
       let parishesPayload = null;
       let detailFailed = false;
-      try {
-        detailPayload = await fetchJsonWithRetry(
-          `https://json.geoapi.pt/municipio/${encodeURIComponent(municipalityName)}`,
-          {
-            retries: 3,
-            timeoutMs: 20000,
-          }
-        );
-      } catch (_error) {
-        detailFailed = true;
-      }
       try {
         parishesPayload = await fetchJsonWithRetry(
           `https://json.geoapi.pt/municipio/${encodeURIComponent(municipalityName)}/freguesias`,
@@ -1715,18 +1705,16 @@ router.post("/editor/admin-boundaries/import-geoapi-pt", async (_req, res) => {
           }
         );
       } catch (_error) {
-        // keep going; municipality geometry may still be available
+        detailFailed = true;
       }
-      return { municipalityName, detailPayload, parishesPayload, detailFailed };
+      return { municipalityName, parishesPayload, detailFailed };
     });
 
     for (const row of perMunicipality) {
       if (row?.detailFailed) failedMunicipalities += 1;
-      if (row?.detailPayload) {
-        const municipalityFeature = normalizeGeoApiMunicipalityPayload(row.detailPayload);
-        if (municipalityFeature?.boundaryName && municipalityFeature?.geometry) municipalityRows.push(municipalityFeature);
-      }
       if (row?.parishesPayload) {
+        const municipalityFeature = normalizeGeoApiMunicipalityPayload(row.parishesPayload);
+        if (municipalityFeature?.boundaryName && municipalityFeature?.geometry) municipalityRows.push(municipalityFeature);
         const normalizedParishes = normalizeGeoApiParishFeatures(row.parishesPayload, row.municipalityName);
         parishRows.push(...normalizedParishes);
       }
