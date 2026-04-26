@@ -139,6 +139,7 @@ const gtfsAnalyticsTripSelectEl = document.getElementById("gtfsAnalyticsTripSele
 const gtfsLineDetailSummaryEl = document.getElementById("gtfsLineDetailSummary");
 const gtfsAnalyticsMapEl = document.getElementById("gtfsAnalyticsMap");
 const gtfsStopsByAreaListEl = document.getElementById("gtfsStopsByAreaList");
+const gtfsGeocodeProgressEl = document.getElementById("gtfsGeocodeProgress");
 const gtfsLineBuilderStopsListEl = document.getElementById("gtfsLineBuilderStopsList");
 const gtfsLineBuilderSummaryEl = document.getElementById("gtfsLineBuilderSummary");
 const gtfsRtPreviewReportEl = document.getElementById("gtfsRtPreviewReport");
@@ -2333,21 +2334,39 @@ async function importGtfsZip() {
     return;
   }
 
-  const response = await fetch(`${API_BASE}/gtfs/import`, {
-    method: "POST",
-    headers: getAuthHeaders(),
-    body: JSON.stringify({
-      fileBase64: btoa(binary),
-      feedKey,
-      feedName: feedName || feedKey,
-      fileName: file.name,
-      replaceFeed: gtfsReplaceFeedEl?.checked !== false,
-    }),
-  });
-  const data = await response.json();
+  let response;
+  let data = {};
+  try {
+    response = await fetch(`${API_BASE}/gtfs/import`, {
+      method: "POST",
+      headers: getAuthHeaders(),
+      body: JSON.stringify({
+        fileBase64: btoa(binary),
+        feedKey,
+        feedName: feedName || feedKey,
+        fileName: file.name,
+        replaceFeed: gtfsReplaceFeedEl?.checked !== false,
+      }),
+    });
+    const raw = await response.text();
+    try {
+      data = raw ? JSON.parse(raw) : {};
+    } catch (_e) {
+      data = { message: raw || "" };
+    }
+  } catch (_error) {
+    alert("Falha de ligação ao servidor ao importar GTFS.");
+    importGtfsReportEl.textContent = "Falha de ligação ao servidor ao importar GTFS.";
+    return;
+  }
   if (!response.ok) {
-    alert(data.message || "Erro ao importar GTFS.");
-    importGtfsReportEl.textContent = data.message || "Erro na importacao GTFS.";
+    const isPayloadTooLarge = Number(response.status) === 413;
+    const fallbackMessage = isPayloadTooLarge
+      ? "Payload demasiado grande (HTTP 413). Em produção, aumente o limite de upload no proxy/reverse proxy."
+      : `Erro ao importar GTFS (HTTP ${response.status}).`;
+    const message = String(data.message || "").trim() || fallbackMessage;
+    alert(message);
+    importGtfsReportEl.textContent = message;
     return;
   }
 
@@ -2519,6 +2538,128 @@ async function loadGtfsStopsByArea() {
     return;
   }
   renderGtfsStopsByArea(data);
+}
+
+async function geocodeGtfsStopsByCoordinates() {
+  if (!supToken) return;
+  const feedKey = String(gtfsAnalyticsFeedSelectEl?.value || selectedGtfsAnalyticsFeedKey || "").trim();
+  const confirmed = window.confirm(
+    "Isto vai tentar preencher concelho/freguesia das paragens com base nas coordenadas GPS. Pode demorar alguns minutos. Continuar?"
+  );
+  if (!confirmed) return;
+  if (gtfsGeocodeProgressEl) {
+    gtfsGeocodeProgressEl.textContent = "A processar 1 lote de geocodificação...";
+  }
+  if (gtfsStopsByAreaListEl) {
+    gtfsStopsByAreaListEl.innerHTML = "<div>A geocodificar paragens por coordenadas... aguarde.</div>";
+  }
+  const response = await fetch(`${API_BASE}/gtfs/editor/stops/reverse-geocode`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({
+      feedKey: feedKey || null,
+      maxStops: 200,
+    }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao preencher concelho/freguesia por coordenadas.");
+    if (gtfsGeocodeProgressEl) {
+      gtfsGeocodeProgressEl.textContent = "Falha no processamento de geocodificação.";
+    }
+    await loadGtfsStopsByArea();
+    return;
+  }
+  if (gtfsGeocodeProgressEl) {
+    gtfsGeocodeProgressEl.textContent = [
+      "Lote concluído.",
+      `Tentadas: ${data.attempted || 0}`,
+      `Atualizadas: ${data.updated || 0}`,
+      `Restantes: ${data.remainingAfter ?? "-"}`,
+    ].join("\n");
+  }
+  alert(`${data.message || "Geocodificação concluída."}\nTentadas: ${data.attempted || 0}\nAtualizadas: ${data.updated || 0}`);
+  await loadGtfsStopsByArea();
+}
+
+let geocodeAllGtfsStopsInProgress = false;
+async function geocodeAllGtfsStopsByCoordinates() {
+  if (!supToken || geocodeAllGtfsStopsInProgress) return;
+  const feedKey = String(gtfsAnalyticsFeedSelectEl?.value || selectedGtfsAnalyticsFeedKey || "").trim();
+  const confirmed = window.confirm(
+    "Isto vai processar automaticamente todos os lotes para preencher concelho/freguesia por coordenadas. Pode demorar bastante. Continuar?"
+  );
+  if (!confirmed) return;
+  if (gtfsGeocodeProgressEl) {
+    gtfsGeocodeProgressEl.textContent = "A iniciar processamento automático por lotes...";
+  }
+  geocodeAllGtfsStopsInProgress = true;
+  let totalAttempted = 0;
+  let totalUpdated = 0;
+  let rounds = 0;
+  let remainingAfter = null;
+  let stagnantRounds = 0;
+  try {
+    while (rounds < 30) {
+      rounds += 1;
+      if (gtfsStopsByAreaListEl) {
+        gtfsStopsByAreaListEl.innerHTML = `<div>A processar lote ${rounds} de geocodificação...</div>`;
+      }
+      const response = await fetch(`${API_BASE}/gtfs/editor/stops/reverse-geocode`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+        body: JSON.stringify({
+          feedKey: feedKey || null,
+          maxStops: 200,
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert(data.message || "Erro ao processar geocodificação automática.");
+        break;
+      }
+      const attempted = Number(data.attempted || 0);
+      const updated = Number(data.updated || 0);
+      remainingAfter = Number(data.remainingAfter ?? 0);
+      totalAttempted += attempted;
+      totalUpdated += updated;
+      if (gtfsGeocodeProgressEl) {
+        gtfsGeocodeProgressEl.textContent = [
+          `Processamento automático em curso...`,
+          `Lote atual: ${rounds}`,
+          `Tentadas acumulado: ${totalAttempted}`,
+          `Atualizadas acumulado: ${totalUpdated}`,
+          `Restantes (estimado): ${remainingAfter == null ? "-" : remainingAfter}`,
+        ].join("\n");
+      }
+      if (updated <= 0) stagnantRounds += 1;
+      else stagnantRounds = 0;
+      if (remainingAfter <= 0) break;
+      if (attempted <= 0) break;
+      if (stagnantRounds >= 3) break;
+    }
+  } finally {
+    geocodeAllGtfsStopsInProgress = false;
+  }
+  alert(
+    [
+      "Processamento automático concluído.",
+      `Lotes executados: ${rounds}`,
+      `Paragens tentadas: ${totalAttempted}`,
+      `Paragens atualizadas: ${totalUpdated}`,
+      `Por preencher: ${remainingAfter == null ? "-" : remainingAfter}`,
+    ].join("\n")
+  );
+  if (gtfsGeocodeProgressEl) {
+    gtfsGeocodeProgressEl.textContent = [
+      "Processamento automático concluído.",
+      `Lotes executados: ${rounds}`,
+      `Tentadas: ${totalAttempted}`,
+      `Atualizadas: ${totalUpdated}`,
+      `Restantes: ${remainingAfter == null ? "-" : remainingAfter}`,
+    ].join("\n");
+  }
+  await loadGtfsStopsByArea();
 }
 
 function buildGtfsLineBuilderStopRow(stop = {}) {
@@ -4532,6 +4673,8 @@ bindById("saveGtfsEffectiveDatesBtn", "click", saveGtfsEffectiveDates);
 bindById("exportGtfsModifiedBtn", "click", exportGtfsModified);
 bindById("loadGtfsAnalyticsBtn", "click", loadGtfsAnalyticsOverview);
 bindById("loadGtfsStopsByAreaBtn", "click", loadGtfsStopsByArea);
+bindById("geocodeGtfsStopsBtn", "click", geocodeGtfsStopsByCoordinates);
+bindById("geocodeAllGtfsStopsBtn", "click", geocodeAllGtfsStopsByCoordinates);
 bindById("loadGtfsLineDetailBtn", "click", () => loadGtfsLineDetail());
 bindById("exportGtfsAnalyticsExcelBtn", "click", exportGtfsAnalyticsExcel);
 bindById("gtfsAnalyticsCurrentYearBtn", "click", () => {

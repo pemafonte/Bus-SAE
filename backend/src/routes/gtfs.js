@@ -52,6 +52,9 @@ function parseGtfsDate(raw) {
 function parseIsoDateInput(raw) {
   const text = String(raw || "").trim();
   if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return null;
+  const date = new Date(`${text}T00:00:00.000Z`);
+  if (Number.isNaN(date.getTime())) return null;
+  if (date.toISOString().slice(0, 10) !== text) return null;
   return text;
 }
 
@@ -151,22 +154,25 @@ async function resolveAnalyticsPeriod(feedKey, startDate, endDate) {
      LIMIT 1`,
     [feedKey]
   );
-  const feedEffectiveStart =
-    String(feedEffectiveRes.rows[0]?.effective_start || "").slice(0, 10) ||
-    parseIsoDateInput(new Date().toISOString().slice(0, 10));
-  let baseStart = startDate || null;
+  const todayIso = parseIsoDateInput(new Date().toISOString().slice(0, 10));
+  const feedEffectiveStartRaw = String(feedEffectiveRes.rows[0]?.effective_start || "").slice(0, 10);
+  const feedEffectiveStart = parseIsoDateInput(feedEffectiveStartRaw) || todayIso;
+  let baseStart = parseIsoDateInput(startDate) || null;
   if (!baseStart) {
     baseStart = feedEffectiveStart;
   } else if (baseStart < feedEffectiveStart) {
     baseStart = feedEffectiveStart;
   }
-  const resolvedEnd = endDate || String(addDaysUtc(new Date(`${baseStart}T00:00:00.000Z`), 364).toISOString().slice(0, 10));
+  const resolvedEndRaw = parseIsoDateInput(endDate);
+  const defaultEnd = addDaysUtc(new Date(`${baseStart}T00:00:00.000Z`), 364).toISOString().slice(0, 10);
+  const resolvedEnd = resolvedEndRaw || defaultEnd;
   return {
     startDate: baseStart,
     endDate: resolvedEnd,
     effectiveStartDate: feedEffectiveStart,
-    gtfsEffectiveFrom: String(feedEffectiveRes.rows[0]?.gtfs_effective_from || "").slice(0, 10) || null,
-    calendarEffectiveFrom: String(feedEffectiveRes.rows[0]?.calendar_effective_from || "").slice(0, 10) || null,
+    gtfsEffectiveFrom: parseIsoDateInput(String(feedEffectiveRes.rows[0]?.gtfs_effective_from || "").slice(0, 10)) || null,
+    calendarEffectiveFrom:
+      parseIsoDateInput(String(feedEffectiveRes.rows[0]?.calendar_effective_from || "").slice(0, 10)) || null,
   };
 }
 
@@ -183,6 +189,39 @@ function stripFeedPrefix(id, feedKey) {
   const prefix = `${feedKey}::`;
   if (raw.startsWith(prefix)) return raw.slice(prefix.length);
   return raw;
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeGeoText(value) {
+  const text = String(value || "").trim();
+  return text || null;
+}
+
+async function reverseGeocodeStop(lat, lon) {
+  const url = new URL("https://nominatim.openstreetmap.org/reverse");
+  url.searchParams.set("lat", String(lat));
+  url.searchParams.set("lon", String(lon));
+  url.searchParams.set("format", "jsonv2");
+  url.searchParams.set("addressdetails", "1");
+  url.searchParams.set("accept-language", "pt-PT,pt");
+  const response = await fetch(url.toString(), {
+    headers: {
+      "User-Agent": "Bus-SAE-GTFS/1.0 (reverse-geocode-stops)",
+    },
+  });
+  if (!response.ok) return { municipality: null, parish: null };
+  const payload = await response.json().catch(() => ({}));
+  const address = payload?.address || {};
+  const municipality = normalizeGeoText(
+    address.municipality || address.city || address.town || address.county || address.state_district
+  );
+  const parish = normalizeGeoText(
+    address.city_district || address.suburb || address.village || address.hamlet || address.quarter || address.neighbourhood
+  );
+  return { municipality, parish };
 }
 
 function classifyServiceDayType(serviceCode, calendar) {
@@ -667,9 +706,9 @@ router.post("/import", async (req, res) => {
     const calendars = readZipCsv(zip, "calendar.txt");
     const calendarDates = readZipCsv(zip, "calendar_dates.txt");
 
-    if (!routes.length || !trips.length || !shapes.length) {
+    if (!routes.length || !trips.length) {
       return res.status(400).json({
-        message: "GTFS incompleto. Necessario: routes.txt, trips.txt e shapes.txt.",
+        message: "GTFS incompleto. Necessario: routes.txt e trips.txt.",
       });
     }
 
@@ -1331,6 +1370,81 @@ router.get("/editor/stops/by-municipality", async (req, res) => {
     return res.json({ municipalities: data, totalStops: result.rows.length });
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao listar paragens por concelho/freguesia." });
+  }
+});
+
+router.post("/editor/stops/reverse-geocode", async (req, res) => {
+  const feedKey = normalizeFeedKey(req.body?.feedKey || req.query?.feedKey || "");
+  const maxStops = Math.max(1, Math.min(500, toInt(req.body?.maxStops || req.query?.maxStops) || 150));
+  try {
+    await ensureGtfsEditorIndexes();
+    const beforeCountRes = await db.query(
+      `SELECT COUNT(*)::int AS total
+       FROM gtfs_stops
+       WHERE ($1::text = '' OR feed_key = $1)
+         AND (NULLIF(TRIM(COALESCE(municipality, '')), '') IS NULL
+           OR NULLIF(TRIM(COALESCE(parish, '')), '') IS NULL)
+         AND stop_lat IS NOT NULL
+         AND stop_lon IS NOT NULL`,
+      [feedKey]
+    );
+    const remainingBefore = Number(beforeCountRes.rows?.[0]?.total || 0);
+    const pendingRes = await db.query(
+      `SELECT stop_id, stop_lat, stop_lon
+       FROM gtfs_stops
+       WHERE ($1::text = '' OR feed_key = $1)
+         AND (NULLIF(TRIM(COALESCE(municipality, '')), '') IS NULL
+           OR NULLIF(TRIM(COALESCE(parish, '')), '') IS NULL)
+         AND stop_lat IS NOT NULL
+         AND stop_lon IS NOT NULL
+       ORDER BY stop_id ASC
+       LIMIT $2`,
+      [feedKey, maxStops]
+    );
+    const rows = pendingRes.rows || [];
+    let updated = 0;
+    let attempted = 0;
+    for (const row of rows) {
+      attempted += 1;
+      const lat = Number(row.stop_lat);
+      const lon = Number(row.stop_lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      const geo = await reverseGeocodeStop(lat, lon).catch(() => ({ municipality: null, parish: null }));
+      if (!geo.municipality && !geo.parish) {
+        await sleep(1200);
+        continue;
+      }
+      const upd = await db.query(
+        `UPDATE gtfs_stops
+         SET municipality = COALESCE($2, municipality),
+             parish = COALESCE($3, parish)
+         WHERE stop_id = $1`,
+        [row.stop_id, geo.municipality, geo.parish]
+      );
+      if (upd.rowCount) updated += 1;
+      await sleep(1200);
+    }
+    const afterCountRes = await db.query(
+      `SELECT COUNT(*)::int AS total
+       FROM gtfs_stops
+       WHERE ($1::text = '' OR feed_key = $1)
+         AND (NULLIF(TRIM(COALESCE(municipality, '')), '') IS NULL
+           OR NULLIF(TRIM(COALESCE(parish, '')), '') IS NULL)
+         AND stop_lat IS NOT NULL
+         AND stop_lon IS NOT NULL`,
+      [feedKey]
+    );
+    const remainingAfter = Number(afterCountRes.rows?.[0]?.total || 0);
+    return res.json({
+      message: "Geocodificação de paragens concluída.",
+      feedKey: feedKey || "ativo",
+      attempted,
+      updated,
+      remainingBefore,
+      remainingAfter,
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao geocodificar paragens por coordenadas." });
   }
 });
 
@@ -2378,8 +2492,9 @@ router.get("/analytics/overview", async (req, res) => {
       },
       lines: result.rows,
     });
-  } catch (_error) {
-    return res.status(500).json({ message: "Erro ao gerar analise GTFS por linha." });
+  } catch (error) {
+    console.error("[gtfs analytics overview] erro ao gerar analise", error);
+    return res.status(500).json({ message: "Erro ao gerar analise GTFS por linha.", detail: error?.message || null });
   }
 });
 
