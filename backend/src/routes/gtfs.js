@@ -226,6 +226,22 @@ async function fetchJsonWithRetry(url, options = {}) {
   throw lastError || new Error("Falha no fetch JSON");
 }
 
+async function mapWithConcurrency(items, limit, mapper) {
+  const safeLimit = Math.max(1, Number(limit) || 1);
+  const results = new Array(items.length);
+  let cursor = 0;
+  async function worker() {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await mapper(items[index], index);
+    }
+  }
+  const workers = Array.from({ length: Math.min(safeLimit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
 function normalizeGeoText(value) {
   const text = String(value || "").trim();
   return text || null;
@@ -1672,18 +1688,23 @@ router.post("/editor/admin-boundaries/import-geoapi-pt", async (_req, res) => {
     const municipalityRows = [];
     const parishRows = [];
     let failedMunicipalities = 0;
-    for (const municipalityNameRaw of municipalities) {
-      const municipalityName = String(municipalityNameRaw || "").trim();
-      if (!municipalityName) continue;
+    const municipalityNames = municipalities
+      .map((name) => String(name || "").trim())
+      .filter(Boolean);
+    const perMunicipality = await mapWithConcurrency(municipalityNames, 10, async (municipalityName) => {
       let detailPayload = null;
       let parishesPayload = null;
+      let detailFailed = false;
       try {
-        detailPayload = await fetchJsonWithRetry(`https://json.geoapi.pt/municipio/${encodeURIComponent(municipalityName)}`, {
-          retries: 3,
-          timeoutMs: 20000,
-        });
+        detailPayload = await fetchJsonWithRetry(
+          `https://json.geoapi.pt/municipio/${encodeURIComponent(municipalityName)}`,
+          {
+            retries: 3,
+            timeoutMs: 20000,
+          }
+        );
       } catch (_error) {
-        failedMunicipalities += 1;
+        detailFailed = true;
       }
       try {
         parishesPayload = await fetchJsonWithRetry(
@@ -1696,12 +1717,17 @@ router.post("/editor/admin-boundaries/import-geoapi-pt", async (_req, res) => {
       } catch (_error) {
         // keep going; municipality geometry may still be available
       }
-      if (detailPayload) {
-        const municipalityFeature = normalizeGeoApiMunicipalityPayload(detailPayload);
+      return { municipalityName, detailPayload, parishesPayload, detailFailed };
+    });
+
+    for (const row of perMunicipality) {
+      if (row?.detailFailed) failedMunicipalities += 1;
+      if (row?.detailPayload) {
+        const municipalityFeature = normalizeGeoApiMunicipalityPayload(row.detailPayload);
         if (municipalityFeature?.boundaryName && municipalityFeature?.geometry) municipalityRows.push(municipalityFeature);
       }
-      if (parishesPayload) {
-        const normalizedParishes = normalizeGeoApiParishFeatures(parishesPayload, municipalityName);
+      if (row?.parishesPayload) {
+        const normalizedParishes = normalizeGeoApiParishFeatures(row.parishesPayload, row.municipalityName);
         parishRows.push(...normalizedParishes);
       }
     }
@@ -1767,7 +1793,13 @@ router.post("/editor/admin-boundaries/import-geoapi-pt", async (_req, res) => {
     });
   } catch (_error) {
     await client.query("ROLLBACK").catch(() => {});
-    return res.status(500).json({ message: "Erro ao importar limites automáticos do geoapi.pt." });
+    const errorCode = String(_error?.code || "");
+    const errorMessage = String(_error?.message || "").slice(0, 220);
+    return res.status(500).json({
+      message: "Erro ao importar limites automáticos do geoapi.pt.",
+      detail: errorMessage || "Erro desconhecido",
+      code: errorCode || null,
+    });
   } finally {
     client.release();
   }
