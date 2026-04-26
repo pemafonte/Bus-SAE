@@ -142,7 +142,7 @@ function buildHolidayDateList(startIso, endIso, municipalHoliday) {
     .sort();
 }
 
-async function resolveAnalyticsPeriod(feedKey, startDate, endDate) {
+async function resolveAnalyticsPeriod(feedKey, startDate, endDate, periodMode = "") {
   const feedEffectiveRes = await db.query(
     `SELECT
        GREATEST(
@@ -179,6 +179,8 @@ async function resolveAnalyticsPeriod(feedKey, startDate, endDate) {
   );
   const row = feedEffectiveRes.rows[0] || {};
   const todayIso = parseIsoDateInput(new Date().toISOString().slice(0, 10));
+  const currentYear = Number(String(todayIso).slice(0, 4)) || new Date().getFullYear();
+  const mode = String(periodMode || "").trim().toLowerCase();
   const gtfsEffectiveFrom = parseIsoDateInput(String(row.gtfs_effective_from || "").slice(0, 10));
   const calendarEffectiveFrom = parseIsoDateInput(String(row.calendar_effective_from || "").slice(0, 10));
   const minCalendarStart = parseIsoDateInput(String(row.min_calendar_start || "").slice(0, 10));
@@ -192,12 +194,19 @@ async function resolveAnalyticsPeriod(feedKey, startDate, endDate) {
       : gtfsEffectiveFrom || calendarEffectiveFrom || minCalendarStart || minCalendarDate || todayIso;
   let baseStart = parseIsoDateInput(startDate) || null;
   if (!baseStart) {
-    baseStart = feedEffectiveStart;
-  } else if (baseStart < feedEffectiveStart) {
-    baseStart = feedEffectiveStart;
+    if (mode === "from_today") {
+      baseStart = todayIso;
+    } else if (mode === "full_year") {
+      baseStart = `${currentYear}-01-01`;
+    } else {
+      baseStart = feedEffectiveStart;
+    }
   }
   const resolvedEndRaw = parseIsoDateInput(endDate) || null;
-  const defaultEndCandidate = addDaysUtc(new Date(`${baseStart}T00:00:00.000Z`), 364).toISOString().slice(0, 10);
+  const defaultEndCandidate =
+    mode === "full_year"
+      ? `${String(currentYear)}-12-31`
+      : addDaysUtc(new Date(`${baseStart}T00:00:00.000Z`), 364).toISOString().slice(0, 10);
   const hardMaxEnd = maxCalendarEnd || maxCalendarDate || null;
   const defaultEnd = hardMaxEnd && hardMaxEnd < defaultEndCandidate ? hardMaxEnd : defaultEndCandidate;
   const resolvedEnd = resolvedEndRaw || defaultEnd;
@@ -2660,6 +2669,7 @@ router.get("/analytics/overview", async (req, res) => {
   try {
     await ensureGtfsEditorIndexes();
     const feedKey = normalizeFeedKey(req.query.feedKey || "");
+    const periodMode = String(req.query.periodMode || "").trim().toLowerCase();
     const startDateInput = parseIsoDateInput(req.query.startDate);
     const endDateInput = parseIsoDateInput(req.query.endDate);
     const municipalHoliday = parseMunicipalHolidayInput(req.query.municipalHoliday);
@@ -2667,7 +2677,7 @@ router.get("/analytics/overview", async (req, res) => {
       return res.status(400).json({ message: "Intervalo inválido: startDate maior que endDate." });
     }
     const { startDate, endDate, effectiveStartDate, gtfsEffectiveFrom, calendarEffectiveFrom } =
-      await resolveAnalyticsPeriod(feedKey, startDateInput, endDateInput);
+      await resolveAnalyticsPeriod(feedKey, startDateInput, endDateInput, periodMode);
     const holidayDates = buildHolidayDateList(startDate, endDate, municipalHoliday);
     const result = await db.query(
       `WITH selected_routes AS (
@@ -3080,6 +3090,7 @@ router.get("/analytics/export.xlsx", async (req, res) => {
     await ensureGtfsEditorIndexes();
     const feedKey = normalizeFeedKey(req.query.feedKey || "");
     const routeId = String(req.query.routeId || "").trim();
+    const periodMode = String(req.query.periodMode || "").trim().toLowerCase();
     const startDateInput = parseIsoDateInput(req.query.startDate);
     const endDateInput = parseIsoDateInput(req.query.endDate);
     const municipalHoliday = parseMunicipalHolidayInput(req.query.municipalHoliday);
@@ -3087,7 +3098,7 @@ router.get("/analytics/export.xlsx", async (req, res) => {
       return res.status(400).json({ message: "Intervalo inválido: startDate maior que endDate." });
     }
     const { startDate, endDate, effectiveStartDate, gtfsEffectiveFrom, calendarEffectiveFrom } =
-      await resolveAnalyticsPeriod(feedKey, startDateInput, endDateInput);
+      await resolveAnalyticsPeriod(feedKey, startDateInput, endDateInput, periodMode);
     const holidayDates = buildHolidayDateList(startDate, endDate, municipalHoliday);
     const overviewRes = await db.query(
       `WITH selected_routes AS (

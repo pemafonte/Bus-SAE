@@ -128,6 +128,7 @@ const gtfsEditorAddStopIdEl = document.getElementById("gtfsEditorAddStopId");
 const gtfsEditorMapEl = document.getElementById("gtfsEditorMap");
 const gtfsEditorAutoAdjustTimeBtnEl = document.getElementById("gtfsEditorAutoAdjustTimeBtn");
 const gtfsAnalyticsFeedSelectEl = document.getElementById("gtfsAnalyticsFeedSelect");
+const gtfsAnalyticsPeriodModeEl = document.getElementById("gtfsAnalyticsPeriodMode");
 const gtfsAnalyticsStartDateEl = document.getElementById("gtfsAnalyticsStartDate");
 const gtfsAnalyticsEndDateEl = document.getElementById("gtfsAnalyticsEndDate");
 const gtfsAnalyticsMunicipalHolidayEl = document.getElementById("gtfsAnalyticsMunicipalHoliday");
@@ -1080,6 +1081,12 @@ function openSupervisorTab(tabId) {
     }
   }
   if (tabId === "tabAnaliseGtfs") {
+    if (gtfsAnalyticsPeriodModeEl && !String(gtfsAnalyticsPeriodModeEl.value || "").trim()) {
+      gtfsAnalyticsPeriodModeEl.value = "full_year";
+    }
+    if (!String(gtfsAnalyticsStartDateEl?.value || "").trim() || !String(gtfsAnalyticsEndDateEl?.value || "").trim()) {
+      applyGtfsAnalyticsPeriodModePreset();
+    }
     loadGtfsFeeds();
     loadGtfsAnalyticsOverview();
     loadCalendarLegendForFeed(selectedGtfsAnalyticsFeedKey, gtfsAnalyticsCalendarLegendEl);
@@ -2939,14 +2946,16 @@ function buildGtfsLineBuilderStopRow(stop = {}) {
 }
 
 function buildGtfsAnalyticsPeriodParams() {
+  const periodMode = String(gtfsAnalyticsPeriodModeEl?.value || "full_year").trim().toLowerCase();
   const startDate = String(gtfsAnalyticsStartDateEl?.value || "").trim();
   const endDate = String(gtfsAnalyticsEndDateEl?.value || "").trim();
   const municipalHoliday = String(gtfsAnalyticsMunicipalHolidayEl?.value || "").trim();
   const params = new URLSearchParams();
+  if (periodMode) params.set("periodMode", periodMode);
   if (startDate) params.set("startDate", startDate);
   if (endDate) params.set("endDate", endDate);
   if (municipalHoliday) params.set("municipalHoliday", municipalHoliday);
-  return { startDate, endDate, municipalHoliday, params };
+  return { periodMode, startDate, endDate, municipalHoliday, params };
 }
 
 function setGtfsAnalyticsYearRange(offsetYears = 0) {
@@ -2956,6 +2965,25 @@ function setGtfsAnalyticsYearRange(offsetYears = 0) {
   const end = `${targetYear}-12-31`;
   if (gtfsAnalyticsStartDateEl) gtfsAnalyticsStartDateEl.value = start;
   if (gtfsAnalyticsEndDateEl) gtfsAnalyticsEndDateEl.value = end;
+}
+
+function setGtfsAnalyticsFromTodayRange(days = 364) {
+  const startDate = new Date();
+  const endDate = new Date(startDate);
+  endDate.setDate(endDate.getDate() + Number(days || 364));
+  const start = startDate.toISOString().slice(0, 10);
+  const end = endDate.toISOString().slice(0, 10);
+  if (gtfsAnalyticsStartDateEl) gtfsAnalyticsStartDateEl.value = start;
+  if (gtfsAnalyticsEndDateEl) gtfsAnalyticsEndDateEl.value = end;
+}
+
+function applyGtfsAnalyticsPeriodModePreset() {
+  const mode = String(gtfsAnalyticsPeriodModeEl?.value || "full_year").trim().toLowerCase();
+  if (mode === "from_today") {
+    setGtfsAnalyticsFromTodayRange();
+    return;
+  }
+  setGtfsAnalyticsYearRange(0);
 }
 
 function fillGtfsAnalyticsLineSelect(rows) {
@@ -5023,11 +5051,17 @@ bindById("importAndAssignBoundariesBtn", "click", importAndAssignAdminBoundaries
 bindById("loadGtfsLineDetailBtn", "click", () => loadGtfsLineDetail());
 bindById("exportGtfsAnalyticsExcelBtn", "click", exportGtfsAnalyticsExcel);
 bindById("gtfsAnalyticsCurrentYearBtn", "click", () => {
+  if (gtfsAnalyticsPeriodModeEl) gtfsAnalyticsPeriodModeEl.value = "full_year";
   setGtfsAnalyticsYearRange(0);
   loadGtfsAnalyticsOverview();
 });
 bindById("gtfsAnalyticsNextYearBtn", "click", () => {
+  if (gtfsAnalyticsPeriodModeEl) gtfsAnalyticsPeriodModeEl.value = "full_year";
   setGtfsAnalyticsYearRange(1);
+  loadGtfsAnalyticsOverview();
+});
+bindById("gtfsAnalyticsPeriodMode", "change", () => {
+  applyGtfsAnalyticsPeriodModePreset();
   loadGtfsAnalyticsOverview();
 });
 const refreshGtfsEditorLinesBtn = document.getElementById("refreshGtfsEditorLinesBtn");
