@@ -2744,78 +2744,115 @@ async function assignStopsByAdminPolygons() {
 
 async function importAdminBoundariesAutomatically() {
   if (!supToken) return;
+  const importBtn = document.getElementById("importAdminBoundariesAutoBtn");
+  const oneClickBtn = document.getElementById("importAndAssignBoundariesBtn");
   const confirmed = window.confirm(
     "A app vai descarregar limites administrativos (concelhos e freguesias) automaticamente via geoapi.pt. Pode demorar alguns minutos. Continuar?"
   );
   if (!confirmed) return;
-  if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = "A descarregar e importar limites administrativos automáticos...";
-  const response = await fetch(`${API_BASE}/gtfs/editor/admin-boundaries/import-geoapi-pt`, {
-    method: "POST",
-    headers: getAuthHeaders(),
-  });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    alert(data.message || "Erro ao importar limites automáticos.");
-    if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = "Falha ao importar limites automáticos.";
-    return;
+  if (importBtn) importBtn.disabled = true;
+  if (oneClickBtn) oneClickBtn.disabled = true;
+  const startedAt = Date.now();
+  try {
+    if (gtfsGeocodeProgressEl) {
+      gtfsGeocodeProgressEl.textContent = [
+        "A descarregar e importar limites administrativos automáticos...",
+        "Pode demorar ~1-2 minutos. Aguarde até aparecer a confirmação final.",
+      ].join("\n");
+    }
+    const response = await fetch(`${API_BASE}/gtfs/editor/admin-boundaries/import-geoapi-pt`, {
+      method: "POST",
+      headers: getAuthHeaders(),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      alert(data.message || "Erro ao importar limites automáticos.");
+      if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = "Falha ao importar limites automáticos.";
+      return;
+    }
+    const elapsedSec = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    const text = [
+      data.message || "Importação automática concluída.",
+      `Concelhos: ${data.municipalities || 0}`,
+      `Freguesias: ${data.parishes || 0}`,
+      `Municípios com falha temporária: ${data.failedMunicipalities || 0}`,
+      `Duração: ${elapsedSec}s`,
+    ].join("\n");
+    alert(text);
+    if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = text;
+  } finally {
+    if (importBtn) importBtn.disabled = false;
+    if (oneClickBtn) oneClickBtn.disabled = false;
   }
-  const text = [
-    data.message || "Importação automática concluída.",
-    `Concelhos: ${data.municipalities || 0}`,
-    `Freguesias: ${data.parishes || 0}`,
-  ].join("\n");
-  alert(text);
-  if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = text;
 }
 
 async function importAndAssignAdminBoundariesOneClick() {
   if (!supToken) return;
+  const importBtn = document.getElementById("importAdminBoundariesAutoBtn");
+  const oneClickBtn = document.getElementById("importAndAssignBoundariesBtn");
   const feedKey = String(gtfsAnalyticsFeedSelectEl?.value || selectedGtfsAnalyticsFeedKey || "").trim();
   const confirmed = window.confirm(
     "Este processo vai importar limites administrativos automáticos e, de seguida, atribuir concelho/freguesia às paragens do feed selecionado. Continuar?"
   );
   if (!confirmed) return;
-  if (gtfsGeocodeProgressEl) {
-    gtfsGeocodeProgressEl.textContent = "Passo 1/2: a importar limites administrativos automáticos...";
+  if (importBtn) importBtn.disabled = true;
+  if (oneClickBtn) oneClickBtn.disabled = true;
+  const startedAt = Date.now();
+  try {
+    if (gtfsGeocodeProgressEl) {
+      gtfsGeocodeProgressEl.textContent = [
+        "Passo 1/2: a importar limites administrativos automáticos...",
+        "Pode demorar ~1-2 minutos. Aguarde até ao passo seguinte.",
+      ].join("\n");
+    }
+    const importRes = await fetch(`${API_BASE}/gtfs/editor/admin-boundaries/import-geoapi-pt`, {
+      method: "POST",
+      headers: getAuthHeaders(),
+    });
+    const importData = await importRes.json().catch(() => ({}));
+    if (!importRes.ok) {
+      alert(importData.message || "Erro na importação automática de limites.");
+      if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = "Falha no passo 1/2.";
+      return;
+    }
+    if (gtfsGeocodeProgressEl) {
+      gtfsGeocodeProgressEl.textContent = [
+        "Passo 2/2: a atribuir concelho/freguesia por polígonos...",
+        "Este passo pode demorar mais em feeds com muitas paragens.",
+      ].join("\n");
+    }
+    const assignRes = await fetch(`${API_BASE}/gtfs/editor/stops/assign-admin-boundaries`, {
+      method: "POST",
+      headers: getAuthHeaders(),
+      body: JSON.stringify({
+        feedKey: feedKey || null,
+        maxStops: 20000,
+        forceRefresh: true,
+      }),
+    });
+    const assignData = await assignRes.json().catch(() => ({}));
+    if (!assignRes.ok) {
+      alert(assignData.message || "Erro na atribuição por polígonos.");
+      if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = "Falha no passo 2/2.";
+      return;
+    }
+    const elapsedSec = Math.max(1, Math.round((Date.now() - startedAt) / 1000));
+    const text = [
+      "Processo 1-clique concluído.",
+      `Concelhos importados: ${importData.municipalities || 0}`,
+      `Freguesias importadas: ${importData.parishes || 0}`,
+      `Municípios com falha temporária: ${importData.failedMunicipalities || 0}`,
+      `Paragens processadas: ${assignData.processed || 0}`,
+      `Paragens atualizadas: ${assignData.updated || 0}`,
+      `Duração: ${elapsedSec}s`,
+    ].join("\n");
+    alert(text);
+    if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = text;
+    await loadGtfsStopsByArea();
+  } finally {
+    if (importBtn) importBtn.disabled = false;
+    if (oneClickBtn) oneClickBtn.disabled = false;
   }
-  const importRes = await fetch(`${API_BASE}/gtfs/editor/admin-boundaries/import-geoapi-pt`, {
-    method: "POST",
-    headers: getAuthHeaders(),
-  });
-  const importData = await importRes.json().catch(() => ({}));
-  if (!importRes.ok) {
-    alert(importData.message || "Erro na importação automática de limites.");
-    if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = "Falha no passo 1/2.";
-    return;
-  }
-  if (gtfsGeocodeProgressEl) {
-    gtfsGeocodeProgressEl.textContent = "Passo 2/2: a atribuir concelho/freguesia por polígonos...";
-  }
-  const assignRes = await fetch(`${API_BASE}/gtfs/editor/stops/assign-admin-boundaries`, {
-    method: "POST",
-    headers: getAuthHeaders(),
-    body: JSON.stringify({
-      feedKey: feedKey || null,
-      maxStops: 20000,
-      forceRefresh: true,
-    }),
-  });
-  const assignData = await assignRes.json().catch(() => ({}));
-  if (!assignRes.ok) {
-    alert(assignData.message || "Erro na atribuição por polígonos.");
-    if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = "Falha no passo 2/2.";
-    return;
-  }
-  const text = [
-    "Processo 1-clique concluído.",
-    `Concelhos importados: ${importData.municipalities || 0}`,
-    `Freguesias importadas: ${importData.parishes || 0}`,
-    `Paragens processadas: ${assignData.processed || 0}`,
-    `Paragens atualizadas: ${assignData.updated || 0}`,
-  ].join("\n");
-  alert(text);
-  if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = text;
-  await loadGtfsStopsByArea();
 }
 
 function buildGtfsLineBuilderStopRow(stop = {}) {

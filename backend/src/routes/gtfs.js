@@ -197,6 +197,35 @@ function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+async function fetchJsonWithRetry(url, options = {}) {
+  const retries = Number(options.retries ?? 3);
+  const timeoutMs = Number(options.timeoutMs ?? 20000);
+  let lastError = null;
+  for (let attempt = 1; attempt <= retries; attempt += 1) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(url, {
+        signal: controller.signal,
+        headers: { Accept: "application/json" },
+      });
+      clearTimeout(timeout);
+      if (!response.ok) {
+        lastError = new Error(`HTTP ${response.status}`);
+      } else {
+        const payload = await response.json().catch(() => null);
+        if (payload != null) return payload;
+        lastError = new Error("Resposta JSON inválida");
+      }
+    } catch (error) {
+      clearTimeout(timeout);
+      lastError = error;
+    }
+    if (attempt < retries) await sleep(500 * attempt);
+  }
+  throw lastError || new Error("Falha no fetch JSON");
+}
+
 function normalizeGeoText(value) {
   const text = String(value || "").trim();
   return text || null;
@@ -1633,30 +1662,45 @@ router.post("/editor/admin-boundaries/import-geoapi-pt", async (_req, res) => {
   const client = await db.pool.connect();
   try {
     await ensureGtfsEditorIndexes();
-    const municipalitiesRes = await fetch("https://json.geoapi.pt/municipios");
-    if (!municipalitiesRes.ok) {
-      return res.status(502).json({ message: "Falha ao obter lista de municípios no geoapi.pt." });
-    }
-    const municipalities = await municipalitiesRes.json().catch(() => []);
+    const municipalities = await fetchJsonWithRetry("https://json.geoapi.pt/municipios", {
+      retries: 4,
+      timeoutMs: 25000,
+    });
     if (!Array.isArray(municipalities) || !municipalities.length) {
       return res.status(502).json({ message: "Resposta inválida da lista de municípios no geoapi.pt." });
     }
     const municipalityRows = [];
     const parishRows = [];
+    let failedMunicipalities = 0;
     for (const municipalityNameRaw of municipalities) {
       const municipalityName = String(municipalityNameRaw || "").trim();
       if (!municipalityName) continue;
-      const detailRes = await fetch(`https://json.geoapi.pt/municipio/${encodeURIComponent(municipalityName)}`);
-      if (detailRes.ok) {
-        const detailPayload = await detailRes.json().catch(() => ({}));
-        const municipalityFeature = normalizeGeoApiMunicipalityPayload(detailPayload);
-        if (municipalityFeature?.boundaryName && municipalityFeature?.geometry) {
-          municipalityRows.push(municipalityFeature);
-        }
+      let detailPayload = null;
+      let parishesPayload = null;
+      try {
+        detailPayload = await fetchJsonWithRetry(`https://json.geoapi.pt/municipio/${encodeURIComponent(municipalityName)}`, {
+          retries: 3,
+          timeoutMs: 20000,
+        });
+      } catch (_error) {
+        failedMunicipalities += 1;
       }
-      const parishesRes = await fetch(`https://json.geoapi.pt/municipio/${encodeURIComponent(municipalityName)}/freguesias`);
-      if (parishesRes.ok) {
-        const parishesPayload = await parishesRes.json().catch(() => ({}));
+      try {
+        parishesPayload = await fetchJsonWithRetry(
+          `https://json.geoapi.pt/municipio/${encodeURIComponent(municipalityName)}/freguesias`,
+          {
+            retries: 3,
+            timeoutMs: 20000,
+          }
+        );
+      } catch (_error) {
+        // keep going; municipality geometry may still be available
+      }
+      if (detailPayload) {
+        const municipalityFeature = normalizeGeoApiMunicipalityPayload(detailPayload);
+        if (municipalityFeature?.boundaryName && municipalityFeature?.geometry) municipalityRows.push(municipalityFeature);
+      }
+      if (parishesPayload) {
         const normalizedParishes = normalizeGeoApiParishFeatures(parishesPayload, municipalityName);
         parishRows.push(...normalizedParishes);
       }
@@ -1719,6 +1763,7 @@ router.post("/editor/admin-boundaries/import-geoapi-pt", async (_req, res) => {
       message: "Limites administrativos importados automaticamente do geoapi.pt.",
       municipalities: insertedMunicipalities,
       parishes: insertedParishes,
+      failedMunicipalities,
     });
   } catch (_error) {
     await client.query("ROLLBACK").catch(() => {});
