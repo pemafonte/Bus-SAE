@@ -145,6 +145,8 @@ const gtfsLineBuilderSummaryEl = document.getElementById("gtfsLineBuilderSummary
 const gtfsRtPreviewReportEl = document.getElementById("gtfsRtPreviewReport");
 const gtfsEffectiveFromEl = document.getElementById("gtfsEffectiveFrom");
 const calendarEffectiveFromEl = document.getElementById("calendarEffectiveFrom");
+const gtfsEditorCalendarLegendEl = document.getElementById("gtfsEditorCalendarLegend");
+const gtfsAnalyticsCalendarLegendEl = document.getElementById("gtfsAnalyticsCalendarLegend");
 const gtfsCalendarsListEl = document.getElementById("gtfsCalendarsList");
 const gtfsFeedKeyEl = document.getElementById("gtfsFeedKey");
 const gtfsFeedNameEl = document.getElementById("gtfsFeedName");
@@ -185,6 +187,7 @@ let gtfsAnalyticsSelectedRouteId = "";
 let gtfsEditorMap = null;
 let gtfsEditorMapLayer = null;
 let gtfsEditorRouteDrawRequestId = 0;
+const gtfsCalendarLegendCache = new Map();
 let supervisorAlertsPollTimer = null;
 let supervisorAlertBaselineReady = false;
 let lastSupervisorAlertSignature = "";
@@ -1020,6 +1023,7 @@ function openSupervisorTab(tabId) {
     loadGtfsFeeds();
     loadGtfsEditorLines();
     loadGtfsCalendars();
+    loadCalendarLegendForFeed(selectedGtfsFeedKey, gtfsEditorCalendarLegendEl);
     if (gtfsLineBuilderStopsListEl && !gtfsLineBuilderStopsListEl.querySelector(".gtfs-line-builder-stop-row")) {
       addGtfsLineBuilderStopRow();
       addGtfsLineBuilderStopRow();
@@ -1028,6 +1032,7 @@ function openSupervisorTab(tabId) {
   if (tabId === "tabAnaliseGtfs") {
     loadGtfsFeeds();
     loadGtfsAnalyticsOverview();
+    loadCalendarLegendForFeed(selectedGtfsAnalyticsFeedKey, gtfsAnalyticsCalendarLegendEl);
     loadGtfsStopsByArea();
     initGtfsAnalyticsMap();
   }
@@ -2559,6 +2564,7 @@ async function geocodeGtfsStopsByCoordinates() {
     body: JSON.stringify({
       feedKey: feedKey || null,
       maxStops: 200,
+      forceRefresh: false,
     }),
   });
   const data = await response.json().catch(() => ({}));
@@ -2587,7 +2593,7 @@ async function geocodeAllGtfsStopsByCoordinates() {
   if (!supToken || geocodeAllGtfsStopsInProgress) return;
   const feedKey = String(gtfsAnalyticsFeedSelectEl?.value || selectedGtfsAnalyticsFeedKey || "").trim();
   const confirmed = window.confirm(
-    "Isto vai processar automaticamente todos os lotes para preencher concelho/freguesia por coordenadas. Pode demorar bastante. Continuar?"
+    "Isto vai processar automaticamente todos os lotes e REFINAR os dados existentes com base nas coordenadas (sobrescreve valores anteriores quando houver melhor resultado). Pode demorar bastante. Continuar?"
   );
   if (!confirmed) return;
   if (gtfsGeocodeProgressEl) {
@@ -2611,6 +2617,7 @@ async function geocodeAllGtfsStopsByCoordinates() {
         body: JSON.stringify({
           feedKey: feedKey || null,
           maxStops: 200,
+          forceRefresh: true,
         }),
       });
       const data = await response.json().catch(() => ({}));
@@ -2659,6 +2666,155 @@ async function geocodeAllGtfsStopsByCoordinates() {
       `Restantes: ${remainingAfter == null ? "-" : remainingAfter}`,
     ].join("\n");
   }
+  await loadGtfsStopsByArea();
+}
+
+async function importAdminBoundariesFromGeoJson(level) {
+  if (!supToken) return;
+  const isMunicipality = String(level) === "municipality";
+  const inputId = isMunicipality ? "gtfsMunicipalityGeoJsonInput" : "gtfsParishGeoJsonInput";
+  const label = isMunicipality ? "concelhos" : "freguesias";
+  const input = document.getElementById(inputId);
+  const file = input?.files?.[0];
+  if (!file) {
+    alert(`Selecione o ficheiro GeoJSON de ${label}.`);
+    return;
+  }
+  const buffer = await file.arrayBuffer();
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  bytes.forEach((b) => {
+    binary += String.fromCharCode(b);
+  });
+  if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = `A importar polígonos de ${label}...`;
+  const response = await fetch(`${API_BASE}/gtfs/editor/admin-boundaries/import-geojson`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({
+      level,
+      sourceTag: file.name || "manual_upload",
+      geojsonBase64: btoa(binary),
+    }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || `Erro ao importar GeoJSON de ${label}.`);
+    if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = `Falha ao importar polígonos de ${label}.`;
+    return;
+  }
+  const msg = `${data.message || "Importação concluída."}\nNível: ${level}\nPolígonos importados: ${data.inserted || 0}`;
+  alert(msg);
+  if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = msg;
+}
+
+async function assignStopsByAdminPolygons() {
+  if (!supToken) return;
+  const feedKey = String(gtfsAnalyticsFeedSelectEl?.value || selectedGtfsAnalyticsFeedKey || "").trim();
+  const confirmed = window.confirm(
+    "Isto vai atribuir concelho/freguesia por polígonos administrativos (CAOP), reprocessando as paragens do feed. Continuar?"
+  );
+  if (!confirmed) return;
+  if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = "A atribuir paragens por polígonos administrativos...";
+  const response = await fetch(`${API_BASE}/gtfs/editor/stops/assign-admin-boundaries`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({
+      feedKey: feedKey || null,
+      maxStops: 20000,
+      forceRefresh: true,
+    }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao atribuir concelho/freguesia por polígonos.");
+    if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = "Falha na atribuição por polígonos.";
+    return;
+  }
+  const text = [
+    data.message || "Atribuição concluída.",
+    `Paragens processadas: ${data.processed || 0}`,
+    `Paragens atualizadas: ${data.updated || 0}`,
+    `Polígonos concelhos: ${data.boundaries?.municipalities || 0}`,
+    `Polígonos freguesias: ${data.boundaries?.parishes || 0}`,
+  ].join("\n");
+  alert(text);
+  if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = text;
+  await loadGtfsStopsByArea();
+}
+
+async function importAdminBoundariesAutomatically() {
+  if (!supToken) return;
+  const confirmed = window.confirm(
+    "A app vai descarregar limites administrativos (concelhos e freguesias) automaticamente via geoapi.pt. Pode demorar alguns minutos. Continuar?"
+  );
+  if (!confirmed) return;
+  if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = "A descarregar e importar limites administrativos automáticos...";
+  const response = await fetch(`${API_BASE}/gtfs/editor/admin-boundaries/import-geoapi-pt`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao importar limites automáticos.");
+    if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = "Falha ao importar limites automáticos.";
+    return;
+  }
+  const text = [
+    data.message || "Importação automática concluída.",
+    `Concelhos: ${data.municipalities || 0}`,
+    `Freguesias: ${data.parishes || 0}`,
+  ].join("\n");
+  alert(text);
+  if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = text;
+}
+
+async function importAndAssignAdminBoundariesOneClick() {
+  if (!supToken) return;
+  const feedKey = String(gtfsAnalyticsFeedSelectEl?.value || selectedGtfsAnalyticsFeedKey || "").trim();
+  const confirmed = window.confirm(
+    "Este processo vai importar limites administrativos automáticos e, de seguida, atribuir concelho/freguesia às paragens do feed selecionado. Continuar?"
+  );
+  if (!confirmed) return;
+  if (gtfsGeocodeProgressEl) {
+    gtfsGeocodeProgressEl.textContent = "Passo 1/2: a importar limites administrativos automáticos...";
+  }
+  const importRes = await fetch(`${API_BASE}/gtfs/editor/admin-boundaries/import-geoapi-pt`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+  });
+  const importData = await importRes.json().catch(() => ({}));
+  if (!importRes.ok) {
+    alert(importData.message || "Erro na importação automática de limites.");
+    if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = "Falha no passo 1/2.";
+    return;
+  }
+  if (gtfsGeocodeProgressEl) {
+    gtfsGeocodeProgressEl.textContent = "Passo 2/2: a atribuir concelho/freguesia por polígonos...";
+  }
+  const assignRes = await fetch(`${API_BASE}/gtfs/editor/stops/assign-admin-boundaries`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({
+      feedKey: feedKey || null,
+      maxStops: 20000,
+      forceRefresh: true,
+    }),
+  });
+  const assignData = await assignRes.json().catch(() => ({}));
+  if (!assignRes.ok) {
+    alert(assignData.message || "Erro na atribuição por polígonos.");
+    if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = "Falha no passo 2/2.";
+    return;
+  }
+  const text = [
+    "Processo 1-clique concluído.",
+    `Concelhos importados: ${importData.municipalities || 0}`,
+    `Freguesias importadas: ${importData.parishes || 0}`,
+    `Paragens processadas: ${assignData.processed || 0}`,
+    `Paragens atualizadas: ${assignData.updated || 0}`,
+  ].join("\n");
+  alert(text);
+  if (gtfsGeocodeProgressEl) gtfsGeocodeProgressEl.textContent = text;
   await loadGtfsStopsByArea();
 }
 
@@ -3054,6 +3210,93 @@ function renderGtfsCalendars(rows) {
   });
 }
 
+function stripGtfsFeedPrefixFromServiceId(serviceId, feedKey) {
+  const raw = String(serviceId || "").trim();
+  const prefix = `${String(feedKey || "").trim()}::`;
+  if (prefix !== "::" && raw.startsWith(prefix)) return raw.slice(prefix.length);
+  return raw;
+}
+
+function describeCalendarPattern(row, normalizedServiceId) {
+  const code = String(normalizedServiceId || "").toUpperCase();
+  const m = Number(row?.monday || 0) === 1;
+  const t = Number(row?.tuesday || 0) === 1;
+  const w = Number(row?.wednesday || 0) === 1;
+  const th = Number(row?.thursday || 0) === 1;
+  const f = Number(row?.friday || 0) === 1;
+  const s = Number(row?.saturday || 0) === 1;
+  const su = Number(row?.sunday || 0) === 1;
+  const weekdaysOnly = m && t && w && th && f && !s && !su;
+  const saturdayOnly = !m && !t && !w && !th && !f && s && !su;
+  const sundayOnly = !m && !t && !w && !th && !f && !s && su;
+  if (code.includes("-DF") || code.endsWith("DF")) return "Domingos e feriados";
+  if (code.includes("-S") || code.endsWith("S")) return "Sábados";
+  if (code.includes("-U") || code.endsWith("U")) {
+    if (code.includes("XJA")) return "Dias úteis (exceto julho/agosto)";
+    if (code.includes("JA")) return "Dias úteis (julho/agosto)";
+    return "Dias úteis";
+  }
+  if (weekdaysOnly) return "Dias úteis";
+  if (saturdayOnly) return "Sábados";
+  if (sundayOnly) return "Domingos";
+  const daysLabel = [
+    m ? "2ª" : null,
+    t ? "3ª" : null,
+    w ? "4ª" : null,
+    th ? "5ª" : null,
+    f ? "6ª" : null,
+    s ? "Sáb" : null,
+    su ? "Dom" : null,
+  ]
+    .filter(Boolean)
+    .join(", ");
+  return daysLabel || "Padrão personalizado";
+}
+
+function renderGtfsCalendarLegend(targetEl, rows, feedKey) {
+  if (!targetEl) return;
+  const list = Array.isArray(rows) ? rows : [];
+  if (!list.length) {
+    targetEl.innerHTML = "<strong>Legenda dos calendários (dinâmica):</strong><div>Sem calendários para este feed.</div>";
+    return;
+  }
+  const legendMap = new Map();
+  list.forEach((row) => {
+    const normalizedServiceId = stripGtfsFeedPrefixFromServiceId(row.service_id, feedKey);
+    const label = describeCalendarPattern(row, normalizedServiceId);
+    if (!legendMap.has(normalizedServiceId)) legendMap.set(normalizedServiceId, label);
+  });
+  const entries = Array.from(legendMap.entries()).slice(0, 20);
+  const html = entries.map(([code, label]) => `<div><code>${code || "-"}</code> ${label}</div>`).join("");
+  const suffix = legendMap.size > 20 ? `<div>... +${legendMap.size - 20} calendários adicionais</div>` : "";
+  targetEl.innerHTML = `<strong>Legenda dos calendários (dinâmica):</strong>${html}${suffix}`;
+}
+
+async function loadCalendarLegendForFeed(feedKey, targetEl) {
+  if (!supToken || !targetEl) return;
+  const key = String(feedKey || "").trim();
+  if (!key) {
+    targetEl.innerHTML = "<strong>Legenda dos calendários (dinâmica):</strong><div>Selecione um feed.</div>";
+    return;
+  }
+  if (gtfsCalendarLegendCache.has(key)) {
+    renderGtfsCalendarLegend(targetEl, gtfsCalendarLegendCache.get(key), key);
+    return;
+  }
+  targetEl.innerHTML = "<strong>Legenda dos calendários (dinâmica):</strong><div>A carregar...</div>";
+  const response = await fetch(`${API_BASE}/gtfs/feeds/${encodeURIComponent(key)}/calendars`, {
+    headers: getAuthHeaders(),
+  });
+  const data = await response.json().catch(() => ([]));
+  if (!response.ok) {
+    targetEl.innerHTML = `<strong>Legenda dos calendários (dinâmica):</strong><div>${data.message || "Erro ao carregar legendas."}</div>`;
+    return;
+  }
+  const rows = Array.isArray(data) ? data : [];
+  gtfsCalendarLegendCache.set(key, rows);
+  renderGtfsCalendarLegend(targetEl, rows, key);
+}
+
 async function loadGtfsCalendars() {
   if (!supToken || !gtfsCalendarsListEl || !selectedGtfsFeedKey) return;
   gtfsCalendarsListEl.innerHTML = "<div>A carregar calendários...</div>";
@@ -3065,7 +3308,10 @@ async function loadGtfsCalendars() {
     gtfsCalendarsListEl.innerHTML = `<div>${data.message || "Erro ao carregar calendários."}</div>`;
     return;
   }
-  renderGtfsCalendars(Array.isArray(data) ? data : []);
+  const rows = Array.isArray(data) ? data : [];
+  gtfsCalendarLegendCache.set(String(selectedGtfsFeedKey || ""), rows);
+  renderGtfsCalendars(rows);
+  renderGtfsCalendarLegend(gtfsEditorCalendarLegendEl, rows, selectedGtfsFeedKey);
 }
 
 async function updateGtfsCalendar(serviceId, payload) {
@@ -4675,6 +4921,11 @@ bindById("loadGtfsAnalyticsBtn", "click", loadGtfsAnalyticsOverview);
 bindById("loadGtfsStopsByAreaBtn", "click", loadGtfsStopsByArea);
 bindById("geocodeGtfsStopsBtn", "click", geocodeGtfsStopsByCoordinates);
 bindById("geocodeAllGtfsStopsBtn", "click", geocodeAllGtfsStopsByCoordinates);
+bindById("importMunicipalityGeoJsonBtn", "click", () => importAdminBoundariesFromGeoJson("municipality"));
+bindById("importParishGeoJsonBtn", "click", () => importAdminBoundariesFromGeoJson("parish"));
+bindById("importAdminBoundariesAutoBtn", "click", importAdminBoundariesAutomatically);
+bindById("assignStopsByPolygonsBtn", "click", assignStopsByAdminPolygons);
+bindById("importAndAssignBoundariesBtn", "click", importAndAssignAdminBoundariesOneClick);
 bindById("loadGtfsLineDetailBtn", "click", () => loadGtfsLineDetail());
 bindById("exportGtfsAnalyticsExcelBtn", "click", exportGtfsAnalyticsExcel);
 bindById("gtfsAnalyticsCurrentYearBtn", "click", () => {
@@ -4695,12 +4946,14 @@ if (gtfsEditorFeedSelectEl) {
     loadGtfsFeeds();
     loadGtfsEditorLines();
     loadGtfsCalendars();
+    loadCalendarLegendForFeed(selectedGtfsFeedKey, gtfsEditorCalendarLegendEl);
   });
 }
 if (gtfsAnalyticsFeedSelectEl) {
   gtfsAnalyticsFeedSelectEl.addEventListener("change", () => {
     selectedGtfsAnalyticsFeedKey = String(gtfsAnalyticsFeedSelectEl.value || "").trim();
     loadGtfsAnalyticsOverview();
+    loadCalendarLegendForFeed(selectedGtfsAnalyticsFeedKey, gtfsAnalyticsCalendarLegendEl);
     loadGtfsStopsByArea();
     loadGtfsLineBuilderStopOptions();
   });

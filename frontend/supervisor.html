@@ -348,13 +348,9 @@
           </section>
           <section class="card card-top-gap">
             <h3>Calendários do feed</h3>
-            <div class="gtfs-calendar-legend">
-              <strong>Legenda dos calendários:</strong>
-              <div><code>A-U</code> Dias úteis (2ª a 6ª, exclui feriados)</div>
-              <div><code>A-S</code> Sábados</div>
-              <div><code>A-DF</code> Domingos e feriados</div>
-              <div><code>JA-U</code> Dias úteis, apenas julho e agosto</div>
-              <div><code>XJA1-U</code> Dias úteis, exceto julho e agosto</div>
+            <div id="gtfsEditorCalendarLegend" class="gtfs-calendar-legend">
+              <strong>Legenda dos calendários (dinâmica):</strong>
+              <div>A carregar...</div>
             </div>
             <button type="button" id="refreshGtfsCalendarsBtn">Atualizar calendários</button>
             <div id="gtfsCalendarsList" class="service-cards"></div>
@@ -462,6 +458,15 @@
             <button type="button" id="loadGtfsStopsByAreaBtn">Atualizar paragens por concelho</button>
             <button type="button" id="geocodeGtfsStopsBtn">Preencher concelho/freguesia por coordenadas</button>
             <button type="button" id="geocodeAllGtfsStopsBtn">Processar tudo (lotes automáticos)</button>
+            <label for="gtfsMunicipalityGeoJsonInput">GeoJSON concelhos (CAOP)</label>
+            <input id="gtfsMunicipalityGeoJsonInput" type="file" accept=".geojson,application/geo+json,application/json" />
+            <button type="button" id="importMunicipalityGeoJsonBtn">Importar polígonos de concelhos</button>
+            <label for="gtfsParishGeoJsonInput">GeoJSON freguesias (CAOP)</label>
+            <input id="gtfsParishGeoJsonInput" type="file" accept=".geojson,application/geo+json,application/json" />
+            <button type="button" id="importParishGeoJsonBtn">Importar polígonos de freguesias</button>
+            <button type="button" id="importAdminBoundariesAutoBtn">Descarregar e importar limites automaticamente</button>
+            <button type="button" id="assignStopsByPolygonsBtn">Atribuir por polígonos (recomendado)</button>
+            <button type="button" id="importAndAssignBoundariesBtn">Importar + Atribuir (1 clique)</button>
             <pre id="gtfsGeocodeProgress" class="field-help">Sem processamento em execução.</pre>
             <div id="gtfsStopsByAreaList" class="service-cards">
               <div>Sem dados carregados.</div>
@@ -484,13 +489,9 @@
             <button type="button" id="loadGtfsAnalyticsBtn">Carregar análise</button>
             <button type="button" id="exportGtfsAnalyticsExcelBtn">Exportar Excel detalhado</button>
             <pre id="gtfsAnalyticsSummary">Sem análise carregada.</pre>
-            <div class="gtfs-calendar-legend">
-              <strong>Legenda dos calendários:</strong>
-              <div><code>A-U</code> Dias úteis (2ª a 6ª, exclui feriados)</div>
-              <div><code>A-S</code> Sábados</div>
-              <div><code>A-DF</code> Domingos e feriados</div>
-              <div><code>JA-U</code> Dias úteis, apenas julho e agosto</div>
-              <div><code>XJA1-U</code> Dias úteis, exceto julho e agosto</div>
+            <div id="gtfsAnalyticsCalendarLegend" class="gtfs-calendar-legend">
+              <strong>Legenda dos calendários (dinâmica):</strong>
+              <div>A carregar...</div>
             </div>
             <div class="ops-table-wrap">
               <table class="ops-table">

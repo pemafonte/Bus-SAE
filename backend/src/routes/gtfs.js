@@ -2,6 +2,8 @@ const express = require("express");
 const AdmZip = require("adm-zip");
 const { parse } = require("csv-parse/sync");
 const XLSX = require("xlsx");
+const booleanPointInPolygon = require("@turf/boolean-point-in-polygon").default;
+const { point, polygon, multiPolygon } = require("@turf/helpers");
 const db = require("../db");
 const authMiddleware = require("../middleware/auth");
 const { requireRoles } = require("../middleware/roles");
@@ -200,6 +202,59 @@ function normalizeGeoText(value) {
   return text || null;
 }
 
+function normalizeBoundaryLevel(value) {
+  const text = String(value || "")
+    .trim()
+    .toLowerCase();
+  if (text === "municipality" || text === "concelho") return "municipality";
+  if (text === "parish" || text === "freguesia") return "parish";
+  return null;
+}
+
+function extractBBoxFromCoordinates(coordinates, acc = { minLat: 90, maxLat: -90, minLon: 180, maxLon: -180 }) {
+  if (!Array.isArray(coordinates)) return acc;
+  if (typeof coordinates[0] === "number" && typeof coordinates[1] === "number") {
+    const lon = Number(coordinates[0]);
+    const lat = Number(coordinates[1]);
+    if (Number.isFinite(lat) && Number.isFinite(lon)) {
+      acc.minLat = Math.min(acc.minLat, lat);
+      acc.maxLat = Math.max(acc.maxLat, lat);
+      acc.minLon = Math.min(acc.minLon, lon);
+      acc.maxLon = Math.max(acc.maxLon, lon);
+    }
+    return acc;
+  }
+  coordinates.forEach((item) => extractBBoxFromCoordinates(item, acc));
+  return acc;
+}
+
+function normalizeGeoApiMunicipalityPayload(payload) {
+  const feature = payload?.geojson?.type === "Feature" ? payload.geojson : null;
+  if (!feature?.geometry) return null;
+  return {
+    boundaryName: normalizeGeoText(feature?.properties?.Concelho || payload?.nome || payload?.municipio),
+    municipalityName: normalizeGeoText(feature?.properties?.Concelho || payload?.nome || payload?.municipio),
+    geometry: feature.geometry,
+  };
+}
+
+function normalizeGeoApiParishFeatures(payload, municipalityName) {
+  const rows = [];
+  const features = Array.isArray(payload?.geojsons?.freguesias) ? payload.geojsons.freguesias : [];
+  features.forEach((feature) => {
+    const geometry = feature?.geometry || null;
+    if (!geometry) return;
+    const boundaryName = normalizeGeoText(feature?.properties?.Freguesia || feature?.properties?.nome || feature?.name);
+    if (!boundaryName) return;
+    rows.push({
+      boundaryName,
+      municipalityName: normalizeGeoText(feature?.properties?.Concelho || municipalityName),
+      geometry,
+    });
+  });
+  return rows;
+}
+
 async function reverseGeocodeStop(lat, lon) {
   const url = new URL("https://nominatim.openstreetmap.org/reverse");
   url.searchParams.set("lat", String(lat));
@@ -207,6 +262,7 @@ async function reverseGeocodeStop(lat, lon) {
   url.searchParams.set("format", "jsonv2");
   url.searchParams.set("addressdetails", "1");
   url.searchParams.set("accept-language", "pt-PT,pt");
+  url.searchParams.set("zoom", "18");
   const response = await fetch(url.toString(), {
     headers: {
       "User-Agent": "Bus-SAE-GTFS/1.0 (reverse-geocode-stops)",
@@ -219,9 +275,16 @@ async function reverseGeocodeStop(lat, lon) {
     address.municipality || address.city || address.town || address.county || address.state_district
   );
   const parish = normalizeGeoText(
-    address.city_district || address.suburb || address.village || address.hamlet || address.quarter || address.neighbourhood
+    address.city_district ||
+      address.borough ||
+      address.suburb ||
+      address.village ||
+      address.hamlet ||
+      address.quarter ||
+      address.neighbourhood
   );
-  return { municipality, parish };
+  const normalizedParish = parish && municipality && parish.toLowerCase() === municipality.toLowerCase() ? null : parish;
+  return { municipality, parish: normalizedParish };
 }
 
 function classifyServiceDayType(serviceCode, calendar) {
@@ -643,6 +706,22 @@ async function ensureGtfsMultiFeedInfra() {
       FOREIGN KEY (feed_key) REFERENCES gtfs_feeds(feed_key) ON DELETE CASCADE
     )`
   );
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS gtfs_admin_boundaries (
+      id BIGSERIAL PRIMARY KEY,
+      level VARCHAR(20) NOT NULL,
+      boundary_name VARCHAR(160) NOT NULL,
+      municipality_name VARCHAR(160),
+      geometry_type VARCHAR(20) NOT NULL,
+      geometry_json JSONB NOT NULL,
+      min_lat DOUBLE PRECISION,
+      max_lat DOUBLE PRECISION,
+      min_lon DOUBLE PRECISION,
+      max_lon DOUBLE PRECISION,
+      source_tag VARCHAR(160),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
 }
 
 async function ensureGtfsEditorIndexes() {
@@ -674,6 +753,10 @@ async function ensureGtfsEditorIndexes() {
   await db.query(
     `CREATE INDEX IF NOT EXISTS idx_gtfs_calendar_dates_feed_service
      ON gtfs_calendar_dates(feed_key, service_id, calendar_date)`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_gtfs_admin_boundaries_level_bbox
+     ON gtfs_admin_boundaries(level, min_lat, max_lat, min_lon, max_lon)`
   );
 }
 
@@ -1376,30 +1459,37 @@ router.get("/editor/stops/by-municipality", async (req, res) => {
 router.post("/editor/stops/reverse-geocode", async (req, res) => {
   const feedKey = normalizeFeedKey(req.body?.feedKey || req.query?.feedKey || "");
   const maxStops = Math.max(1, Math.min(500, toInt(req.body?.maxStops || req.query?.maxStops) || 150));
+  const forceRefresh = req.body?.forceRefresh === true || String(req.query?.forceRefresh || "").toLowerCase() === "true";
   try {
     await ensureGtfsEditorIndexes();
     const beforeCountRes = await db.query(
       `SELECT COUNT(*)::int AS total
        FROM gtfs_stops
        WHERE ($1::text = '' OR feed_key = $1)
-         AND (NULLIF(TRIM(COALESCE(municipality, '')), '') IS NULL
-           OR NULLIF(TRIM(COALESCE(parish, '')), '') IS NULL)
+         AND (
+           $2::boolean = TRUE
+           OR NULLIF(TRIM(COALESCE(municipality, '')), '') IS NULL
+           OR NULLIF(TRIM(COALESCE(parish, '')), '') IS NULL
+         )
          AND stop_lat IS NOT NULL
          AND stop_lon IS NOT NULL`,
-      [feedKey]
+      [feedKey, forceRefresh]
     );
     const remainingBefore = Number(beforeCountRes.rows?.[0]?.total || 0);
     const pendingRes = await db.query(
       `SELECT stop_id, stop_lat, stop_lon
        FROM gtfs_stops
        WHERE ($1::text = '' OR feed_key = $1)
-         AND (NULLIF(TRIM(COALESCE(municipality, '')), '') IS NULL
-           OR NULLIF(TRIM(COALESCE(parish, '')), '') IS NULL)
+         AND (
+           $3::boolean = TRUE
+           OR NULLIF(TRIM(COALESCE(municipality, '')), '') IS NULL
+           OR NULLIF(TRIM(COALESCE(parish, '')), '') IS NULL
+         )
          AND stop_lat IS NOT NULL
          AND stop_lon IS NOT NULL
        ORDER BY stop_id ASC
        LIMIT $2`,
-      [feedKey, maxStops]
+      [feedKey, maxStops, forceRefresh]
     );
     const rows = pendingRes.rows || [];
     let updated = 0;
@@ -1414,13 +1504,23 @@ router.post("/editor/stops/reverse-geocode", async (req, res) => {
         await sleep(1200);
         continue;
       }
-      const upd = await db.query(
-        `UPDATE gtfs_stops
-         SET municipality = COALESCE($2, municipality),
-             parish = COALESCE($3, parish)
-         WHERE stop_id = $1`,
-        [row.stop_id, geo.municipality, geo.parish]
-      );
+      const upd = forceRefresh
+        ? await db.query(
+            `UPDATE gtfs_stops
+             SET municipality = COALESCE($2, municipality),
+                 parish = COALESCE($3, parish)
+             WHERE stop_id = $1`,
+            [row.stop_id, geo.municipality, geo.parish]
+          )
+        : await db.query(
+            `UPDATE gtfs_stops
+             SET municipality = COALESCE($2, municipality),
+                 parish = COALESCE($3, parish)
+             WHERE stop_id = $1
+               AND (NULLIF(TRIM(COALESCE(municipality, '')), '') IS NULL
+                 OR NULLIF(TRIM(COALESCE(parish, '')), '') IS NULL)`,
+            [row.stop_id, geo.municipality, geo.parish]
+          );
       if (upd.rowCount) updated += 1;
       await sleep(1200);
     }
@@ -1428,11 +1528,14 @@ router.post("/editor/stops/reverse-geocode", async (req, res) => {
       `SELECT COUNT(*)::int AS total
        FROM gtfs_stops
        WHERE ($1::text = '' OR feed_key = $1)
-         AND (NULLIF(TRIM(COALESCE(municipality, '')), '') IS NULL
-           OR NULLIF(TRIM(COALESCE(parish, '')), '') IS NULL)
+         AND (
+           $2::boolean = TRUE
+           OR NULLIF(TRIM(COALESCE(municipality, '')), '') IS NULL
+           OR NULLIF(TRIM(COALESCE(parish, '')), '') IS NULL
+         )
          AND stop_lat IS NOT NULL
          AND stop_lon IS NOT NULL`,
-      [feedKey]
+      [feedKey, forceRefresh]
     );
     const remainingAfter = Number(afterCountRes.rows?.[0]?.total || 0);
     return res.json({
@@ -1440,11 +1543,277 @@ router.post("/editor/stops/reverse-geocode", async (req, res) => {
       feedKey: feedKey || "ativo",
       attempted,
       updated,
+      forceRefresh,
       remainingBefore,
       remainingAfter,
     });
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao geocodificar paragens por coordenadas." });
+  }
+});
+
+router.post("/editor/admin-boundaries/import-geojson", async (req, res) => {
+  const level = normalizeBoundaryLevel(req.body?.level);
+  const sourceTag = String(req.body?.sourceTag || "manual").trim() || "manual";
+  const geojsonBase64 = String(req.body?.geojsonBase64 || "").trim();
+  if (!level) return res.status(400).json({ message: "Nível inválido. Use municipality ou parish." });
+  if (!geojsonBase64) return res.status(400).json({ message: "Envie geojsonBase64." });
+  let parsed;
+  try {
+    const raw = Buffer.from(geojsonBase64, "base64").toString("utf8");
+    parsed = JSON.parse(raw);
+  } catch (_error) {
+    return res.status(400).json({ message: "GeoJSON inválido." });
+  }
+  const features = Array.isArray(parsed?.features)
+    ? parsed.features
+    : parsed?.type === "Feature"
+      ? [parsed]
+      : [];
+  if (!features.length) return res.status(400).json({ message: "GeoJSON sem features." });
+  const client = await db.pool.connect();
+  try {
+    await ensureGtfsEditorIndexes();
+    await client.query("BEGIN");
+    await client.query(`DELETE FROM gtfs_admin_boundaries WHERE level = $1`, [level]);
+    let inserted = 0;
+    for (const feature of features) {
+      const geometry = feature?.geometry || null;
+      const props = feature?.properties || {};
+      const geometryType = String(geometry?.type || "");
+      if (!["Polygon", "MultiPolygon"].includes(geometryType)) continue;
+      const boundaryName =
+        normalizeGeoText(
+          props.name ||
+            props.NOME ||
+            props.nome ||
+            props.municipality ||
+            props.concelho ||
+            props.parish ||
+            props.freguesia
+        ) || null;
+      if (!boundaryName) continue;
+      const municipalityName =
+        level === "parish"
+          ? normalizeGeoText(props.municipality || props.concelho || props.MUNICIPIO || props.Municipio)
+          : boundaryName;
+      const bbox = extractBBoxFromCoordinates(geometry.coordinates);
+      if (!Number.isFinite(bbox.minLat) || !Number.isFinite(bbox.minLon)) continue;
+      await client.query(
+        `INSERT INTO gtfs_admin_boundaries (
+           level, boundary_name, municipality_name, geometry_type, geometry_json,
+           min_lat, max_lat, min_lon, max_lon, source_tag, updated_at
+         ) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,$10,NOW())`,
+        [
+          level,
+          boundaryName,
+          municipalityName || null,
+          geometryType,
+          JSON.stringify(geometry),
+          bbox.minLat,
+          bbox.maxLat,
+          bbox.minLon,
+          bbox.maxLon,
+          sourceTag,
+        ]
+      );
+      inserted += 1;
+    }
+    await client.query("COMMIT");
+    return res.json({ message: "Limites administrativos importados.", level, inserted });
+  } catch (_error) {
+    await client.query("ROLLBACK").catch(() => {});
+    return res.status(500).json({ message: "Erro ao importar limites administrativos." });
+  } finally {
+    client.release();
+  }
+});
+
+router.post("/editor/admin-boundaries/import-geoapi-pt", async (_req, res) => {
+  const client = await db.pool.connect();
+  try {
+    await ensureGtfsEditorIndexes();
+    const municipalitiesRes = await fetch("https://json.geoapi.pt/municipios");
+    if (!municipalitiesRes.ok) {
+      return res.status(502).json({ message: "Falha ao obter lista de municípios no geoapi.pt." });
+    }
+    const municipalities = await municipalitiesRes.json().catch(() => []);
+    if (!Array.isArray(municipalities) || !municipalities.length) {
+      return res.status(502).json({ message: "Resposta inválida da lista de municípios no geoapi.pt." });
+    }
+    const municipalityRows = [];
+    const parishRows = [];
+    for (const municipalityNameRaw of municipalities) {
+      const municipalityName = String(municipalityNameRaw || "").trim();
+      if (!municipalityName) continue;
+      const detailRes = await fetch(`https://json.geoapi.pt/municipio/${encodeURIComponent(municipalityName)}`);
+      if (detailRes.ok) {
+        const detailPayload = await detailRes.json().catch(() => ({}));
+        const municipalityFeature = normalizeGeoApiMunicipalityPayload(detailPayload);
+        if (municipalityFeature?.boundaryName && municipalityFeature?.geometry) {
+          municipalityRows.push(municipalityFeature);
+        }
+      }
+      const parishesRes = await fetch(`https://json.geoapi.pt/municipio/${encodeURIComponent(municipalityName)}/freguesias`);
+      if (parishesRes.ok) {
+        const parishesPayload = await parishesRes.json().catch(() => ({}));
+        const normalizedParishes = normalizeGeoApiParishFeatures(parishesPayload, municipalityName);
+        parishRows.push(...normalizedParishes);
+      }
+    }
+    if (!municipalityRows.length) {
+      return res.status(502).json({ message: "Não foi possível obter geometrias de municípios no geoapi.pt." });
+    }
+    await client.query("BEGIN");
+    await client.query(`DELETE FROM gtfs_admin_boundaries WHERE level IN ('municipality','parish')`);
+    let insertedMunicipalities = 0;
+    let insertedParishes = 0;
+    for (const row of municipalityRows) {
+      const geometryType = String(row.geometry?.type || "");
+      if (!["Polygon", "MultiPolygon"].includes(geometryType)) continue;
+      const bbox = extractBBoxFromCoordinates(row.geometry.coordinates);
+      if (!Number.isFinite(bbox.minLat) || !Number.isFinite(bbox.minLon)) continue;
+      await client.query(
+        `INSERT INTO gtfs_admin_boundaries (
+           level, boundary_name, municipality_name, geometry_type, geometry_json,
+           min_lat, max_lat, min_lon, max_lon, source_tag, updated_at
+         ) VALUES ('municipality',$1,$2,$3,$4::jsonb,$5,$6,$7,$8,'geoapi.pt',NOW())`,
+        [
+          row.boundaryName,
+          row.municipalityName || row.boundaryName,
+          geometryType,
+          JSON.stringify(row.geometry),
+          bbox.minLat,
+          bbox.maxLat,
+          bbox.minLon,
+          bbox.maxLon,
+        ]
+      );
+      insertedMunicipalities += 1;
+    }
+    for (const row of parishRows) {
+      const geometryType = String(row.geometry?.type || "");
+      if (!["Polygon", "MultiPolygon"].includes(geometryType)) continue;
+      const bbox = extractBBoxFromCoordinates(row.geometry.coordinates);
+      if (!Number.isFinite(bbox.minLat) || !Number.isFinite(bbox.minLon)) continue;
+      await client.query(
+        `INSERT INTO gtfs_admin_boundaries (
+           level, boundary_name, municipality_name, geometry_type, geometry_json,
+           min_lat, max_lat, min_lon, max_lon, source_tag, updated_at
+         ) VALUES ('parish',$1,$2,$3,$4::jsonb,$5,$6,$7,$8,'geoapi.pt',NOW())`,
+        [
+          row.boundaryName,
+          row.municipalityName || null,
+          geometryType,
+          JSON.stringify(row.geometry),
+          bbox.minLat,
+          bbox.maxLat,
+          bbox.minLon,
+          bbox.maxLon,
+        ]
+      );
+      insertedParishes += 1;
+    }
+    await client.query("COMMIT");
+    return res.json({
+      message: "Limites administrativos importados automaticamente do geoapi.pt.",
+      municipalities: insertedMunicipalities,
+      parishes: insertedParishes,
+    });
+  } catch (_error) {
+    await client.query("ROLLBACK").catch(() => {});
+    return res.status(500).json({ message: "Erro ao importar limites automáticos do geoapi.pt." });
+  } finally {
+    client.release();
+  }
+});
+
+router.post("/editor/stops/assign-admin-boundaries", async (req, res) => {
+  const feedKey = normalizeFeedKey(req.body?.feedKey || req.query?.feedKey || "");
+  const maxStops = Math.max(1, Math.min(20000, toInt(req.body?.maxStops || req.query?.maxStops) || 6000));
+  const forceRefresh = req.body?.forceRefresh === true || String(req.query?.forceRefresh || "").toLowerCase() === "true";
+  try {
+    await ensureGtfsEditorIndexes();
+    const [municipalityRes, parishRes] = await Promise.all([
+      db.query(`SELECT * FROM gtfs_admin_boundaries WHERE level = 'municipality'`),
+      db.query(`SELECT * FROM gtfs_admin_boundaries WHERE level = 'parish'`),
+    ]);
+    const municipalities = municipalityRes.rows || [];
+    const parishes = parishRes.rows || [];
+    if (!municipalities.length) {
+      return res.status(400).json({ message: "Sem limites de concelho importados. Importe primeiro o GeoJSON de municípios." });
+    }
+    const stopsRes = await db.query(
+      `SELECT stop_id, stop_lat, stop_lon, municipality, parish
+       FROM gtfs_stops
+       WHERE ($1::text = '' OR feed_key = $1)
+         AND stop_lat IS NOT NULL
+         AND stop_lon IS NOT NULL
+         AND ($2::boolean = TRUE
+           OR NULLIF(TRIM(COALESCE(municipality, '')), '') IS NULL
+           OR NULLIF(TRIM(COALESCE(parish, '')), '') IS NULL)
+       ORDER BY stop_id ASC
+       LIMIT $3`,
+      [feedKey, forceRefresh, maxStops]
+    );
+    let updated = 0;
+    for (const stop of stopsRes.rows || []) {
+      const lat = Number(stop.stop_lat);
+      const lon = Number(stop.stop_lon);
+      if (!Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+      const pt = point([lon, lat]);
+      const municipalityHit = municipalities.find((row) => {
+        if (
+          lat < Number(row.min_lat) ||
+          lat > Number(row.max_lat) ||
+          lon < Number(row.min_lon) ||
+          lon > Number(row.max_lon)
+        ) {
+          return false;
+        }
+        const geom = row.geometry_json || {};
+        if (row.geometry_type === "Polygon") return booleanPointInPolygon(pt, polygon(geom.coordinates));
+        if (row.geometry_type === "MultiPolygon") return booleanPointInPolygon(pt, multiPolygon(geom.coordinates));
+        return false;
+      });
+      const parishHit = parishes.find((row) => {
+        if (municipalityHit && row.municipality_name && municipalityHit.boundary_name) {
+          if (String(row.municipality_name).toLowerCase() !== String(municipalityHit.boundary_name).toLowerCase()) return false;
+        }
+        if (
+          lat < Number(row.min_lat) ||
+          lat > Number(row.max_lat) ||
+          lon < Number(row.min_lon) ||
+          lon > Number(row.max_lon)
+        ) {
+          return false;
+        }
+        const geom = row.geometry_json || {};
+        if (row.geometry_type === "Polygon") return booleanPointInPolygon(pt, polygon(geom.coordinates));
+        if (row.geometry_type === "MultiPolygon") return booleanPointInPolygon(pt, multiPolygon(geom.coordinates));
+        return false;
+      });
+      const municipality = municipalityHit?.boundary_name || null;
+      const parish = parishHit?.boundary_name || null;
+      if (!municipality && !parish) continue;
+      const result = await db.query(
+        `UPDATE gtfs_stops
+         SET municipality = COALESCE($2, municipality),
+             parish = COALESCE($3, parish)
+         WHERE stop_id = $1`,
+        [stop.stop_id, municipality, parish]
+      );
+      if (result.rowCount) updated += 1;
+    }
+    return res.json({
+      message: "Atribuição administrativa concluída por polígonos.",
+      feedKey: feedKey || "ativo",
+      processed: (stopsRes.rows || []).length,
+      updated,
+      boundaries: { municipalities: municipalities.length, parishes: parishes.length },
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao atribuir concelho/freguesia por polígonos." });
   }
 });
 

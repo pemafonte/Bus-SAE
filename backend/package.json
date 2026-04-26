@@ -9,6 +9,8 @@
     "db:apply": "node scripts/apply-schema.js"
   },
   "dependencies": {
+    "@turf/boolean-point-in-polygon": "^7.3.5",
+    "@turf/helpers": "^7.3.5",
     "adm-zip": "^0.5.16",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",
