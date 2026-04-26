@@ -563,6 +563,8 @@ async function ensureGtfsMultiFeedInfra() {
   await db.query(`ALTER TABLE gtfs_trips ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default'`);
   await db.query(`ALTER TABLE gtfs_shapes ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default'`);
   await db.query(`ALTER TABLE gtfs_stops ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default'`);
+  await db.query(`ALTER TABLE gtfs_stops ADD COLUMN IF NOT EXISTS municipality VARCHAR(120)`);
+  await db.query(`ALTER TABLE gtfs_stops ADD COLUMN IF NOT EXISTS parish VARCHAR(120)`);
   await db.query(`ALTER TABLE gtfs_stop_times ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default'`);
   await db.query(
     `INSERT INTO gtfs_feeds (feed_key, feed_name, is_active, source_filename, last_imported_at)
@@ -762,16 +764,20 @@ router.post("/import", async (req, res) => {
       const stopId = scopedId(feedKey, row.stop_id);
       const lat = toFloat(row.stop_lat);
       const lon = toFloat(row.stop_lon);
+      const municipality = String(row.municipality || row.concelho || "").trim() || null;
+      const parish = String(row.parish || row.freguesia || "").trim() || null;
       if (!stopId || lat == null || lon == null) continue;
       await db.query(
-        `INSERT INTO gtfs_stops (stop_id, feed_key, stop_name, stop_lat, stop_lon)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO gtfs_stops (stop_id, feed_key, stop_name, stop_lat, stop_lon, municipality, parish)
+         VALUES ($1, $2, $3, $4, $5, $6, $7)
          ON CONFLICT (stop_id) DO UPDATE
          SET feed_key = EXCLUDED.feed_key,
              stop_name = EXCLUDED.stop_name,
              stop_lat = EXCLUDED.stop_lat,
-             stop_lon = EXCLUDED.stop_lon`,
-        [stopId, feedKey, row.stop_name || null, lat, lon]
+             stop_lon = EXCLUDED.stop_lon,
+             municipality = EXCLUDED.municipality,
+             parish = EXCLUDED.parish`,
+        [stopId, feedKey, row.stop_name || null, lat, lon, municipality, parish]
       );
       insertedStops += 1;
     }
@@ -1237,7 +1243,9 @@ router.get("/editor/stops", async (req, res) => {
          s.feed_key,
          COALESCE(s.stop_name, '') AS stop_name,
          s.stop_lat,
-         s.stop_lon
+         s.stop_lon,
+         COALESCE(s.municipality, '') AS municipality,
+         COALESCE(s.parish, '') AS parish
        FROM gtfs_stops s
        JOIN gtfs_feeds gf ON gf.feed_key = s.feed_key
        WHERE ($1::text = '' OR s.feed_key = $1)
@@ -1270,6 +1278,194 @@ router.patch("/editor/stops/:stopId", async (req, res) => {
     return res.json({ message: "Nome da paragem atualizado.", stop: result.rows[0] });
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao atualizar nome da paragem." });
+  }
+});
+
+router.get("/editor/stops/by-municipality", async (req, res) => {
+  try {
+    await ensureGtfsEditorIndexes();
+    const feedKey = normalizeFeedKey(req.query.feedKey || "");
+    const includeInactive = String(req.query.includeInactive || "").toLowerCase() === "true";
+    const result = await db.query(
+      `SELECT
+         s.stop_id,
+         s.feed_key,
+         COALESCE(s.stop_name, '') AS stop_name,
+         s.stop_lat,
+         s.stop_lon,
+         COALESCE(NULLIF(TRIM(s.municipality), ''), 'Sem concelho') AS municipality,
+         COALESCE(NULLIF(TRIM(s.parish), ''), 'Sem freguesia') AS parish
+       FROM gtfs_stops s
+       JOIN gtfs_feeds gf ON gf.feed_key = s.feed_key
+       WHERE ($1::text = '' OR s.feed_key = $1)
+         AND ($2::boolean = TRUE OR gf.is_active = TRUE)
+       ORDER BY municipality ASC, parish ASC, NULLIF(TRIM(s.stop_name), '') ASC NULLS LAST, s.stop_id ASC`,
+      [feedKey, includeInactive]
+    );
+    const byMunicipality = new Map();
+    result.rows.forEach((row) => {
+      const municipality = String(row.municipality || "Sem concelho");
+      const parish = String(row.parish || "Sem freguesia");
+      if (!byMunicipality.has(municipality)) byMunicipality.set(municipality, new Map());
+      const byParish = byMunicipality.get(municipality);
+      if (!byParish.has(parish)) byParish.set(parish, []);
+      byParish.get(parish).push({
+        stop_id: row.stop_id,
+        stop_name: row.stop_name,
+        stop_lat: row.stop_lat,
+        stop_lon: row.stop_lon,
+        feed_key: row.feed_key,
+      });
+    });
+    const data = Array.from(byMunicipality.entries())
+      .map(([municipality, parishMap]) => ({
+        municipality,
+        total_stops: Array.from(parishMap.values()).reduce((acc, list) => acc + list.length, 0),
+        parishes: Array.from(parishMap.entries()).map(([parish, stops]) => ({
+          parish,
+          total_stops: stops.length,
+          stops,
+        })),
+      }))
+      .sort((a, b) => a.municipality.localeCompare(b.municipality, "pt-PT"));
+    return res.json({ municipalities: data, totalStops: result.rows.length });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar paragens por concelho/freguesia." });
+  }
+});
+
+router.post("/editor/line-builder", async (req, res) => {
+  const feedKeyInput = normalizeFeedKey(req.body?.feedKey || "default");
+  const routeShortName = String(req.body?.routeShortName || "").trim();
+  const routeLongName = String(req.body?.routeLongName || "").trim();
+  const tripHeadsign = String(req.body?.tripHeadsign || "").trim();
+  const serviceIdRaw = String(req.body?.serviceId || "").trim();
+  const startDate = parseIsoDateInput(req.body?.startDate);
+  const endDate = parseIsoDateInput(req.body?.endDate);
+  const directionId = toInt(req.body?.directionId);
+  const days = {
+    monday: toInt(req.body?.days?.monday) || 0,
+    tuesday: toInt(req.body?.days?.tuesday) || 0,
+    wednesday: toInt(req.body?.days?.wednesday) || 0,
+    thursday: toInt(req.body?.days?.thursday) || 0,
+    friday: toInt(req.body?.days?.friday) || 0,
+    saturday: toInt(req.body?.days?.saturday) || 0,
+    sunday: toInt(req.body?.days?.sunday) || 0,
+  };
+  const stopItems = Array.isArray(req.body?.stops) ? req.body.stops : [];
+  if (!feedKeyInput || !routeShortName || !serviceIdRaw || !startDate || !endDate) {
+    return res.status(400).json({ message: "Indique feed, linha, serviceId, startDate e endDate." });
+  }
+  if (endDate < startDate) {
+    return res.status(400).json({ message: "A data final do calendário não pode ser anterior à data inicial." });
+  }
+  if (stopItems.length < 2) {
+    return res.status(400).json({ message: "Indique pelo menos 2 paragens para a nova linha." });
+  }
+  if (Object.values(days).every((v) => Number(v) !== 1)) {
+    return res.status(400).json({ message: "Selecione pelo menos um dia da semana para o calendário." });
+  }
+  const client = await db.pool.connect();
+  try {
+    await ensureGtfsEditorIndexes();
+    await client.query("BEGIN");
+    const feedRes = await client.query(`SELECT feed_key FROM gtfs_feeds WHERE feed_key = $1 LIMIT 1`, [feedKeyInput]);
+    if (!feedRes.rowCount) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Feed GTFS não encontrado para criar linha." });
+    }
+    const routeId = scopedId(feedKeyInput, `route_${routeShortName.toLowerCase().replace(/\s+/g, "_")}_${Date.now()}`);
+    const tripId = scopedId(feedKeyInput, `trip_${routeShortName.toLowerCase().replace(/\s+/g, "_")}_${Date.now()}`);
+    const shapeId = scopedId(feedKeyInput, `shape_${routeShortName.toLowerCase().replace(/\s+/g, "_")}_${Date.now()}`);
+    const serviceId = scopedId(feedKeyInput, serviceIdRaw);
+    await client.query(
+      `INSERT INTO gtfs_routes (route_id, feed_key, route_short_name, route_long_name)
+       VALUES ($1, $2, $3, $4)`,
+      [routeId, feedKeyInput, routeShortName, routeLongName || null]
+    );
+    await client.query(
+      `INSERT INTO gtfs_calendars (
+         feed_key, service_id, monday, tuesday, wednesday, thursday, friday, saturday, sunday, start_date, end_date, is_active, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, TRUE, NOW())
+       ON CONFLICT (feed_key, service_id) DO UPDATE SET
+         monday = EXCLUDED.monday,
+         tuesday = EXCLUDED.tuesday,
+         wednesday = EXCLUDED.wednesday,
+         thursday = EXCLUDED.thursday,
+         friday = EXCLUDED.friday,
+         saturday = EXCLUDED.saturday,
+         sunday = EXCLUDED.sunday,
+         start_date = EXCLUDED.start_date,
+         end_date = EXCLUDED.end_date,
+         is_active = TRUE,
+         updated_at = NOW()`,
+      [
+        feedKeyInput,
+        serviceId,
+        days.monday,
+        days.tuesday,
+        days.wednesday,
+        days.thursday,
+        days.friday,
+        days.saturday,
+        days.sunday,
+        startDate,
+        endDate,
+      ]
+    );
+    await client.query(
+      `INSERT INTO gtfs_trips (trip_id, feed_key, route_id, service_id, trip_headsign, direction_id, shape_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [tripId, feedKeyInput, routeId, serviceId, tripHeadsign || null, directionId ?? 0, shapeId]
+    );
+    let seq = 1;
+    for (const stopItem of stopItems) {
+      const existingStopIdRaw = String(stopItem?.stopId || "").trim();
+      let stopId = existingStopIdRaw ? scopedId(feedKeyInput, stripFeedPrefix(existingStopIdRaw, feedKeyInput)) : null;
+      if (stopId) {
+        const stopExistsRes = await client.query(`SELECT stop_id FROM gtfs_stops WHERE stop_id = $1 LIMIT 1`, [stopId]);
+        if (!stopExistsRes.rowCount) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ message: `Paragem não encontrada: ${existingStopIdRaw}` });
+        }
+      } else {
+        const stopName = String(stopItem?.stopName || "").trim();
+        const stopLat = toFloat(stopItem?.stopLat);
+        const stopLon = toFloat(stopItem?.stopLon);
+        const municipality = String(stopItem?.municipality || "").trim() || null;
+        const parish = String(stopItem?.parish || "").trim() || null;
+        if (!stopName || stopLat == null || stopLon == null) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ message: `Paragem ${seq}: indique stopName, stopLat e stopLon.` });
+        }
+        stopId = scopedId(feedKeyInput, `custom_${Date.now()}_${seq}`);
+        await client.query(
+          `INSERT INTO gtfs_stops (stop_id, feed_key, stop_name, stop_lat, stop_lon, municipality, parish)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [stopId, feedKeyInput, stopName, stopLat, stopLon, municipality, parish]
+        );
+      }
+      const arrivalTime = String(stopItem?.arrivalTime || "").trim() || null;
+      const departureTime = String(stopItem?.departureTime || "").trim() || null;
+      await client.query(
+        `INSERT INTO gtfs_stop_times (feed_key, trip_id, arrival_time, departure_time, stop_id, stop_sequence)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [feedKeyInput, tripId, arrivalTime, departureTime, stopId, seq]
+      );
+      seq += 1;
+    }
+    await client.query("COMMIT");
+    return res.json({
+      message: "Nova linha GTFS criada com calendário e paragens.",
+      route: { route_id: routeId, route_short_name: routeShortName, route_long_name: routeLongName || null },
+      trip: { trip_id: tripId, service_id: serviceId },
+      stopsCreatedOrLinked: stopItems.length,
+    });
+  } catch (_error) {
+    await client.query("ROLLBACK").catch(() => {});
+    return res.status(500).json({ message: "Erro ao criar nova linha GTFS." });
+  } finally {
+    client.release();
   }
 });
 

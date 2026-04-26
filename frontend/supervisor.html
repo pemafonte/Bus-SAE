@@ -46,7 +46,7 @@
             <button type="button" class="tab-btn" data-module="administracao" data-tab-target="tabCriarMotorista">Criar motorista</button>
             <button type="button" class="tab-btn" data-module="administracao" data-tab-target="tabCriarAcesso">Criar acesso</button>
             <button type="button" class="tab-btn" data-module="dados" data-tab-target="tabImportarMotoristas">Importar dados</button>
-            <button type="button" class="tab-btn" data-module="dados" data-tab-target="tabEditorGtfs">Editor GTFS</button>
+            <button type="button" class="tab-btn" data-module="dados" data-tab-target="tabEditorGtfs">Editor GTFS+</button>
             <button type="button" class="tab-btn" data-module="dados" data-tab-target="tabAnaliseGtfs">Análise GTFS</button>
             <button type="button" class="tab-btn" data-module="dados" data-tab-target="tabExportarMotoristas">Exportar dados</button>
             <button type="button" class="tab-btn" data-module="administracao" data-tab-target="tabListaMotoristas">Lista de motoristas</button>
@@ -314,10 +314,10 @@
         </div>
 
         <div id="tabEditorGtfs" class="tab-panel">
-          <h2>Editor GTFS (linhas e paragens)</h2>
+          <h2>Editor GTFS (linhas, paragens e calendários)</h2>
           <p class="field-help field-help-tight">
-            Selecione uma linha, depois uma trip, e ajuste as paragens dessa viagem GTFS. As alterações afetam o cálculo de
-            próxima paragem e análises GTFS.
+            Selecione linha/trip para editar paragens existentes, ou crie uma nova linha com calendário e paragens. As
+            alterações afetam o cálculo de próxima paragem e análises GTFS.
           </p>
           <section class="card">
             <h3>Seleção de linha e trip</h3>
@@ -358,6 +358,48 @@
             </div>
             <button type="button" id="refreshGtfsCalendarsBtn">Atualizar calendários</button>
             <div id="gtfsCalendarsList" class="service-cards"></div>
+          </section>
+          <section class="card card-top-gap">
+            <h3>Criar nova linha (paragens + calendário)</h3>
+            <p class="field-help field-help-tight">
+              Cria rota, trip e calendário GTFS num único passo. Pode usar paragens existentes ou criar novas.
+            </p>
+            <form id="gtfsLineBuilderForm">
+              <label for="gtfsLineBuilderRouteShortName">Código da linha (route_short_name)</label>
+              <input id="gtfsLineBuilderRouteShortName" type="text" placeholder="Ex.: 401" required />
+              <label for="gtfsLineBuilderRouteLongName">Nome da linha (route_long_name)</label>
+              <input id="gtfsLineBuilderRouteLongName" type="text" placeholder="Ex.: Centro -> Terminal Norte" />
+              <label for="gtfsLineBuilderTripHeadsign">Headsign da trip</label>
+              <input id="gtfsLineBuilderTripHeadsign" type="text" placeholder="Ex.: Terminal Norte" />
+              <label for="gtfsLineBuilderDirectionId">Direção</label>
+              <select id="gtfsLineBuilderDirectionId">
+                <option value="0">0</option>
+                <option value="1">1</option>
+              </select>
+              <label for="gtfsLineBuilderServiceId">Service ID (calendário)</label>
+              <input id="gtfsLineBuilderServiceId" type="text" placeholder="Ex.: A-U-NOVA" required />
+              <label for="gtfsLineBuilderStartDate">Início calendário</label>
+              <input id="gtfsLineBuilderStartDate" type="date" required />
+              <label for="gtfsLineBuilderEndDate">Fim calendário</label>
+              <input id="gtfsLineBuilderEndDate" type="date" required />
+              <div class="gtfs-line-builder-days">
+                <label class="inline-checkbox"><input id="gtfsDayMonday" type="checkbox" checked />2ª</label>
+                <label class="inline-checkbox"><input id="gtfsDayTuesday" type="checkbox" checked />3ª</label>
+                <label class="inline-checkbox"><input id="gtfsDayWednesday" type="checkbox" checked />4ª</label>
+                <label class="inline-checkbox"><input id="gtfsDayThursday" type="checkbox" checked />5ª</label>
+                <label class="inline-checkbox"><input id="gtfsDayFriday" type="checkbox" checked />6ª</label>
+                <label class="inline-checkbox"><input id="gtfsDaySaturday" type="checkbox" />Sáb</label>
+                <label class="inline-checkbox"><input id="gtfsDaySunday" type="checkbox" />Dom</label>
+              </div>
+              <div class="service-card-actions">
+                <button type="button" id="gtfsLineBuilderAddStopBtn">Adicionar paragem à nova linha</button>
+              </div>
+              <div id="gtfsLineBuilderStopsList" class="service-cards">
+                <div>Sem paragens configuradas.</div>
+              </div>
+              <button type="submit">Criar linha GTFS</button>
+            </form>
+            <pre id="gtfsLineBuilderSummary">Sem criação de linha executada.</pre>
           </section>
           <section class="card card-top-gap">
             <h3>Adicionar paragem à trip</h3>
@@ -412,6 +454,16 @@
           <p class="field-help field-help-tight">
             Explore os feeds GTFS carregados, selecione uma linha e veja serviços por tipo de dia e estimativas de quilometragem mensal, semestral e anual.
           </p>
+          <section class="card">
+            <h3>Paragens por concelho e freguesia</h3>
+            <p class="field-help field-help-tight">
+              Lista territorial para inspeção rápida da cobertura das paragens GTFS.
+            </p>
+            <button type="button" id="loadGtfsStopsByAreaBtn">Atualizar paragens por concelho</button>
+            <div id="gtfsStopsByAreaList" class="service-cards">
+              <div>Sem dados carregados.</div>
+            </div>
+          </section>
           <section class="card">
             <h3>Filtros e resumo por linha</h3>
             <label for="gtfsAnalyticsFeedSelect">Feed GTFS</label>

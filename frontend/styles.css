@@ -1134,6 +1134,78 @@ pre {
   max-width: 150px;
 }
 
+.gtfs-area-parishes {
+  display: grid;
+  gap: 6px;
+}
+
+.gtfs-area-parish {
+  border: 1px solid #d1d5db;
+  border-radius: 6px;
+  padding: 6px 8px;
+  background: #f8fafc;
+}
+
+.gtfs-area-parish summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.gtfs-area-parish ul {
+  margin: 6px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 4px;
+}
+
+.gtfs-area-list {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  display: grid;
+  gap: 8px;
+}
+
+.gtfs-area-list__municipality {
+  border: 1px solid #d1d5db;
+  border-radius: 8px;
+  background: #f8fafc;
+  padding: 8px 10px;
+}
+
+.gtfs-area-list__municipality-details summary {
+  cursor: pointer;
+}
+
+.gtfs-area-list__parishes {
+  margin: 8px 0 0;
+  padding-left: 16px;
+  display: grid;
+  gap: 6px;
+}
+
+.gtfs-area-list__parish-item > strong {
+  color: #111827;
+}
+
+.gtfs-area-list__stops {
+  margin: 4px 0 0;
+  padding-left: 18px;
+  display: grid;
+  gap: 3px;
+}
+
+.gtfs-line-builder-days {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+}
+
+.gtfs-line-builder-stop-row .service-card-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .field-warning {
   grid-column: 1 / -1;
   color: #b45309;

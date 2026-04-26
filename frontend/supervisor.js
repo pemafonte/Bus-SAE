@@ -138,6 +138,9 @@ const gtfsAnalyticsLineSelectEl = document.getElementById("gtfsAnalyticsLineSele
 const gtfsAnalyticsTripSelectEl = document.getElementById("gtfsAnalyticsTripSelect");
 const gtfsLineDetailSummaryEl = document.getElementById("gtfsLineDetailSummary");
 const gtfsAnalyticsMapEl = document.getElementById("gtfsAnalyticsMap");
+const gtfsStopsByAreaListEl = document.getElementById("gtfsStopsByAreaList");
+const gtfsLineBuilderStopsListEl = document.getElementById("gtfsLineBuilderStopsList");
+const gtfsLineBuilderSummaryEl = document.getElementById("gtfsLineBuilderSummary");
 const gtfsRtPreviewReportEl = document.getElementById("gtfsRtPreviewReport");
 const gtfsEffectiveFromEl = document.getElementById("gtfsEffectiveFrom");
 const calendarEffectiveFromEl = document.getElementById("calendarEffectiveFrom");
@@ -1016,10 +1019,15 @@ function openSupervisorTab(tabId) {
     loadGtfsFeeds();
     loadGtfsEditorLines();
     loadGtfsCalendars();
+    if (gtfsLineBuilderStopsListEl && !gtfsLineBuilderStopsListEl.querySelector(".gtfs-line-builder-stop-row")) {
+      addGtfsLineBuilderStopRow();
+      addGtfsLineBuilderStopRow();
+    }
   }
   if (tabId === "tabAnaliseGtfs") {
     loadGtfsFeeds();
     loadGtfsAnalyticsOverview();
+    loadGtfsStopsByArea();
     initGtfsAnalyticsMap();
   }
   if (tabId === "tabImportarMotoristas") {
@@ -2462,6 +2470,83 @@ function renderGtfsLineDetailSummary(text) {
   if (gtfsLineDetailSummaryEl) gtfsLineDetailSummaryEl.textContent = text || "";
 }
 
+function renderGtfsStopsByArea(data) {
+  if (!gtfsStopsByAreaListEl) return;
+  gtfsStopsByAreaListEl.innerHTML = "";
+  const municipalities = Array.isArray(data?.municipalities) ? data.municipalities : [];
+  if (!municipalities.length) {
+    gtfsStopsByAreaListEl.innerHTML = "<div>Sem paragens organizadas por concelho/freguesia.</div>";
+    return;
+  }
+  const municipalityList = document.createElement("ul");
+  municipalityList.className = "gtfs-area-list";
+  municipalities.forEach((m) => {
+    const municipalityItem = document.createElement("li");
+    municipalityItem.className = "gtfs-area-list__municipality";
+    const parishesHtml = (Array.isArray(m.parishes) ? m.parishes : [])
+      .map((p) => {
+        const stopsHtml = (Array.isArray(p.stops) ? p.stops : [])
+          .map((s) => `<li>${s.stop_name || "-"} <small>(${s.stop_id || "-"})</small></li>`)
+          .join("");
+        return `
+          <li class="gtfs-area-list__parish-item">
+            <strong>${p.parish || "Sem freguesia"}</strong> <span>(${p.total_stops || 0})</span>
+            <ul class="gtfs-area-list__stops">${stopsHtml || "<li>Sem paragens.</li>"}</ul>
+          </li>
+        `;
+      })
+      .join("");
+    municipalityItem.innerHTML = `
+      <details class="gtfs-area-list__municipality-details">
+        <summary><strong>${m.municipality || "Sem concelho"}</strong> (${m.total_stops || 0} paragens)</summary>
+        <ul class="gtfs-area-list__parishes">${parishesHtml || "<li>Sem freguesias.</li>"}</ul>
+      </details>
+    `;
+    municipalityList.appendChild(municipalityItem);
+  });
+  gtfsStopsByAreaListEl.appendChild(municipalityList);
+}
+
+async function loadGtfsStopsByArea() {
+  if (!supToken || !gtfsStopsByAreaListEl) return;
+  gtfsStopsByAreaListEl.innerHTML = "<div>A carregar paragens por concelho/freguesia...</div>";
+  const feedKey = String(gtfsAnalyticsFeedSelectEl?.value || selectedGtfsAnalyticsFeedKey || "").trim();
+  const query = feedKey ? `?feedKey=${encodeURIComponent(feedKey)}` : "";
+  const response = await fetch(`${API_BASE}/gtfs/editor/stops/by-municipality${query}`, { headers: getAuthHeaders() });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    gtfsStopsByAreaListEl.innerHTML = `<div>${data.message || "Erro ao carregar paragens por território."}</div>`;
+    return;
+  }
+  renderGtfsStopsByArea(data);
+}
+
+function buildGtfsLineBuilderStopRow(stop = {}) {
+  const wrapper = document.createElement("article");
+  wrapper.className = "service-card-item gtfs-line-builder-stop-row";
+  wrapper.innerHTML = `
+    <div class="service-card-grid">
+      <div>
+        <small>Paragem existente (opcional)</small>
+        <select data-line-stop-id>
+          <option value="">-- Criar nova paragem --</option>
+        </select>
+      </div>
+      <div><small>Nome da paragem</small><input type="text" data-line-stop-name placeholder="Ex.: Praça Central" value="${stop.stopName || ""}" /></div>
+      <div><small>Latitude</small><input type="number" step="0.000001" data-line-stop-lat value="${stop.stopLat || ""}" /></div>
+      <div><small>Longitude</small><input type="number" step="0.000001" data-line-stop-lon value="${stop.stopLon || ""}" /></div>
+      <div><small>Concelho</small><input type="text" data-line-stop-municipality value="${stop.municipality || ""}" /></div>
+      <div><small>Freguesia</small><input type="text" data-line-stop-parish value="${stop.parish || ""}" /></div>
+      <div><small>Hora chegada</small><input type="text" data-line-stop-arrival placeholder="HH:MM:SS" value="${stop.arrivalTime || ""}" /></div>
+      <div><small>Hora partida</small><input type="text" data-line-stop-departure placeholder="HH:MM:SS" value="${stop.departureTime || ""}" /></div>
+    </div>
+    <div class="service-card-actions">
+      <button type="button" class="danger-btn" data-line-stop-remove>Remover paragem</button>
+    </div>
+  `;
+  return wrapper;
+}
+
 function buildGtfsAnalyticsPeriodParams() {
   const startDate = String(gtfsAnalyticsStartDateEl?.value || "").trim();
   const endDate = String(gtfsAnalyticsEndDateEl?.value || "").trim();
@@ -3001,6 +3086,50 @@ async function loadGtfsEditorStopsOptions() {
     option.textContent = `${stop.stop_name || "-"} (${stop.stop_id || "-"})`;
     gtfsEditorAddStopIdEl.appendChild(option);
   });
+  await loadGtfsLineBuilderStopOptions(rows);
+}
+
+async function loadGtfsLineBuilderStopOptions(stopsInput = null) {
+  if (!supToken || !gtfsLineBuilderStopsListEl) return;
+  let rows = Array.isArray(stopsInput) ? stopsInput : null;
+  if (!rows) {
+    const feedKey = String(gtfsAnalyticsFeedSelectEl?.value || selectedGtfsAnalyticsFeedKey || "").trim();
+    const query = feedKey ? `?feedKey=${encodeURIComponent(feedKey)}` : "";
+    const response = await fetch(`${API_BASE}/gtfs/editor/stops${query}`, { headers: getAuthHeaders() });
+    const data = await response.json().catch(() => ([]));
+    rows = response.ok && Array.isArray(data) ? data : [];
+  }
+  const selects = gtfsLineBuilderStopsListEl.querySelectorAll("select[data-line-stop-id]");
+  selects.forEach((select) => {
+    const current = String(select.value || "").trim();
+    select.innerHTML = '<option value="">-- Criar nova paragem --</option>';
+    rows.forEach((stop) => {
+      const option = document.createElement("option");
+      option.value = stop.stop_id;
+      option.textContent = `${stop.stop_name || "-"} (${stop.stop_id || "-"})`;
+      option.dataset.stopName = stop.stop_name || "";
+      option.dataset.stopLat = stop.stop_lat ?? "";
+      option.dataset.stopLon = stop.stop_lon ?? "";
+      option.dataset.stopMunicipality = stop.municipality || "";
+      option.dataset.stopParish = stop.parish || "";
+      select.appendChild(option);
+    });
+    if (current) select.value = current;
+  });
+}
+
+function addGtfsLineBuilderStopRow() {
+  if (!gtfsLineBuilderStopsListEl) return;
+  const row = buildGtfsLineBuilderStopRow();
+  if (gtfsLineBuilderStopsListEl.children.length === 1 && /Sem paragens configuradas/i.test(gtfsLineBuilderStopsListEl.textContent || "")) {
+    gtfsLineBuilderStopsListEl.innerHTML = "";
+  }
+  gtfsLineBuilderStopsListEl.appendChild(row);
+  loadGtfsLineBuilderStopOptions();
+}
+
+function setGtfsLineBuilderSummary(text) {
+  if (gtfsLineBuilderSummaryEl) gtfsLineBuilderSummaryEl.textContent = text || "";
 }
 
 async function loadGtfsEditorTripsByRoute() {
@@ -3257,6 +3386,77 @@ async function autoAdjustGtfsEditorTimes() {
   }
   alert(data.message || "Tempos ajustados automaticamente.");
   await loadGtfsEditorTripStops();
+}
+
+async function submitGtfsLineBuilder(event) {
+  event.preventDefault();
+  if (!supToken || !gtfsLineBuilderStopsListEl) return;
+  const routeShortName = String(document.getElementById("gtfsLineBuilderRouteShortName")?.value || "").trim();
+  const routeLongName = String(document.getElementById("gtfsLineBuilderRouteLongName")?.value || "").trim();
+  const tripHeadsign = String(document.getElementById("gtfsLineBuilderTripHeadsign")?.value || "").trim();
+  const directionId = String(document.getElementById("gtfsLineBuilderDirectionId")?.value || "0").trim();
+  const serviceId = String(document.getElementById("gtfsLineBuilderServiceId")?.value || "").trim();
+  const startDate = String(document.getElementById("gtfsLineBuilderStartDate")?.value || "").trim();
+  const endDate = String(document.getElementById("gtfsLineBuilderEndDate")?.value || "").trim();
+  const feedKey = String(gtfsAnalyticsFeedSelectEl?.value || selectedGtfsAnalyticsFeedKey || selectedGtfsFeedKey || "").trim();
+  const stopRows = Array.from(gtfsLineBuilderStopsListEl.querySelectorAll(".gtfs-line-builder-stop-row"));
+  const stops = stopRows.map((row) => ({
+    stopId: String(row.querySelector("select[data-line-stop-id]")?.value || "").trim() || null,
+    stopName: String(row.querySelector("input[data-line-stop-name]")?.value || "").trim() || null,
+    stopLat: String(row.querySelector("input[data-line-stop-lat]")?.value || "").trim() || null,
+    stopLon: String(row.querySelector("input[data-line-stop-lon]")?.value || "").trim() || null,
+    municipality: String(row.querySelector("input[data-line-stop-municipality]")?.value || "").trim() || null,
+    parish: String(row.querySelector("input[data-line-stop-parish]")?.value || "").trim() || null,
+    arrivalTime: String(row.querySelector("input[data-line-stop-arrival]")?.value || "").trim() || null,
+    departureTime: String(row.querySelector("input[data-line-stop-departure]")?.value || "").trim() || null,
+  }));
+  if (stops.length < 2) {
+    alert("Adicione pelo menos 2 paragens para criar a nova linha.");
+    return;
+  }
+  const payload = {
+    feedKey: feedKey || null,
+    routeShortName,
+    routeLongName: routeLongName || null,
+    tripHeadsign: tripHeadsign || null,
+    directionId,
+    serviceId,
+    startDate,
+    endDate,
+    days: {
+      monday: document.getElementById("gtfsDayMonday")?.checked ? 1 : 0,
+      tuesday: document.getElementById("gtfsDayTuesday")?.checked ? 1 : 0,
+      wednesday: document.getElementById("gtfsDayWednesday")?.checked ? 1 : 0,
+      thursday: document.getElementById("gtfsDayThursday")?.checked ? 1 : 0,
+      friday: document.getElementById("gtfsDayFriday")?.checked ? 1 : 0,
+      saturday: document.getElementById("gtfsDaySaturday")?.checked ? 1 : 0,
+      sunday: document.getElementById("gtfsDaySunday")?.checked ? 1 : 0,
+    },
+    stops,
+  };
+  setGtfsLineBuilderSummary("A criar nova linha GTFS...");
+  const response = await fetch(`${API_BASE}/gtfs/editor/line-builder`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    setGtfsLineBuilderSummary(data.message || "Erro ao criar nova linha GTFS.");
+    alert(data.message || "Erro ao criar nova linha GTFS.");
+    return;
+  }
+  setGtfsLineBuilderSummary(
+    [
+      data.message || "Linha criada.",
+      `Route ID: ${data.route?.route_id || "-"}`,
+      `Trip ID: ${data.trip?.trip_id || "-"}`,
+      `Service ID: ${data.trip?.service_id || "-"}`,
+      `Paragens: ${data.stopsCreatedOrLinked || stops.length}`,
+    ].join("\n")
+  );
+  alert(data.message || "Nova linha GTFS criada.");
+  await Promise.all([loadGtfsEditorLines(), loadGtfsAnalyticsOverview(), loadGtfsStopsByArea(), loadGtfsEditorStopsOptions()]);
 }
 
 async function downloadDriversTemplateCsv() {
@@ -4331,6 +4531,7 @@ bindById("refreshGtfsCalendarsBtn", "click", loadGtfsCalendars);
 bindById("saveGtfsEffectiveDatesBtn", "click", saveGtfsEffectiveDates);
 bindById("exportGtfsModifiedBtn", "click", exportGtfsModified);
 bindById("loadGtfsAnalyticsBtn", "click", loadGtfsAnalyticsOverview);
+bindById("loadGtfsStopsByAreaBtn", "click", loadGtfsStopsByArea);
 bindById("loadGtfsLineDetailBtn", "click", () => loadGtfsLineDetail());
 bindById("exportGtfsAnalyticsExcelBtn", "click", exportGtfsAnalyticsExcel);
 bindById("gtfsAnalyticsCurrentYearBtn", "click", () => {
@@ -4357,6 +4558,8 @@ if (gtfsAnalyticsFeedSelectEl) {
   gtfsAnalyticsFeedSelectEl.addEventListener("change", () => {
     selectedGtfsAnalyticsFeedKey = String(gtfsAnalyticsFeedSelectEl.value || "").trim();
     loadGtfsAnalyticsOverview();
+    loadGtfsStopsByArea();
+    loadGtfsLineBuilderStopOptions();
   });
 }
 if (gtfsAnalyticsLineSelectEl) {
@@ -4387,6 +4590,43 @@ if (gtfsEditorAddStopForm) {
 }
 if (gtfsEditorAutoAdjustTimeBtnEl) {
   gtfsEditorAutoAdjustTimeBtnEl.addEventListener("click", autoAdjustGtfsEditorTimes);
+}
+const gtfsLineBuilderFormEl = document.getElementById("gtfsLineBuilderForm");
+if (gtfsLineBuilderFormEl) {
+  gtfsLineBuilderFormEl.addEventListener("submit", submitGtfsLineBuilder);
+}
+bindById("gtfsLineBuilderAddStopBtn", "click", addGtfsLineBuilderStopRow);
+if (gtfsLineBuilderStopsListEl && !gtfsLineBuilderStopsListEl.dataset.gtfsLineBuilderDelegation) {
+  gtfsLineBuilderStopsListEl.dataset.gtfsLineBuilderDelegation = "1";
+  gtfsLineBuilderStopsListEl.addEventListener("click", (event) => {
+    const removeBtn = event.target.closest("[data-line-stop-remove]");
+    if (removeBtn) {
+      const row = removeBtn.closest(".gtfs-line-builder-stop-row");
+      if (row) row.remove();
+      if (!gtfsLineBuilderStopsListEl.querySelector(".gtfs-line-builder-stop-row")) {
+        gtfsLineBuilderStopsListEl.innerHTML = "<div>Sem paragens configuradas.</div>";
+      }
+      return;
+    }
+  });
+  gtfsLineBuilderStopsListEl.addEventListener("change", (event) => {
+    const select = event.target.closest("select[data-line-stop-id]");
+    if (!select) return;
+    const option = select.selectedOptions?.[0];
+    if (!option || !option.value) return;
+    const row = select.closest(".gtfs-line-builder-stop-row");
+    if (!row) return;
+    const nameEl = row.querySelector("input[data-line-stop-name]");
+    const latEl = row.querySelector("input[data-line-stop-lat]");
+    const lonEl = row.querySelector("input[data-line-stop-lon]");
+    const municipalityEl = row.querySelector("input[data-line-stop-municipality]");
+    const parishEl = row.querySelector("input[data-line-stop-parish]");
+    if (nameEl && !nameEl.value) nameEl.value = option.dataset.stopName || "";
+    if (latEl && !latEl.value) latEl.value = option.dataset.stopLat || "";
+    if (lonEl && !lonEl.value) lonEl.value = option.dataset.stopLon || "";
+    if (municipalityEl && !municipalityEl.value) municipalityEl.value = option.dataset.stopMunicipality || "";
+    if (parishEl && !parishEl.value) parishEl.value = option.dataset.stopParish || "";
+  });
 }
 if (gtfsEditorStopsListEl && !gtfsEditorStopsListEl.dataset.gtfsEditorDelegation) {
   gtfsEditorStopsListEl.dataset.gtfsEditorDelegation = "1";
