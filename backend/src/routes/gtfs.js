@@ -2553,13 +2553,23 @@ router.patch("/editor/trip-stops/reorder-position", async (req, res) => {
       const moved = stops.splice(fromIdx, 1)[0];
       stops.splice(toIdx, 0, moved);
 
+      // Two-phase sequence write avoids transient unique-sequence collisions.
       for (let i = 0; i < stops.length; i += 1) {
         await client.query(
           `UPDATE gtfs_stop_times
            SET stop_sequence = $3
            WHERE trip_id = $1
              AND ctid::text = $2`,
-          [targetTripId, stops[i].row_ctid, i + 1]
+          [targetTripId, stops[i].row_ctid, i + 10001]
+        );
+      }
+      for (let i = 0; i < stops.length; i += 1) {
+        await client.query(
+          `UPDATE gtfs_stop_times
+           SET stop_sequence = $3
+           WHERE trip_id = $1
+             AND stop_sequence = $2`,
+          [targetTripId, i + 10001, i + 1]
         );
       }
 
