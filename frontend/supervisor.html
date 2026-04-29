@@ -113,6 +113,15 @@
             <div id="deadheadMovementsList" class="service-cards"></div>
             <div id="deadheadMap"></div>
           </section>
+          <section class="card card-top-gap">
+            <h3>Serviços por iniciar (fora da hora)</h3>
+            <div class="ops-layout-compact">
+              <input type="date" id="overdueRosterDate" />
+              <input type="number" id="overdueRosterGraceMin" min="0" max="120" value="5" placeholder="Tolerância (min)" />
+            </div>
+            <button type="button" id="refreshOverdueRosterBtn">Atualizar por iniciar</button>
+            <div id="overdueRosterList" class="service-cards"></div>
+          </section>
         </div>
 
         <div id="tabServicos" class="tab-panel">

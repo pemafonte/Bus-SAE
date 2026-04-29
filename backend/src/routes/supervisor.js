@@ -842,6 +842,74 @@ async function ensureDeadheadTablesForOverview() {
   );
 }
 
+async function ensureTrackerTables() {
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS tracker_devices (
+      id BIGSERIAL PRIMARY KEY,
+      imei VARCHAR(40) UNIQUE NOT NULL,
+      fleet_number VARCHAR(50),
+      plate_number VARCHAR(50),
+      provider VARCHAR(40) NOT NULL DEFAULT 'teltonika',
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      install_odometer_km NUMERIC(12,1),
+      current_odometer_km NUMERIC(12,1),
+      current_odometer_updated_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_tracker_devices_fleet
+     ON tracker_devices(fleet_number)`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_tracker_devices_plate
+     ON tracker_devices(plate_number)`
+  );
+}
+
+async function ensureDeadheadTables() {
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS deadhead_movements (
+      id BIGSERIAL PRIMARY KEY,
+      imei VARCHAR(40) NOT NULL,
+      fleet_number VARCHAR(50),
+      plate_number VARCHAR(50),
+      started_at TIMESTAMPTZ NOT NULL,
+      ended_at TIMESTAMPTZ NOT NULL,
+      start_lat NUMERIC(10,7),
+      start_lng NUMERIC(10,7),
+      end_lat NUMERIC(10,7),
+      end_lng NUMERIC(10,7),
+      total_km NUMERIC(12,3) NOT NULL DEFAULT 0,
+      points_count INT NOT NULL DEFAULT 0,
+      open_state BOOLEAN NOT NULL DEFAULT TRUE,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS deadhead_points (
+      id BIGSERIAL PRIMARY KEY,
+      movement_id BIGINT NOT NULL REFERENCES deadhead_movements(id) ON DELETE CASCADE,
+      lat NUMERIC(10,7) NOT NULL,
+      lng NUMERIC(10,7) NOT NULL,
+      captured_at TIMESTAMPTZ NOT NULL,
+      speed_kmh NUMERIC(8,2),
+      heading_deg NUMERIC(6,2),
+      accuracy_m NUMERIC(8,2)
+    )`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_deadhead_movements_open
+     ON deadhead_movements(imei, open_state, updated_at DESC)`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_deadhead_points_movement
+     ON deadhead_points(movement_id, captured_at ASC)`
+  );
+}
+
 function emptyOverviewPayload() {
   return {
     report_date: null,
@@ -1795,6 +1863,184 @@ router.get("/roster/today", async (req, res) => {
     return res.json(result.rows);
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao listar escala do dia." });
+  }
+});
+
+router.get("/roster/overdue", async (req, res) => {
+  try {
+    const dateRaw = String(req.query.date || "").trim();
+    const serviceDate = dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? dateRaw : null;
+    const graceRaw = Number(req.query.graceMin);
+    const graceMin = Number.isFinite(graceRaw) ? Math.min(Math.max(Math.round(graceRaw), 0), 120) : 5;
+
+    await ensurePlannedServiceLocationColumns();
+    await ensureTrackerTables();
+    await ensureDeadheadTables();
+
+    const result = await db.query(
+      `WITH now_lisbon AS (
+         SELECT (NOW() AT TIME ZONE 'Europe/Lisbon') AS ts
+       ),
+       roster_base AS (
+         SELECT
+           dr.id AS roster_id,
+           dr.service_date,
+           dr.status AS roster_status,
+           dr.driver_id,
+           u.name AS driver_name,
+           u.mechanic_number AS driver_mechanic_number,
+           ps.id AS planned_service_id,
+           ps.service_code,
+           ps.line_code,
+           ps.fleet_number,
+           ps.plate_number,
+           ps.service_schedule,
+           ps.start_location,
+           ps.end_location,
+           ps.kms_carga,
+           substring(COALESCE(ps.service_schedule, '') FROM '(\\d{1,2}:\\d{2})') AS hhmm
+         FROM daily_roster dr
+         JOIN planned_services ps ON ps.id = dr.planned_service_id
+         JOIN users u ON u.id = dr.driver_id
+         WHERE dr.service_date = COALESCE($1::date, CURRENT_DATE)
+           AND COALESCE(ps.kms_carga, 0) > 0
+       ),
+       roster_eval AS (
+         SELECT
+           rb.*,
+           CASE
+             WHEN rb.hhmm ~ '^\\d{1,2}:\\d{2}$' THEN split_part(rb.hhmm, ':', 1)::int
+             ELSE NULL
+           END AS hh,
+           CASE
+             WHEN rb.hhmm ~ '^\\d{1,2}:\\d{2}$' THEN split_part(rb.hhmm, ':', 2)::int
+             ELSE NULL
+           END AS mm
+         FROM roster_base rb
+       ),
+       roster_due AS (
+         SELECT
+           re.*,
+           (re.hh * 60 + re.mm) AS scheduled_start_min,
+           (
+             SELECT EXTRACT(HOUR FROM n.ts)::int * 60 + EXTRACT(MINUTE FROM n.ts)::int
+             FROM now_lisbon n
+           ) AS now_minute_lisbon
+         FROM roster_eval re
+         WHERE re.hh IS NOT NULL
+           AND re.mm IS NOT NULL
+       )
+       SELECT
+         rd.roster_id,
+         rd.service_date,
+         rd.roster_status,
+         rd.driver_id,
+         rd.driver_name,
+         rd.driver_mechanic_number,
+         rd.planned_service_id,
+         rd.service_code,
+         rd.line_code,
+         rd.fleet_number,
+         rd.plate_number,
+         rd.service_schedule,
+         rd.start_location,
+         rd.end_location,
+         rd.kms_carga,
+         rd.scheduled_start_min,
+         rd.now_minute_lisbon,
+         GREATEST(0, rd.now_minute_lisbon - rd.scheduled_start_min) AS overdue_minutes,
+         td.imei AS tracker_imei,
+         lp.captured_at AS tracker_last_point_at,
+         lp.speed_kmh AS tracker_last_speed_kmh,
+         CASE
+           WHEN lp.captured_at IS NULL THEN 'unknown'
+           WHEN lp.captured_at < NOW() - INTERVAL '5 minutes' THEN 'unknown'
+           WHEN COALESCE(lp.speed_kmh, 0) >= 3 THEN 'moving'
+           ELSE 'stopped'
+         END AS vehicle_motion_status
+       FROM roster_due rd
+       LEFT JOIN LATERAL (
+         SELECT t.imei
+         FROM tracker_devices t
+         WHERE t.is_active = TRUE
+           AND (
+             (
+               COALESCE(NULLIF(TRIM(rd.fleet_number), ''), '') <> ''
+               AND LOWER(TRIM(COALESCE(t.fleet_number, ''))) = LOWER(TRIM(COALESCE(rd.fleet_number, '')))
+             )
+             OR (
+               COALESCE(NULLIF(TRIM(rd.plate_number), ''), '') <> ''
+               AND LOWER(TRIM(COALESCE(t.plate_number, ''))) = LOWER(TRIM(COALESCE(rd.plate_number, '')))
+             )
+           )
+         ORDER BY t.updated_at DESC
+         LIMIT 1
+       ) td ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT dp.captured_at, dp.speed_kmh
+         FROM deadhead_movements dm
+         JOIN deadhead_points dp ON dp.movement_id = dm.id
+         WHERE dm.imei = td.imei
+         ORDER BY dp.captured_at DESC
+         LIMIT 1
+       ) lp ON TRUE
+       WHERE rd.now_minute_lisbon >= rd.scheduled_start_min + $2::int
+         AND COALESCE(NULLIF(LOWER(TRIM(rd.roster_status::text)), ''), 'pending') IN (
+           'pending', 'assigned', 'pendente', 'atribuido', 'atribuído', 'delayed', 'atrasado'
+         )
+         AND NOT EXISTS (
+           SELECT 1
+           FROM services s
+           WHERE s.planned_service_id = rd.planned_service_id
+             AND s.driver_id = rd.driver_id
+             AND ((s.started_at AT TIME ZONE 'Europe/Lisbon')::date) = rd.service_date
+         )
+       ORDER BY rd.scheduled_start_min ASC, rd.driver_name ASC`,
+      [serviceDate, graceMin]
+    );
+
+    return res.json({
+      date: serviceDate || null,
+      graceMin,
+      items: result.rows,
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar serviços por iniciar fora da hora." });
+  }
+});
+
+router.patch("/roster/:rosterId/status", async (req, res) => {
+  const rosterId = Number(req.params.rosterId);
+  const status = String(req.body?.status || "")
+    .trim()
+    .toLowerCase();
+  const allowed = new Set(["delayed", "atrasado", "cancelled", "not_realized"]);
+
+  if (!Number.isFinite(rosterId) || rosterId <= 0) {
+    return res.status(400).json({ message: "Identificador de escala inválido." });
+  }
+  if (!allowed.has(status)) {
+    return res.status(400).json({ message: "Estado inválido. Use delayed, cancelled ou not_realized." });
+  }
+
+  const normalizedStatus = status === "atrasado" ? "delayed" : status;
+  try {
+    const updated = await db.query(
+      `UPDATE daily_roster
+       SET status = $2
+       WHERE id = $1
+       RETURNING id AS roster_id, status, service_date, driver_id, planned_service_id`,
+      [rosterId, normalizedStatus]
+    );
+    if (!updated.rowCount) {
+      return res.status(404).json({ message: "Linha de escala não encontrada." });
+    }
+    return res.json({
+      message: "Estado da linha de escala atualizado.",
+      roster: updated.rows[0],
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao atualizar estado da linha de escala." });
   }
 });
 

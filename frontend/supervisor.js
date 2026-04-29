@@ -90,6 +90,9 @@ const deadheadMapEl = document.getElementById("deadheadMap");
 const deadheadFromDateEl = document.getElementById("deadheadFromDate");
 const deadheadToDateEl = document.getElementById("deadheadToDate");
 const deadheadFleetFilterEl = document.getElementById("deadheadFleetFilter");
+const overdueRosterDateEl = document.getElementById("overdueRosterDate");
+const overdueRosterGraceMinEl = document.getElementById("overdueRosterGraceMin");
+const overdueRosterListEl = document.getElementById("overdueRosterList");
 const trackerDevicesListEl = document.getElementById("trackerDevicesList");
 const trackerDeviceFormEl = document.getElementById("trackerDeviceForm");
 const trackerWebhookUrlPreviewEl = document.getElementById("trackerWebhookUrlPreview");
@@ -254,6 +257,10 @@ function labelEstadoEscalaPt(code) {
     assigned: "Escalado (por iniciar)",
     in_progress: "Viagem em curso",
     completed: "Concluído",
+    cancelled: "Cancelado",
+    not_realized: "Não realizado",
+    delayed: "Atrasado",
+    atrasado: "Atrasado",
   };
   return map[k] || code || "—";
 }
@@ -1099,6 +1106,7 @@ function openSupervisorTab(tabId) {
     if (supLiveMap) setTimeout(() => supLiveMap.invalidateSize(), 80);
     if (tabId === "tabTempoReal") {
       loadDeadheadMovements();
+      loadOverdueRosterServices();
       if (deadheadMap) setTimeout(() => deadheadMap.invalidateSize(), 80);
     }
   }
@@ -1515,6 +1523,105 @@ async function loadLiveServicesMap() {
     renderLiveRealtimeView();
   } catch (_error) {
     supLiveServicesListEl.innerHTML = "<div>Ligação temporariamente indisponível. A tentar novamente no próximo ciclo.</div>";
+  }
+}
+
+function buildOverdueRosterQueryString() {
+  const params = new URLSearchParams();
+  const date = String(overdueRosterDateEl?.value || "").trim();
+  const grace = Number(overdueRosterGraceMinEl?.value);
+  if (date) params.set("date", date);
+  if (Number.isFinite(grace)) params.set("graceMin", String(Math.max(0, Math.min(120, Math.round(grace)))));
+  const q = params.toString();
+  return q ? `?${q}` : "";
+}
+
+function motionStatusPt(code) {
+  const k = String(code || "").toLowerCase();
+  if (k === "moving") return "Em movimento";
+  if (k === "stopped") return "Parado";
+  return "Sem dados";
+}
+
+async function setOverdueRosterStatus(rosterId, status) {
+  if (!supToken) return;
+  const response = await fetch(`${API_BASE}/supervisor/roster/${rosterId}/status`, {
+    method: "PATCH",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ status }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao atualizar estado da escala.");
+    return;
+  }
+  await loadOverdueRosterServices();
+  await loadRosterToday();
+}
+
+async function startOverdueRosterService(rosterId) {
+  if (!supToken) return;
+  const response = await fetch(`${API_BASE}/supervisor/roster/${rosterId}/start-service`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao iniciar serviço.");
+    return;
+  }
+  alert(data.message || "Serviço iniciado.");
+  await loadOverdueRosterServices();
+  await loadRosterToday();
+  await loadLiveServicesMap();
+}
+
+async function loadOverdueRosterServices() {
+  if (!supToken || !overdueRosterListEl) return;
+  overdueRosterListEl.innerHTML = "<div>A carregar serviços por iniciar...</div>";
+  try {
+    const response = await fetch(`${API_BASE}/supervisor/roster/overdue${buildOverdueRosterQueryString()}`, {
+      headers: getAuthHeaders(),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      overdueRosterListEl.innerHTML = `<div>${payload.message || "Erro ao carregar serviços por iniciar."}</div>`;
+      return;
+    }
+    const items = Array.isArray(payload.items) ? payload.items : [];
+    if (!items.length) {
+      overdueRosterListEl.innerHTML = "<div>Sem serviços em falta para iniciar no intervalo selecionado.</div>";
+      return;
+    }
+    overdueRosterListEl.innerHTML = "";
+    items.forEach((item) => {
+      const article = document.createElement("article");
+      article.className = "service-card-item";
+      const speed = Number(item.tracker_last_speed_kmh);
+      article.innerHTML = `
+        <div class="service-card-head">
+          <strong>${item.service_code || "Serviço"} | Linha ${item.line_code || "-"}</strong>
+          <span class="status-badge status-other">${labelEstadoEscalaPt(item.roster_status)}</span>
+        </div>
+        <div class="service-card-grid">
+          <div><small>Motorista</small><div>${item.driver_name || "-"} (Mec. ${item.driver_mechanic_number || "-"})</div></div>
+          <div><small>Viatura</small><div>${item.fleet_number || item.plate_number || "-"}</div></div>
+          <div><small>Horário</small><div>${item.service_schedule || "-"}</div></div>
+          <div><small>Atraso</small><div>${Math.max(0, Number(item.overdue_minutes) || 0)} min</div></div>
+          <div><small>Movimento</small><div>${motionStatusPt(item.vehicle_motion_status)}</div></div>
+          <div><small>Velocidade</small><div>${Number.isFinite(speed) ? `${speed.toFixed(1)} km/h` : "-"}</div></div>
+        </div>
+        <div class="service-card-actions">
+          <button type="button" class="overdue-start-btn" data-overdue-roster-id="${item.roster_id}">Iniciar serviço</button>
+          <button type="button" class="overdue-delay-btn" data-overdue-roster-id="${item.roster_id}">Marcar atrasado</button>
+          <button type="button" class="overdue-cancel-btn" data-overdue-roster-id="${item.roster_id}">Marcar cancelado</button>
+          <button type="button" class="overdue-not-realized-btn" data-overdue-roster-id="${item.roster_id}">Marcar não realizado</button>
+        </div>
+      `;
+      overdueRosterListEl.appendChild(article);
+    });
+  } catch (_error) {
+    overdueRosterListEl.innerHTML = "<div>Falha de ligação ao carregar serviços por iniciar.</div>";
   }
 }
 
@@ -5150,6 +5257,42 @@ if (refreshTrackerDevicesBtn) {
 const refreshDeadheadMovementsBtn = document.getElementById("refreshDeadheadMovementsBtn");
 if (refreshDeadheadMovementsBtn) {
   refreshDeadheadMovementsBtn.addEventListener("click", loadDeadheadMovements);
+}
+const refreshOverdueRosterBtn = document.getElementById("refreshOverdueRosterBtn");
+if (refreshOverdueRosterBtn) {
+  refreshOverdueRosterBtn.addEventListener("click", loadOverdueRosterServices);
+}
+if (overdueRosterDateEl && !overdueRosterDateEl.value) {
+  overdueRosterDateEl.value = todayISOInLisbon();
+}
+if (overdueRosterDateEl) {
+  overdueRosterDateEl.addEventListener("change", loadOverdueRosterServices);
+}
+if (overdueRosterGraceMinEl) {
+  overdueRosterGraceMinEl.addEventListener("change", loadOverdueRosterServices);
+}
+if (overdueRosterListEl && !overdueRosterListEl.dataset.overdueRosterDelegation) {
+  overdueRosterListEl.dataset.overdueRosterDelegation = "1";
+  overdueRosterListEl.addEventListener("click", async (event) => {
+    const btn = event.target.closest("button[data-overdue-roster-id]");
+    if (!btn) return;
+    const rosterId = Number(btn.getAttribute("data-overdue-roster-id"));
+    if (!Number.isFinite(rosterId) || rosterId <= 0) return;
+    btn.disabled = true;
+    try {
+      if (btn.classList.contains("overdue-start-btn")) {
+        await startOverdueRosterService(rosterId);
+      } else if (btn.classList.contains("overdue-delay-btn")) {
+        await setOverdueRosterStatus(rosterId, "delayed");
+      } else if (btn.classList.contains("overdue-cancel-btn")) {
+        await setOverdueRosterStatus(rosterId, "cancelled");
+      } else if (btn.classList.contains("overdue-not-realized-btn")) {
+        await setOverdueRosterStatus(rosterId, "not_realized");
+      }
+    } finally {
+      btn.disabled = false;
+    }
+  });
 }
 const exportDeadheadCsvBtn = document.getElementById("exportDeadheadCsvBtn");
 if (exportDeadheadCsvBtn) {
