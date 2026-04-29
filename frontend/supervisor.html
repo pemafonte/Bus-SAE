@@ -207,6 +207,25 @@
           </p>
           <button type="button" id="refreshConflictAlertsBtn">Atualizar alertas</button>
           <div id="conflictAlertsList" class="service-cards"></div>
+          <h3>Incidências de desvio de rota (GTFS)</h3>
+          <p class="field-help field-help-tight">
+            Desvios detetados em tempo real quando a viatura sai do traçado da linha GTFS do serviço.
+          </p>
+          <div class="ops-layout-compact">
+            <input type="date" id="routeIncidentsFromDate" />
+            <input type="date" id="routeIncidentsToDate" />
+            <input type="text" id="routeIncidentsLineCode" placeholder="Linha (ex.: 101)" />
+            <input type="text" id="routeIncidentsFleet" placeholder="Frota ou chapa" />
+            <select id="routeIncidentsStatus">
+              <option value="all">Todas</option>
+              <option value="open">Só em aberto</option>
+              <option value="resolved">Só resolvidas</option>
+            </select>
+          </div>
+          <button type="button" id="refreshRouteIncidentsBtn">Atualizar incidências</button>
+          <button type="button" id="exportRouteIncidentsCsvBtn">Exportar incidências CSV</button>
+          <button type="button" id="exportRouteIncidentsXlsxBtn">Exportar incidências Excel</button>
+          <div id="routeIncidentsList" class="service-cards"></div>
         </div>
 
         <div id="tabCriarMotorista" class="tab-panel">

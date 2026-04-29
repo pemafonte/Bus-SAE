@@ -936,6 +936,89 @@ async function ensureSupervisorConflictAlertsTable() {
   );
 }
 
+async function ensureServiceRouteIncidentsTable() {
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS service_route_incidents (
+      id BIGSERIAL PRIMARY KEY,
+      service_id BIGINT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+      driver_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      line_code VARCHAR(50),
+      fleet_number VARCHAR(50),
+      plate_number VARCHAR(50),
+      gtfs_trip_id VARCHAR(120),
+      threshold_m NUMERIC(8,2) NOT NULL DEFAULT 150,
+      max_deviation_m NUMERIC(10,2) NOT NULL DEFAULT 0,
+      first_detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      resolved_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_service_route_incidents_service_open
+     ON service_route_incidents(service_id, resolved_at, last_detected_at DESC)`
+  );
+}
+
+function buildRouteIncidentsFilterSql(query = {}, options = {}) {
+  const allowLimit = options.allowLimit !== false;
+  const where = [];
+  const values = [];
+  let i = 1;
+
+  const status = String(query.status || "open").trim().toLowerCase();
+  if (status === "open") {
+    where.push(`sri.resolved_at IS NULL`);
+  } else if (status === "resolved") {
+    where.push(`sri.resolved_at IS NOT NULL`);
+  }
+
+  const lineCode = String(query.lineCode || "").trim();
+  if (lineCode) {
+    where.push(`LOWER(COALESCE(sri.line_code, '')) LIKE LOWER($${i})`);
+    values.push(`%${lineCode}%`);
+    i += 1;
+  }
+
+  const fleet = String(query.fleet || "").trim();
+  if (fleet) {
+    where.push(
+      `(LOWER(COALESCE(sri.fleet_number, '')) LIKE LOWER($${i}) OR LOWER(COALESCE(sri.plate_number, '')) LIKE LOWER($${i}))`
+    );
+    values.push(`%${fleet}%`);
+    i += 1;
+  }
+
+  const fromDate = String(query.fromDate || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(fromDate)) {
+    where.push(`(sri.first_detected_at AT TIME ZONE 'Europe/Lisbon')::date >= $${i}::date`);
+    values.push(fromDate);
+    i += 1;
+  }
+
+  const toDate = String(query.toDate || "").trim();
+  if (/^\d{4}-\d{2}-\d{2}$/.test(toDate)) {
+    where.push(`(sri.first_detected_at AT TIME ZONE 'Europe/Lisbon')::date <= $${i}::date`);
+    values.push(toDate);
+    i += 1;
+  }
+
+  let limitSql = "";
+  if (allowLimit) {
+    const limitRaw = Number(query.limit);
+    const limit = Number.isFinite(limitRaw) && limitRaw > 0 ? Math.min(5000, Math.round(limitRaw)) : 200;
+    limitSql = `LIMIT $${i}`;
+    values.push(limit);
+  }
+
+  return {
+    whereSql: where.length ? `WHERE ${where.join(" AND ")}` : "",
+    values,
+    limitSql,
+  };
+}
+
 async function ensureOpsMessagesTable() {
   await db.query(
     `CREATE TABLE IF NOT EXISTS ops_messages (
@@ -1377,6 +1460,181 @@ router.get("/conflict-alerts", async (_req, res) => {
     return res.json(result.rows);
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao listar alertas de conflito." });
+  }
+});
+
+router.get("/route-incidents", async (req, res) => {
+  try {
+    await ensureServiceRouteIncidentsTable();
+    const filters = buildRouteIncidentsFilterSql(req.query, { allowLimit: true });
+    const result = await db.query(
+      `SELECT
+         sri.id,
+         sri.service_id,
+         sri.driver_id,
+         u.name AS driver_name,
+         u.mechanic_number AS driver_mechanic_number,
+         sri.line_code,
+         sri.fleet_number,
+         sri.plate_number,
+         sri.gtfs_trip_id,
+         sri.threshold_m,
+         sri.max_deviation_m,
+         sri.first_detected_at,
+         sri.last_detected_at,
+         sri.resolved_at,
+         s.status AS service_status
+       FROM service_route_incidents sri
+       JOIN users u ON u.id = sri.driver_id
+       LEFT JOIN services s ON s.id = sri.service_id
+       ${filters.whereSql}
+       ORDER BY COALESCE(sri.resolved_at, sri.last_detected_at) DESC
+       ${filters.limitSql}`,
+      filters.values
+    );
+    return res.json(result.rows);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar incidências de desvio de rota." });
+  }
+});
+
+router.get("/route-incidents/export.csv", async (req, res) => {
+  try {
+    await ensureServiceRouteIncidentsTable();
+    const filters = buildRouteIncidentsFilterSql(req.query, { allowLimit: false });
+    const result = await db.query(
+      `SELECT
+         sri.id,
+         sri.service_id,
+         sri.driver_id,
+         u.name AS driver_name,
+         u.mechanic_number AS driver_mechanic_number,
+         sri.line_code,
+         sri.fleet_number,
+         sri.plate_number,
+         sri.gtfs_trip_id,
+         sri.threshold_m,
+         sri.max_deviation_m,
+         sri.first_detected_at,
+         sri.last_detected_at,
+         sri.resolved_at,
+         s.status AS service_status
+       FROM service_route_incidents sri
+       JOIN users u ON u.id = sri.driver_id
+       LEFT JOIN services s ON s.id = sri.service_id
+       ${filters.whereSql}
+       ORDER BY COALESCE(sri.resolved_at, sri.last_detected_at) DESC
+       LIMIT 5000`,
+      filters.values
+    );
+    const header = [
+      "incidencia_id",
+      "servico_id",
+      "estado_incidencia",
+      "estado_servico",
+      "motorista_id",
+      "motorista",
+      "numero_mecanografico",
+      "linha",
+      "frota",
+      "chapa",
+      "trip_gtfs",
+      "limiar_m",
+      "desvio_maximo_m",
+      "primeira_detecao",
+      "ultima_detecao",
+      "resolvida_em",
+    ];
+    const rows = result.rows.map((r) =>
+      [
+        r.id,
+        r.service_id,
+        r.resolved_at ? "resolvida" : "em_aberto",
+        r.service_status || "",
+        r.driver_id,
+        r.driver_name || "",
+        r.driver_mechanic_number || "",
+        r.line_code || "",
+        r.fleet_number || "",
+        r.plate_number || "",
+        r.gtfs_trip_id || "",
+        r.threshold_m == null ? "" : Number(r.threshold_m).toFixed(2),
+        r.max_deviation_m == null ? "" : Number(r.max_deviation_m).toFixed(2),
+        r.first_detected_at ? new Date(r.first_detected_at).toISOString() : "",
+        r.last_detected_at ? new Date(r.last_detected_at).toISOString() : "",
+        r.resolved_at ? new Date(r.resolved_at).toISOString() : "",
+      ]
+        .map(csvEscape)
+        .join(",")
+    );
+    const csv = [header.map(csvEscape).join(","), ...rows].join("\n");
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", "attachment; filename=incidencias_desvio_rota.csv");
+    return res.status(200).send(csv);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao exportar incidências de desvio (CSV)." });
+  }
+});
+
+router.get("/route-incidents/export.xlsx", async (req, res) => {
+  try {
+    await ensureServiceRouteIncidentsTable();
+    const filters = buildRouteIncidentsFilterSql(req.query, { allowLimit: false });
+    const result = await db.query(
+      `SELECT
+         sri.id,
+         sri.service_id,
+         sri.driver_id,
+         u.name AS driver_name,
+         u.mechanic_number AS driver_mechanic_number,
+         sri.line_code,
+         sri.fleet_number,
+         sri.plate_number,
+         sri.gtfs_trip_id,
+         sri.threshold_m,
+         sri.max_deviation_m,
+         sri.first_detected_at,
+         sri.last_detected_at,
+         sri.resolved_at,
+         s.status AS service_status
+       FROM service_route_incidents sri
+       JOIN users u ON u.id = sri.driver_id
+       LEFT JOIN services s ON s.id = sri.service_id
+       ${filters.whereSql}
+       ORDER BY COALESCE(sri.resolved_at, sri.last_detected_at) DESC
+       LIMIT 5000`,
+      filters.values
+    );
+    const rows = result.rows.map((r) => ({
+      incidencia_id: r.id,
+      servico_id: r.service_id,
+      estado_incidencia: r.resolved_at ? "resolvida" : "em_aberto",
+      estado_servico: r.service_status || "",
+      motorista_id: r.driver_id,
+      motorista: r.driver_name || "",
+      numero_mecanografico: r.driver_mechanic_number || "",
+      linha: r.line_code || "",
+      frota: r.fleet_number || "",
+      chapa: r.plate_number || "",
+      trip_gtfs: r.gtfs_trip_id || "",
+      limiar_m: r.threshold_m == null ? "" : Number(r.threshold_m).toFixed(2),
+      desvio_maximo_m: r.max_deviation_m == null ? "" : Number(r.max_deviation_m).toFixed(2),
+      primeira_detecao: r.first_detected_at ? new Date(r.first_detected_at).toISOString() : "",
+      ultima_detecao: r.last_detected_at ? new Date(r.last_detected_at).toISOString() : "",
+      resolvida_em: r.resolved_at ? new Date(r.resolved_at).toISOString() : "",
+    }));
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, "incidencias");
+    const buffer = XLSX.write(wb, { bookType: "xlsx", type: "buffer" });
+    res.setHeader(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+    );
+    res.setHeader("Content-Disposition", "attachment; filename=incidencias_desvio_rota.xlsx");
+    return res.status(200).send(buffer);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao exportar incidências de desvio (Excel)." });
   }
 });
 
@@ -2757,9 +3015,13 @@ router.get("/services/live", async (_req, res) => {
          s.id,
          s.line_code,
          s.fleet_number,
+         s.plate_number,
          s.service_schedule,
          s.status,
+         s.route_deviation_m,
+         s.is_off_route,
          u.name AS driver_name,
+         u.mechanic_number AS driver_mechanic_number,
          lp.lat,
          lp.lng,
          lp.captured_at,
@@ -2780,6 +3042,97 @@ router.get("/services/live", async (_req, res) => {
     return res.json(result.rows);
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao listar serviços em execução." });
+  }
+});
+
+router.post("/roster/:rosterId/start-service", async (req, res) => {
+  const rosterId = Number(req.params.rosterId);
+  if (!Number.isFinite(rosterId) || rosterId <= 0) {
+    return res.status(400).json({ message: "Identificador de escala inválido." });
+  }
+  try {
+    const rosterRes = await db.query(
+      `SELECT
+         dr.id AS roster_id,
+         dr.driver_id,
+         dr.service_date,
+         dr.status AS roster_status,
+         ps.id AS planned_service_id,
+         ps.plate_number,
+         ps.service_schedule,
+         ps.line_code,
+         ps.fleet_number
+       FROM daily_roster dr
+       JOIN planned_services ps ON ps.id = dr.planned_service_id
+       WHERE dr.id = $1
+       LIMIT 1`,
+      [rosterId]
+    );
+    if (!rosterRes.rowCount) {
+      return res.status(404).json({ message: "Linha de escala não encontrada." });
+    }
+    const row = rosterRes.rows[0];
+    const rosterStatus = String(row.roster_status || "").trim().toLowerCase();
+    if (!["assigned", "pending", "pendente", "atribuido", "atribuído"].includes(rosterStatus)) {
+      return res.status(409).json({ message: "Só é possível iniciar automaticamente linhas por iniciar." });
+    }
+
+    const sameDayRes = await db.query(
+      `SELECT 1
+       FROM services s
+       WHERE s.driver_id = $1
+         AND LOWER(TRIM(s.status::text)) IN ('in_progress', 'awaiting_handover')
+       LIMIT 1`,
+      [row.driver_id]
+    );
+    if (sameDayRes.rowCount) {
+      return res.status(409).json({ message: "O motorista já tem um serviço em execução." });
+    }
+
+    const alreadyStartedRes = await db.query(
+      `SELECT 1
+       FROM services s
+       WHERE s.planned_service_id = $1
+         AND s.driver_id = $2
+         AND ((s.started_at AT TIME ZONE 'Europe/Lisbon')::date) = $3::date
+       LIMIT 1`,
+      [row.planned_service_id, row.driver_id, row.service_date]
+    );
+    if (alreadyStartedRes.rowCount) {
+      return res.status(409).json({ message: "Já existe um serviço iniciado na app para esta linha de escala." });
+    }
+
+    const gtfsTrip = await findBestTripForLine(row.line_code, row.service_schedule);
+    const inserted = await db.query(
+      `INSERT INTO services (
+         driver_id, planned_service_id, gtfs_trip_id, plate_number, service_schedule, line_code, fleet_number, status
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, 'in_progress')
+       RETURNING id, planned_service_id, gtfs_trip_id, plate_number, service_schedule, line_code, fleet_number, status, started_at`,
+      [
+        row.driver_id,
+        row.planned_service_id,
+        gtfsTrip?.trip_id || null,
+        row.plate_number,
+        row.service_schedule,
+        row.line_code,
+        row.fleet_number,
+      ]
+    );
+    await db.query(
+      `INSERT INTO service_segments (service_id, driver_id, fleet_number, status)
+       VALUES ($1, $2, $3, 'in_progress')`,
+      [inserted.rows[0].id, row.driver_id, row.fleet_number]
+    );
+    await db.query(`UPDATE daily_roster SET status = 'in_progress' WHERE id = $1`, [rosterId]);
+
+    return res.status(201).json({
+      message: "Serviço iniciado remotamente pelo supervisor.",
+      service: inserted.rows[0],
+      rosterId,
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao iniciar serviço pela escala." });
   }
 });
 

@@ -12,6 +12,7 @@ router.use(authMiddleware);
 let servicePointsQualityColumnsEnsured = false;
 let serviceStopProgressTableEnsured = false;
 let serviceVehicleOdometerColumnsEnsured = false;
+let serviceRouteIncidentsTableEnsured = false;
 
 async function ensurePlannedServiceLocationColumns() {
   await db.query(
@@ -119,6 +120,37 @@ async function ensureServiceVehicleOdometerColumns() {
   serviceVehicleOdometerColumnsEnsured = true;
 }
 
+async function ensureServiceRouteIncidentsTable() {
+  if (serviceRouteIncidentsTableEnsured) return;
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS service_route_incidents (
+      id BIGSERIAL PRIMARY KEY,
+      service_id BIGINT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+      driver_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      line_code VARCHAR(50),
+      fleet_number VARCHAR(50),
+      plate_number VARCHAR(50),
+      gtfs_trip_id VARCHAR(120),
+      threshold_m NUMERIC(8,2) NOT NULL DEFAULT 150,
+      max_deviation_m NUMERIC(10,2) NOT NULL DEFAULT 0,
+      first_detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      last_detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      resolved_at TIMESTAMPTZ,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_service_route_incidents_service_open
+     ON service_route_incidents(service_id, resolved_at, last_detected_at DESC)`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_service_route_incidents_recent
+     ON service_route_incidents(first_detected_at DESC)`
+  );
+  serviceRouteIncidentsTableEnsured = true;
+}
+
 function geoDistanceMeters(aLat, aLng, bLat, bLng) {
   const toRad = (deg) => (Number(deg) * Math.PI) / 180;
   const R = 6371000;
@@ -222,6 +254,16 @@ async function updateServiceRouteCheck(serviceId, gtfsTripId, point) {
   let deviationMeters = null;
   let isOffRoute = false;
   if (gtfsTripId) {
+    await ensureServiceRouteIncidentsTable();
+    const previousStateRes = await db.query(
+      `SELECT id, driver_id, line_code, fleet_number, plate_number, is_off_route
+       FROM services
+       WHERE id = $1
+       LIMIT 1`,
+      [serviceId]
+    );
+    const serviceSnapshot = previousStateRes.rows[0] || null;
+    const wasOffRoute = Boolean(serviceSnapshot?.is_off_route);
     const shapePoints = await getShapePointsByTripId(gtfsTripId);
     if (shapePoints.length >= 2) {
       deviationMeters = minDistanceToPolylineMeters({ lat: point.lat, lng: point.lng }, shapePoints);
@@ -233,6 +275,47 @@ async function updateServiceRouteCheck(serviceId, gtfsTripId, point) {
          WHERE id = $1`,
         [serviceId, deviationMeters, isOffRoute]
       );
+      if (isOffRoute) {
+        if (wasOffRoute) {
+          await db.query(
+            `UPDATE service_route_incidents
+             SET max_deviation_m = GREATEST(max_deviation_m, $2),
+                 last_detected_at = NOW(),
+                 gtfs_trip_id = COALESCE($3, gtfs_trip_id),
+                 updated_at = NOW()
+             WHERE service_id = $1
+               AND resolved_at IS NULL`,
+            [serviceId, deviationMeters, gtfsTripId || null]
+          );
+        } else if (serviceSnapshot?.driver_id) {
+          await db.query(
+            `INSERT INTO service_route_incidents (
+               service_id, driver_id, line_code, fleet_number, plate_number, gtfs_trip_id,
+               threshold_m, max_deviation_m, first_detected_at, last_detected_at, updated_at
+             )
+             VALUES ($1, $2, $3, $4, $5, $6, 150, $7, NOW(), NOW(), NOW())`,
+            [
+              serviceId,
+              serviceSnapshot.driver_id,
+              serviceSnapshot?.line_code || null,
+              serviceSnapshot?.fleet_number || null,
+              serviceSnapshot?.plate_number || null,
+              gtfsTripId || null,
+              deviationMeters,
+            ]
+          );
+        }
+      } else if (wasOffRoute) {
+        await db.query(
+          `UPDATE service_route_incidents
+           SET resolved_at = NOW(),
+               last_detected_at = NOW(),
+               updated_at = NOW()
+           WHERE service_id = $1
+             AND resolved_at IS NULL`,
+          [serviceId]
+        );
+      }
     }
   }
   return { deviationMeters, isOffRoute };

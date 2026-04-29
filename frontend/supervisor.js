@@ -76,6 +76,12 @@ const transferServiceBtn = document.getElementById("transferServiceBtn");
 const cancelServiceBtn = document.getElementById("cancelServiceBtn");
 const serviceRouteTimesEl = document.getElementById("serviceRouteTimes");
 const conflictAlertsListEl = document.getElementById("conflictAlertsList");
+const routeIncidentsListEl = document.getElementById("routeIncidentsList");
+const routeIncidentsFromDateEl = document.getElementById("routeIncidentsFromDate");
+const routeIncidentsToDateEl = document.getElementById("routeIncidentsToDate");
+const routeIncidentsLineCodeEl = document.getElementById("routeIncidentsLineCode");
+const routeIncidentsFleetEl = document.getElementById("routeIncidentsFleet");
+const routeIncidentsStatusEl = document.getElementById("routeIncidentsStatus");
 const supLiveMapEl = document.getElementById("supLiveMap");
 const supLiveServicesListEl = document.getElementById("supLiveServicesList");
 const liveServiceFilterSelectEl = document.getElementById("liveServiceFilterSelect");
@@ -192,6 +198,7 @@ const gtfsCalendarLegendCache = new Map();
 let supervisorAlertsPollTimer = null;
 let supervisorAlertBaselineReady = false;
 let lastSupervisorAlertSignature = "";
+const spokenOffRouteAlertKeys = new Set();
 let liveRealtimeStatusFilter = "all";
 const TAB_MODULE_MAP = {
   tabResumo: "dashboard",
@@ -381,6 +388,38 @@ function playSupervisorAlertSound() {
   } else {
     playSupervisorTone(ctx, now, 880, 0.15, volume, "square");
   }
+}
+
+function speakSupervisorAlertText(message) {
+  if (!("speechSynthesis" in window) || typeof window.SpeechSynthesisUtterance !== "function") return;
+  try {
+    const utterance = new window.SpeechSynthesisUtterance(String(message || "").trim());
+    if (!utterance.text) return;
+    utterance.lang = "pt-PT";
+    utterance.rate = 1;
+    utterance.pitch = 1;
+    utterance.volume = Math.max(0.2, Math.min(1, Number(getSupAlertSoundSettings().volume || 70) / 100));
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(utterance);
+  } catch (_error) {
+    // fallback silencioso
+  }
+}
+
+function maybeSpeakOffRouteAlerts(services) {
+  const list = Array.isArray(services) ? services : [];
+  list.forEach((svc) => {
+    if (!svc || !svc.is_off_route) return;
+    const deviation = Number(svc.route_deviation_m);
+    const fleet = String(svc.fleet_number || svc.plate_number || "-");
+    const line = String(svc.line_code || "-");
+    const key = `${svc.id}:${fleet}:${line}:${Number.isFinite(deviation) ? Math.round(deviation) : "na"}`;
+    if (spokenOffRouteAlertKeys.has(key)) return;
+    spokenOffRouteAlertKeys.add(key);
+    playSupervisorAlertSound();
+    const deviationText = Number.isFinite(deviation) ? `${Math.round(deviation)} metros` : "valor não disponível";
+    speakSupervisorAlertText(`Alerta de desvio de rota. Viatura ${fleet}. Linha ${line}. Desvio ${deviationText}.`);
+  });
 }
 
 function applySupAlertSoundSettingsToUi() {
@@ -969,6 +1008,7 @@ async function loginSupervisor(event) {
   }
 
   supToken = data.token;
+  spokenOffRouteAlertKeys.clear();
   sessionStorage.setItem(AUTH_SESSION_KEY, JSON.stringify({ token: data.token, user: data.user }));
   alert(`Sessao iniciada para ${data.user.name} (${role})`);
   applySessionAndLoad(data.user);
@@ -977,6 +1017,7 @@ async function loginSupervisor(event) {
   await loadLiveServicesMap();
   await loadDrivers();
   await loadConflictAlerts();
+  await loadRouteIncidents();
   startLiveMapAutoRefresh();
   supervisorAlertBaselineReady = false;
   startSupervisorAlertsPolling();
@@ -1002,6 +1043,7 @@ function logoutSupervisor() {
   stopSupervisorAlertsPolling();
   supervisorAlertBaselineReady = false;
   lastSupervisorAlertSignature = "";
+  spokenOffRouteAlertKeys.clear();
   document.getElementById("supLoginForm").reset();
   sessionStorage.removeItem(AUTH_SESSION_KEY);
 }
@@ -1062,6 +1104,7 @@ function openSupervisorTab(tabId) {
   }
   if (tabId === "tabAlertasConflito") {
     loadConflictAlerts();
+    loadRouteIncidents();
   }
   if (tabId === "tabIntegracoesGps") {
     loadTrackerDevices();
@@ -1468,10 +1511,127 @@ async function loadLiveServicesMap() {
       return;
     }
     currentLiveServices = Array.isArray(data) ? data : [];
+    maybeSpeakOffRouteAlerts(currentLiveServices);
     renderLiveRealtimeView();
   } catch (_error) {
     supLiveServicesListEl.innerHTML = "<div>Ligação temporariamente indisponível. A tentar novamente no próximo ciclo.</div>";
   }
+}
+
+async function loadRouteIncidents() {
+  if (!supToken || !routeIncidentsListEl) return;
+  routeIncidentsListEl.innerHTML = "<div>A carregar incidências...</div>";
+  try {
+    const response = await fetch(`${API_BASE}/supervisor/route-incidents${buildRouteIncidentsQueryString(true)}`, {
+      headers: getAuthHeaders(),
+    });
+    const data = await response.json().catch(() => []);
+    if (!response.ok) {
+      routeIncidentsListEl.innerHTML = `<div>${data.message || "Erro ao carregar incidências de desvio."}</div>`;
+      return;
+    }
+    if (!Array.isArray(data) || !data.length) {
+      routeIncidentsListEl.innerHTML = "<div>Sem incidências de desvio registadas.</div>";
+      return;
+    }
+    routeIncidentsListEl.innerHTML = "";
+    data.forEach((item) => {
+      const article = document.createElement("article");
+      article.className = "service-card-item";
+      const deviation = Number(item.max_deviation_m);
+      const threshold = Number(item.threshold_m);
+      const isOpen = !item.resolved_at;
+      article.innerHTML = `
+        <div class="service-card-head">
+          <strong>Incidência #${item.id}</strong>
+          <span class="status-badge ${isOpen ? "status-in_progress" : "status-completed"}">${isOpen ? "Em aberto" : "Resolvida"}</span>
+        </div>
+        <div class="service-card-grid">
+          <div><small>Serviço</small><div>#${item.service_id || "-"}</div></div>
+          <div><small>Motorista</small><div>${item.driver_name || "-"} (Mec. ${item.driver_mechanic_number || "-"})</div></div>
+          <div><small>Viatura</small><div>${item.fleet_number || item.plate_number || "-"}</div></div>
+          <div><small>Linha</small><div>${item.line_code || "-"}</div></div>
+          <div><small>Desvio máximo</small><div>${Number.isFinite(deviation) ? `${Math.round(deviation)} m` : "-"}</div></div>
+          <div><small>Limiar</small><div>${Number.isFinite(threshold) ? `${Math.round(threshold)} m` : "150 m"}</div></div>
+          <div><small>Primeira deteção</small><div>${item.first_detected_at ? new Date(item.first_detected_at).toLocaleString() : "-"}</div></div>
+          <div><small>Última deteção</small><div>${item.last_detected_at ? new Date(item.last_detected_at).toLocaleString() : "-"}</div></div>
+          <div><small>Resolvida em</small><div>${item.resolved_at ? new Date(item.resolved_at).toLocaleString() : "-"}</div></div>
+        </div>
+      `;
+      routeIncidentsListEl.appendChild(article);
+    });
+  } catch (_error) {
+    routeIncidentsListEl.innerHTML = "<div>Falha de ligação ao carregar incidências.</div>";
+  }
+}
+
+function buildRouteIncidentsQueryString(includeLimit = false) {
+  const params = new URLSearchParams();
+  const status = String(routeIncidentsStatusEl?.value || "all").trim().toLowerCase();
+  const lineCode = String(routeIncidentsLineCodeEl?.value || "").trim();
+  const fleet = String(routeIncidentsFleetEl?.value || "").trim();
+  const fromDate = String(routeIncidentsFromDateEl?.value || "").trim();
+  const toDate = String(routeIncidentsToDateEl?.value || "").trim();
+  if (status) params.set("status", status);
+  if (lineCode) params.set("lineCode", lineCode);
+  if (fleet) params.set("fleet", fleet);
+  if (fromDate) params.set("fromDate", fromDate);
+  if (toDate) params.set("toDate", toDate);
+  if (includeLimit) params.set("limit", "200");
+  const query = params.toString();
+  return query ? `?${query}` : "";
+}
+
+async function exportRouteIncidentsCsv() {
+  if (!supToken) {
+    alert("Inicie sessão como supervisor ou administrador.");
+    return;
+  }
+  const response = await fetch(`${API_BASE}/supervisor/route-incidents/export.csv${buildRouteIncidentsQueryString(false)}`, {
+    headers: { Authorization: `Bearer ${supToken}` },
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    alert(error.message || "Erro ao exportar incidências CSV.");
+    return;
+  }
+  const csvText = await response.text();
+  const blob = new Blob([csvText], { type: "text/csv;charset=utf-8;" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "incidencias_desvio_rota.csv";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+async function exportRouteIncidentsXlsx() {
+  if (!supToken) {
+    alert("Inicie sessão como supervisor ou administrador.");
+    return;
+  }
+  const response = await fetch(`${API_BASE}/supervisor/route-incidents/export.xlsx${buildRouteIncidentsQueryString(false)}`, {
+    headers: { Authorization: `Bearer ${supToken}` },
+  });
+  if (!response.ok) {
+    const error = await response.json().catch(() => ({}));
+    alert(error.message || "Erro ao exportar incidências Excel.");
+    return;
+  }
+  const buffer = await response.arrayBuffer();
+  const blob = new Blob([buffer], {
+    type: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "incidencias_desvio_rota.xlsx";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
 }
 
 function computeLiveDelayMinutes(service) {
@@ -1588,8 +1748,11 @@ async function renderLiveRealtimeView() {
     card.className = "service-card-item";
     const delayMinutes = computeLiveDelayMinutes(svc);
     const delayClass = getDelayClass(delayMinutes);
+    const offRoute = Boolean(svc.is_off_route);
+    const deviationMeters = Number(svc.route_deviation_m);
     card.innerHTML = `<div><strong>Serviço #${svc.id}</strong> | Linha ${svc.line_code || "-"} | Frota ${svc.fleet_number || "-"} | <span class="live-driver-name" data-live-driver-service-id="${svc.id}">${svc.driver_name || "-"}</span></div>
       <div><small>Desvio horário:</small> <span class="delay-pill ${delayClass}">${formatDelay(delayMinutes)}</span></div>
+      <div><small>Estado rota:</small> ${offRoute ? `<span class="status-badge status-other">Fora da rota (${Number.isFinite(deviationMeters) ? Math.round(deviationMeters) : "-"} m)</span>` : `<span class="status-badge status-completed">Dentro da rota</span>`}</div>
       <div class="service-card-actions">
         <button type="button" class="stop-passages-shortcut-btn" data-stop-passages-service-id="${svc.id}">Paragens</button>
       </div>`;
@@ -4715,6 +4878,7 @@ function renderRosterDayServiceRows(rows) {
     const startLoc = row.start_location || "-";
     const endLoc = row.end_location || "-";
     const rs = String(row.roster_status || "").toLowerCase();
+    const canForceStart = ["pending", "assigned", "pendente", "atribuido", "atribuído"].includes(rs);
     const rosterBadgeClass =
       rs === "completed" ? "status-completed" : rs === "in_progress" ? "status-in_progress" : "status-other";
     const driverOptions = driversCache
@@ -4772,6 +4936,13 @@ function renderRosterDayServiceRows(rows) {
                 ? `<p class="field-help">Não é possível alterar: o estado na escala já não permite reatribuição (viagem em curso ou concluída na escala).</p>`
                 : ""
             : ""
+      }
+      ${
+        canForceStart
+          ? `<div class="service-card-actions">
+        <button type="button" class="start-roster-service-btn" data-roster-id="${row.roster_id}">Iniciar serviço agora (supervisor)</button>
+      </div>`
+          : ""
       }
     `;
     container.appendChild(card);
@@ -4927,6 +5098,8 @@ if (onlyCancelledEl) {
 }
 bindById("exportBtn", "click", exportCsv);
 bindById("exportExcelBtn", "click", exportExcelServices);
+bindById("exportRouteIncidentsCsvBtn", "click", exportRouteIncidentsCsv);
+bindById("exportRouteIncidentsXlsxBtn", "click", exportRouteIncidentsXlsx);
 bindById("driverCreateForm", "submit", createDriver);
 bindById("accessUserCreateForm", "submit", createAccessUser);
 bindById("driverPasswordResetForm", "submit", resetDriverPassword);
@@ -5270,6 +5443,34 @@ const refreshConflictAlertsBtn = document.getElementById("refreshConflictAlertsB
 if (refreshConflictAlertsBtn) {
   refreshConflictAlertsBtn.addEventListener("click", loadConflictAlerts);
 }
+const refreshRouteIncidentsBtn = document.getElementById("refreshRouteIncidentsBtn");
+if (refreshRouteIncidentsBtn) {
+  refreshRouteIncidentsBtn.addEventListener("click", loadRouteIncidents);
+}
+if (routeIncidentsStatusEl && !routeIncidentsStatusEl.value) {
+  routeIncidentsStatusEl.value = "all";
+}
+if (routeIncidentsFromDateEl && !routeIncidentsFromDateEl.value) {
+  routeIncidentsFromDateEl.value = todayISOInLisbon();
+}
+if (routeIncidentsToDateEl && !routeIncidentsToDateEl.value) {
+  routeIncidentsToDateEl.value = todayISOInLisbon();
+}
+[
+  routeIncidentsFromDateEl,
+  routeIncidentsToDateEl,
+  routeIncidentsLineCodeEl,
+  routeIncidentsFleetEl,
+  routeIncidentsStatusEl,
+].forEach((el) => {
+  if (!el) return;
+  const eventName = el.tagName === "SELECT" || el.type === "date" ? "change" : "keydown";
+  el.addEventListener(eventName, (event) => {
+    if (eventName === "keydown" && event.key !== "Enter") return;
+    if (eventName === "keydown") event.preventDefault();
+    loadRouteIncidents();
+  });
+});
 const refreshLiveServicesBtn = document.getElementById("refreshLiveServicesBtn");
 if (refreshLiveServicesBtn) {
   refreshLiveServicesBtn.addEventListener("click", loadLiveServicesMap);
@@ -5298,6 +5499,37 @@ document.querySelectorAll(".live-status-chip").forEach((btn) => {
 });
 const rosterDayCardsEl = document.getElementById("rosterDayCards");
 if (rosterDayCardsEl) {
+  rosterDayCardsEl.addEventListener("click", async (event) => {
+    const btn = event.target.closest(".start-roster-service-btn");
+    if (!btn) return;
+    if (!supToken) {
+      alert("Sessão expirada ou sem token. Inicie sessão novamente.");
+      return;
+    }
+    const rosterId = Number(btn.getAttribute("data-roster-id"));
+    if (!Number.isFinite(rosterId) || rosterId <= 0) return;
+    const confirmed = window.confirm("Iniciar este serviço remotamente para o motorista escalado?");
+    if (!confirmed) return;
+    btn.disabled = true;
+    try {
+      const response = await fetch(`${API_BASE}/supervisor/roster/${rosterId}/start-service`, {
+        method: "POST",
+        headers: getAuthHeaders(),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) {
+        alert(data.message || "Erro ao iniciar serviço remotamente.");
+        return;
+      }
+      alert(data.message || "Serviço iniciado remotamente.");
+      await loadRosterToday();
+      await loadLiveServicesMap();
+    } catch (_error) {
+      alert("Falha de ligação ao iniciar serviço remotamente.");
+    } finally {
+      btn.disabled = false;
+    }
+  });
   rosterDayCardsEl.addEventListener("submit", async (event) => {
     const form = event.target.closest(".roster-reassign-form");
     if (!form) return;

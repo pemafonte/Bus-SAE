@@ -466,6 +466,29 @@ ALTER TABLE supervisor_conflict_alerts
 CREATE INDEX IF NOT EXISTS idx_supervisor_conflict_alerts_created
   ON supervisor_conflict_alerts(created_at DESC);
 
+-- Route deviation incidents (off-route GTFS)
+CREATE TABLE IF NOT EXISTS service_route_incidents (
+  id BIGSERIAL PRIMARY KEY,
+  service_id BIGINT NOT NULL REFERENCES services(id) ON DELETE CASCADE,
+  driver_id INT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  line_code VARCHAR(50),
+  fleet_number VARCHAR(50),
+  plate_number VARCHAR(50),
+  gtfs_trip_id VARCHAR(120),
+  threshold_m NUMERIC(8,2) NOT NULL DEFAULT 150,
+  max_deviation_m NUMERIC(10,2) NOT NULL DEFAULT 0,
+  first_detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  last_detected_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  resolved_at TIMESTAMPTZ,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_service_route_incidents_service_open
+  ON service_route_incidents(service_id, resolved_at, last_detected_at DESC);
+CREATE INDEX IF NOT EXISTS idx_service_route_incidents_recent
+  ON service_route_incidents(first_detected_at DESC);
+
 -- Operational messaging tables
 CREATE TABLE IF NOT EXISTS ops_messages (
   id BIGSERIAL PRIMARY KEY,
