@@ -2532,7 +2532,7 @@ router.patch("/editor/trip-stops/reorder-position", async (req, res) => {
     for (const targetTripId of targetTripIds) {
       const stopsRes = await client.query(
         `SELECT
-           ctid::text AS row_ctid,
+           st.id AS row_id,
            st.stop_sequence,
            st.arrival_time,
            st.departure_time,
@@ -2559,8 +2559,8 @@ router.patch("/editor/trip-stops/reorder-position", async (req, res) => {
           `UPDATE gtfs_stop_times
            SET stop_sequence = $3
            WHERE trip_id = $1
-             AND ctid::text = $2`,
-          [targetTripId, stops[i].row_ctid, i + 10001]
+             AND id = $2`,
+          [targetTripId, Number(stops[i].row_id), i + 10001]
         );
       }
       for (let i = 0; i < stops.length; i += 1) {
@@ -2568,8 +2568,8 @@ router.patch("/editor/trip-stops/reorder-position", async (req, res) => {
           `UPDATE gtfs_stop_times
            SET stop_sequence = $3
            WHERE trip_id = $1
-             AND stop_sequence = $2`,
-          [targetTripId, i + 10001, i + 1]
+             AND id = $2`,
+          [targetTripId, Number(stops[i].row_id), i + 1]
         );
       }
 
