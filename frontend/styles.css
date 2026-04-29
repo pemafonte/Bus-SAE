@@ -1118,10 +1118,21 @@ pre {
 .gtfs-editor-stops-spine .service-card-item {
   padding: 8px 10px;
   border-left: 4px solid #60a5fa;
+  cursor: grab;
 }
 
 .gtfs-editor-stops-spine .service-card-head {
   margin-bottom: 4px;
+}
+
+.gtfs-editor-stops-spine .service-card-item.is-dragging {
+  opacity: 0.55;
+  cursor: grabbing;
+}
+
+.gtfs-editor-stops-spine .service-card-item.drop-target {
+  outline: 2px dashed #2563eb;
+  background: #eff6ff;
 }
 
 .gtfs-editor-stops-spine .service-card-grid {

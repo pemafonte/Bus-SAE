@@ -136,6 +136,7 @@ const gtfsEditorScopeHintEl = document.getElementById("gtfsEditorScopeHint");
 const gtfsEditorAddStopIdEl = document.getElementById("gtfsEditorAddStopId");
 const gtfsEditorMapEl = document.getElementById("gtfsEditorMap");
 const gtfsEditorAutoAdjustTimeBtnEl = document.getElementById("gtfsEditorAutoAdjustTimeBtn");
+const gtfsEditorSaveSpineBtnEl = document.getElementById("gtfsEditorSaveSpineBtn");
 const gtfsAnalyticsFeedSelectEl = document.getElementById("gtfsAnalyticsFeedSelect");
 const gtfsAnalyticsPeriodModeEl = document.getElementById("gtfsAnalyticsPeriodMode");
 const gtfsAnalyticsStartDateEl = document.getElementById("gtfsAnalyticsStartDate");
@@ -197,6 +198,8 @@ let gtfsAnalyticsSelectedRouteId = "";
 let gtfsEditorMap = null;
 let gtfsEditorMapLayer = null;
 let gtfsEditorRouteDrawRequestId = 0;
+let gtfsEditorStopsCatalog = [];
+let gtfsEditorDragSourceSeq = null;
 const gtfsCalendarLegendCache = new Map();
 let supervisorAlertsPollTimer = null;
 let supervisorAlertBaselineReady = false;
@@ -3866,13 +3869,73 @@ async function loadGtfsEditorStopsOptions() {
   gtfsEditorAddStopIdEl.innerHTML = '<option value="">-- Criar nova paragem (usar campos abaixo) --</option>';
   if (!response.ok) return;
   const rows = Array.isArray(data) ? data : [];
-  rows.forEach((stop) => {
+  gtfsEditorStopsCatalog = rows;
+  populateGtfsEditorAddStopOptions(rows, []);
+  await loadGtfsLineBuilderStopOptions(rows);
+}
+
+function populateGtfsEditorAddStopOptions(catalogRows = [], preferredStops = []) {
+  if (!gtfsEditorAddStopIdEl) return;
+  const previousValue = String(gtfsEditorAddStopIdEl.value || "").trim();
+  const byId = new Map();
+  (Array.isArray(catalogRows) ? catalogRows : []).forEach((stop) => {
+    const id = String(stop?.stop_id || "").trim();
+    if (!id) return;
+    byId.set(id, stop);
+  });
+  (Array.isArray(preferredStops) ? preferredStops : []).forEach((stop) => {
+    const id = String(stop?.stop_id || "").trim();
+    if (!id) return;
+    if (!byId.has(id)) byId.set(id, stop);
+  });
+  const preferredIds = new Set(
+    (Array.isArray(preferredStops) ? preferredStops : [])
+      .map((s) => String(s?.stop_id || "").trim())
+      .filter(Boolean)
+  );
+  const merged = [...byId.values()].sort((a, b) => {
+    const aId = String(a?.stop_id || "").trim();
+    const bId = String(b?.stop_id || "").trim();
+    const aPref = preferredIds.has(aId) ? 0 : 1;
+    const bPref = preferredIds.has(bId) ? 0 : 1;
+    if (aPref !== bPref) return aPref - bPref;
+    const aName = String(a?.stop_name || "");
+    const bName = String(b?.stop_name || "");
+    return aName.localeCompare(bName, "pt");
+  });
+  gtfsEditorAddStopIdEl.innerHTML = '<option value="">-- Criar nova paragem (usar campos abaixo) --</option>';
+  merged.forEach((stop) => {
     const option = document.createElement("option");
     option.value = stop.stop_id;
-    option.textContent = `${stop.stop_name || "-"} (${stop.stop_id || "-"})`;
+    const code = String(stop.stop_code || "").trim();
+    option.textContent = `${stop.stop_name || "-"} (${code || stop.stop_id || "-"})`;
+    option.dataset.stopName = stop.stop_name || "";
+    option.dataset.stopCode = stop.stop_code || "";
+    option.dataset.stopLat = stop.stop_lat ?? "";
+    option.dataset.stopLon = stop.stop_lon ?? "";
     gtfsEditorAddStopIdEl.appendChild(option);
   });
-  await loadGtfsLineBuilderStopOptions(rows);
+  if (previousValue) {
+    gtfsEditorAddStopIdEl.value = previousValue;
+  }
+  if (gtfsEditorAddStopIdEl.value) {
+    syncGtfsEditorStopSelectionFields();
+  }
+}
+
+function syncGtfsEditorStopSelectionFields() {
+  if (!gtfsEditorAddStopIdEl) return;
+  const selected = gtfsEditorAddStopIdEl.selectedOptions?.[0] || null;
+  const stopNameInput = document.getElementById("gtfsEditorAddStopName");
+  const stopLatInput = document.getElementById("gtfsEditorAddStopLat");
+  const stopLonInput = document.getElementById("gtfsEditorAddStopLon");
+  const stopId = String(gtfsEditorAddStopIdEl.value || "").trim();
+  if (!stopId) return;
+  if (selected && stopLatInput) stopLatInput.value = String(selected.dataset.stopLat || "").trim();
+  if (selected && stopLonInput) stopLonInput.value = String(selected.dataset.stopLon || "").trim();
+  if (selected && stopNameInput && !String(stopNameInput.value || "").trim()) {
+    stopNameInput.value = String(selected.dataset.stopName || "").trim();
+  }
 }
 
 async function loadGtfsLineBuilderStopOptions(stopsInput = null) {
@@ -3892,8 +3955,10 @@ async function loadGtfsLineBuilderStopOptions(stopsInput = null) {
     rows.forEach((stop) => {
       const option = document.createElement("option");
       option.value = stop.stop_id;
-      option.textContent = `${stop.stop_name || "-"} (${stop.stop_id || "-"})`;
+      const code = String(stop.stop_code || "").trim();
+      option.textContent = `${stop.stop_name || "-"} (${code || stop.stop_id || "-"})`;
       option.dataset.stopName = stop.stop_name || "";
+      option.dataset.stopCode = stop.stop_code || "";
       option.dataset.stopLat = stop.stop_lat ?? "";
       option.dataset.stopLon = stop.stop_lon ?? "";
       option.dataset.stopMunicipality = stop.municipality || "";
@@ -3965,11 +4030,14 @@ function renderGtfsEditorStops(rows) {
     const safeStopName = String(stop.stop_name || "").replace(/"/g, "&quot;");
     const article = document.createElement("article");
     article.className = "service-card-item";
+    article.setAttribute("draggable", "true");
+    article.dataset.gtfsDragSeq = String(stop.stop_sequence || "");
     article.innerHTML = `
       <div class="service-card-head">
-        <strong>#${stop.stop_sequence} ${stop.stop_name || stop.stop_id || "-"}</strong>
+        <strong>#${stop.stop_sequence} ${stop.stop_name || stop.stop_code || stop.stop_id || "-"}</strong>
       </div>
       <div class="service-card-grid">
+        <div><small>stop_code</small><div>${stop.stop_code || "-"}</div></div>
         <div><small>stop_id</small><div>${stop.stop_id || "-"}</div></div>
         <div><small>Hora chegada</small><div>${stop.arrival_time || "-"}</div></div>
         <div><small>Hora partida</small><div>${stop.departure_time || "-"}</div></div>
@@ -3979,8 +4047,6 @@ function renderGtfsEditorStops(rows) {
         <input type="text" data-gtfs-time-arrival value="${stop.arrival_time || ""}" placeholder="Chegada HH:MM:SS" />
         <input type="text" data-gtfs-time-departure value="${stop.departure_time || ""}" placeholder="Partida HH:MM:SS" />
         <button type="button" data-gtfs-save-time-seq="${stop.stop_sequence}">Guardar hora</button>
-        <button type="button" data-gtfs-move-seq="${stop.stop_sequence}" data-gtfs-move-dir="up">Subir</button>
-        <button type="button" data-gtfs-move-seq="${stop.stop_sequence}" data-gtfs-move-dir="down">Descer</button>
         <input type="text" data-gtfs-rename-stop-id="${stop.stop_id || ""}" data-gtfs-rename-input value="${safeStopName}" placeholder="Novo nome da paragem" />
         <button type="button" data-gtfs-rename-stop-id="${stop.stop_id || ""}">Renomear</button>
         <button type="button" class="danger-btn" data-gtfs-remove-seq="${stop.stop_sequence}">Remover</button>
@@ -4011,6 +4077,7 @@ async function loadGtfsEditorTripStops() {
   }
   renderGtfsEditorStops(data.stops || []);
   drawGtfsEditorStopsMap(data.stops || []);
+  populateGtfsEditorAddStopOptions(gtfsEditorStopsCatalog, data.stops || []);
   renderGtfsEditorSummary(
     `Trip ${data.trip?.trip_id || tripId} | route ${data.trip?.route_id || "-"} | headsign ${data.trip?.trip_headsign || "-"} | paragens ${Array.isArray(data.stops) ? data.stops.length : 0}`
   );
@@ -4086,22 +4153,24 @@ async function removeGtfsEditorStop(stopSequence) {
   await loadGtfsEditorTripStops();
 }
 
-async function moveGtfsEditorStop(stopSequence, direction) {
+async function reorderGtfsEditorStopByDrop(fromStopSequence, toStopSequence) {
   if (!supToken || !gtfsEditorTripSelectEl) return;
   const tripId = String(gtfsEditorTripSelectEl.value || "").trim();
   if (!tripId) return;
+  const fromSeq = Number(fromStopSequence);
+  const toSeq = Number(toStopSequence);
+  if (!Number.isFinite(fromSeq) || !Number.isFinite(toSeq) || fromSeq === toSeq) return;
   const applyScope = String(gtfsEditorApplyScopeEl?.value || "trip").trim().toLowerCase();
-  const response = await fetch(`${API_BASE}/gtfs/editor/trip-stops/reorder`, {
+  const response = await fetch(`${API_BASE}/gtfs/editor/trip-stops/reorder-position`, {
     method: "PATCH",
     headers: getAuthHeaders(),
-    body: JSON.stringify({ tripId, stopSequence, direction, applyScope }),
+    body: JSON.stringify({ tripId, fromStopSequence: fromSeq, toStopSequence: toSeq, applyScope }),
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    alert(data.message || "Erro ao mover paragem.");
+    alert(data.message || "Erro ao reposicionar paragem.");
     return;
   }
-  alert(data.message || "Paragem movida.");
   await loadGtfsEditorTripStops();
 }
 
@@ -4144,6 +4213,28 @@ async function updateGtfsEditorStopTime(stopSequence, arrivalTime, departureTime
     return;
   }
   alert(data.message || "Hora de passagem atualizada.");
+  await loadGtfsEditorTripStops();
+}
+
+async function saveGtfsEditorSpine() {
+  if (!supToken || !gtfsEditorTripSelectEl) return;
+  const tripId = String(gtfsEditorTripSelectEl.value || "").trim();
+  if (!tripId) {
+    alert("Selecione uma trip GTFS antes de guardar a espinha.");
+    return;
+  }
+  const applyScope = String(gtfsEditorApplyScopeEl?.value || "trip").trim().toLowerCase();
+  const response = await fetch(`${API_BASE}/gtfs/editor/trip-stops/spine/normalize`, {
+    method: "PATCH",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ tripId, applyScope }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao guardar a espinha.");
+    return;
+  }
+  alert(data.message || "Espinha guardada.");
   await loadGtfsEditorTripStops();
 }
 
@@ -5423,6 +5514,9 @@ if (gtfsAnalyticsTripSelectEl) {
 if (gtfsEditorRouteSelectEl) {
   gtfsEditorRouteSelectEl.addEventListener("change", loadGtfsEditorTripsByRoute);
 }
+if (gtfsEditorAddStopIdEl) {
+  gtfsEditorAddStopIdEl.addEventListener("change", syncGtfsEditorStopSelectionFields);
+}
 if (gtfsEditorOperationModeEl) {
   gtfsEditorOperationModeEl.addEventListener("change", syncGtfsEditorScopeWithMode);
 }
@@ -5437,6 +5531,9 @@ if (gtfsEditorAddStopForm) {
 }
 if (gtfsEditorAutoAdjustTimeBtnEl) {
   gtfsEditorAutoAdjustTimeBtnEl.addEventListener("click", autoAdjustGtfsEditorTimes);
+}
+if (gtfsEditorSaveSpineBtnEl) {
+  gtfsEditorSaveSpineBtnEl.addEventListener("click", saveGtfsEditorSpine);
 }
 const gtfsLineBuilderFormEl = document.getElementById("gtfsLineBuilderForm");
 if (gtfsLineBuilderFormEl) {
@@ -5477,20 +5574,55 @@ if (gtfsLineBuilderStopsListEl && !gtfsLineBuilderStopsListEl.dataset.gtfsLineBu
 }
 if (gtfsEditorStopsListEl && !gtfsEditorStopsListEl.dataset.gtfsEditorDelegation) {
   gtfsEditorStopsListEl.dataset.gtfsEditorDelegation = "1";
+  gtfsEditorStopsListEl.addEventListener("dragstart", (event) => {
+    const row = event.target.closest(".service-card-item[data-gtfs-drag-seq]");
+    if (!row) return;
+    const seq = Number(row.getAttribute("data-gtfs-drag-seq"));
+    if (!Number.isFinite(seq)) return;
+    gtfsEditorDragSourceSeq = seq;
+    row.classList.add("is-dragging");
+    if (event.dataTransfer) {
+      event.dataTransfer.effectAllowed = "move";
+      event.dataTransfer.setData("text/plain", String(seq));
+    }
+  });
+  gtfsEditorStopsListEl.addEventListener("dragend", (event) => {
+    const row = event.target.closest(".service-card-item[data-gtfs-drag-seq]");
+    if (row) row.classList.remove("is-dragging");
+    gtfsEditorDragSourceSeq = null;
+    gtfsEditorStopsListEl
+      .querySelectorAll(".service-card-item.drop-target")
+      .forEach((node) => node.classList.remove("drop-target"));
+  });
+  gtfsEditorStopsListEl.addEventListener("dragover", (event) => {
+    const targetRow = event.target.closest(".service-card-item[data-gtfs-drag-seq]");
+    if (!targetRow) return;
+    event.preventDefault();
+    gtfsEditorStopsListEl
+      .querySelectorAll(".service-card-item.drop-target")
+      .forEach((node) => node.classList.remove("drop-target"));
+    targetRow.classList.add("drop-target");
+  });
+  gtfsEditorStopsListEl.addEventListener("drop", async (event) => {
+    const targetRow = event.target.closest(".service-card-item[data-gtfs-drag-seq]");
+    if (!targetRow) return;
+    event.preventDefault();
+    const targetSeq = Number(targetRow.getAttribute("data-gtfs-drag-seq"));
+    const sourceSeq = Number.isFinite(gtfsEditorDragSourceSeq)
+      ? gtfsEditorDragSourceSeq
+      : Number(event.dataTransfer?.getData("text/plain"));
+    gtfsEditorStopsListEl
+      .querySelectorAll(".service-card-item.drop-target")
+      .forEach((node) => node.classList.remove("drop-target"));
+    if (!Number.isFinite(sourceSeq) || !Number.isFinite(targetSeq) || sourceSeq === targetSeq) return;
+    await reorderGtfsEditorStopByDrop(sourceSeq, targetSeq);
+  });
   gtfsEditorStopsListEl.addEventListener("click", (e) => {
     const btn = e.target.closest("[data-gtfs-remove-seq]");
     if (btn) {
       const seq = Number(btn.getAttribute("data-gtfs-remove-seq"));
       if (!Number.isFinite(seq)) return;
       removeGtfsEditorStop(seq);
-      return;
-    }
-    const moveBtn = e.target.closest("[data-gtfs-move-seq][data-gtfs-move-dir]");
-    if (moveBtn) {
-      const seq = Number(moveBtn.getAttribute("data-gtfs-move-seq"));
-      const direction = String(moveBtn.getAttribute("data-gtfs-move-dir") || "");
-      if (!Number.isFinite(seq) || !direction) return;
-      moveGtfsEditorStop(seq, direction);
       return;
     }
     const renameBtn = e.target.closest("button[data-gtfs-rename-stop-id]");

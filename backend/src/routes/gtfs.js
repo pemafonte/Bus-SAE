@@ -753,6 +753,7 @@ async function ensureGtfsMultiFeedInfra() {
   await db.query(`ALTER TABLE gtfs_trips ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default'`);
   await db.query(`ALTER TABLE gtfs_shapes ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default'`);
   await db.query(`ALTER TABLE gtfs_stops ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default'`);
+  await db.query(`ALTER TABLE gtfs_stops ADD COLUMN IF NOT EXISTS stop_code VARCHAR(120)`);
   await db.query(`ALTER TABLE gtfs_stops ADD COLUMN IF NOT EXISTS municipality VARCHAR(120)`);
   await db.query(`ALTER TABLE gtfs_stops ADD COLUMN IF NOT EXISTS parish VARCHAR(120)`);
   await db.query(`ALTER TABLE gtfs_stop_times ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default'`);
@@ -974,20 +975,22 @@ router.post("/import", async (req, res) => {
       const stopId = scopedId(feedKey, row.stop_id);
       const lat = toFloat(row.stop_lat);
       const lon = toFloat(row.stop_lon);
+      const stopCode = String(row.stop_code || "").trim() || null;
       const municipality = String(row.municipality || row.concelho || "").trim() || null;
       const parish = String(row.parish || row.freguesia || "").trim() || null;
       if (!stopId || lat == null || lon == null) continue;
       await db.query(
-        `INSERT INTO gtfs_stops (stop_id, feed_key, stop_name, stop_lat, stop_lon, municipality, parish)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
+        `INSERT INTO gtfs_stops (stop_id, feed_key, stop_code, stop_name, stop_lat, stop_lon, municipality, parish)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
          ON CONFLICT (stop_id) DO UPDATE
          SET feed_key = EXCLUDED.feed_key,
+             stop_code = EXCLUDED.stop_code,
              stop_name = EXCLUDED.stop_name,
              stop_lat = EXCLUDED.stop_lat,
              stop_lon = EXCLUDED.stop_lon,
              municipality = EXCLUDED.municipality,
              parish = EXCLUDED.parish`,
-        [stopId, feedKey, row.stop_name || null, lat, lon, municipality, parish]
+        [stopId, feedKey, stopCode, row.stop_name || null, lat, lon, municipality, parish]
       );
       insertedStops += 1;
     }
@@ -1450,6 +1453,7 @@ router.get("/editor/stops", async (req, res) => {
     const result = await db.query(
       `SELECT
          s.stop_id,
+         COALESCE(s.stop_code, '') AS stop_code,
          s.feed_key,
          COALESCE(s.stop_name, '') AS stop_name,
          s.stop_lat,
@@ -2076,6 +2080,7 @@ router.get("/editor/trip-stops", async (req, res) => {
          st.arrival_time,
          st.departure_time,
          st.stop_id,
+         COALESCE(s.stop_code, '') AS stop_code,
          s.stop_name,
          s.stop_lat,
          s.stop_lon
@@ -2459,6 +2464,239 @@ router.patch("/editor/trip-stops/reorder", async (req, res) => {
   } catch (_error) {
     await client.query("ROLLBACK").catch(() => {});
     return res.status(500).json({ message: "Erro ao reordenar paragem da trip GTFS." });
+  } finally {
+    client.release();
+  }
+});
+
+router.patch("/editor/trip-stops/reorder-position", async (req, res) => {
+  const tripId = String(req.body?.tripId || "").trim();
+  const fromStopSequence = toInt(req.body?.fromStopSequence);
+  const toStopSequence = toInt(req.body?.toStopSequence);
+  const applyScope = String(req.body?.applyScope || "trip").trim().toLowerCase();
+  if (!tripId || !Number.isFinite(fromStopSequence) || !Number.isFinite(toStopSequence)) {
+    return res.status(400).json({ message: "Indique tripId, fromStopSequence e toStopSequence válidos." });
+  }
+  if (!["trip", "route"].includes(applyScope)) {
+    return res.status(400).json({ message: "applyScope inválido (use trip ou route)." });
+  }
+
+  const client = await db.pool.connect();
+  try {
+    await client.query("BEGIN");
+    const tripRes = await client.query(
+      `SELECT trip_id, feed_key, route_id
+       FROM gtfs_trips
+       WHERE trip_id = $1
+       FOR UPDATE`,
+      [tripId]
+    );
+    if (!tripRes.rowCount) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Trip GTFS não encontrada." });
+    }
+    const tripFeedKey = String(tripRes.rows[0].feed_key || "default");
+    const routeId = String(tripRes.rows[0].route_id || "");
+    const targetTripsRes =
+      applyScope === "route"
+        ? await client.query(
+            `SELECT trip_id
+             FROM gtfs_trips
+             WHERE feed_key = $1
+               AND route_id = $2
+             ORDER BY trip_id ASC
+             FOR UPDATE`,
+            [tripFeedKey, routeId]
+          )
+        : { rows: [{ trip_id: tripId }] };
+    const targetTripIds = targetTripsRes.rows.map((r) => String(r.trip_id || "").trim()).filter(Boolean);
+    if (!targetTripIds.length) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Não foram encontradas trips para atualizar." });
+    }
+
+    const avgSpeedKmh = 22;
+    const dwellSeconds = 20;
+    let affectedTrips = 0;
+    for (const targetTripId of targetTripIds) {
+      const stopsRes = await client.query(
+        `SELECT
+           ctid::text AS row_ctid,
+           st.stop_sequence,
+           st.arrival_time,
+           st.departure_time,
+           st.stop_id,
+           s.stop_lat,
+           s.stop_lon
+         FROM gtfs_stop_times st
+         LEFT JOIN gtfs_stops s ON s.stop_id = st.stop_id
+         WHERE st.trip_id = $1
+         ORDER BY st.stop_sequence ASC`,
+        [targetTripId]
+      );
+      const stops = stopsRes.rows;
+      if (stops.length < 2) continue;
+      const fromIdx = stops.findIndex((s) => Number(s.stop_sequence) === fromStopSequence);
+      const toIdx = stops.findIndex((s) => Number(s.stop_sequence) === toStopSequence);
+      if (fromIdx < 0 || toIdx < 0 || fromIdx === toIdx) continue;
+      const moved = stops.splice(fromIdx, 1)[0];
+      stops.splice(toIdx, 0, moved);
+
+      for (let i = 0; i < stops.length; i += 1) {
+        await client.query(
+          `UPDATE gtfs_stop_times
+           SET stop_sequence = $3
+           WHERE trip_id = $1
+             AND ctid::text = $2`,
+          [targetTripId, stops[i].row_ctid, i + 1]
+        );
+      }
+
+      const normalizedRes = await client.query(
+        `SELECT st.stop_sequence, st.stop_id, st.arrival_time, st.departure_time
+         FROM gtfs_stop_times st
+         WHERE st.trip_id = $1
+         ORDER BY st.stop_sequence ASC`,
+        [targetTripId]
+      );
+      const normalized = normalizedRes.rows.map((r) => ({
+        stop_sequence: Number(r.stop_sequence),
+        stop_id: r.stop_id,
+        arrival_time: r.arrival_time,
+        departure_time: r.departure_time,
+      }));
+      const locRes = await client.query(
+        `SELECT stop_id, stop_lat, stop_lon FROM gtfs_stops WHERE stop_id = ANY($1::text[])`,
+        [normalized.map((s) => s.stop_id)]
+      );
+      const locById = new Map(
+        locRes.rows.map((r) => [String(r.stop_id || ""), { lat: Number(r.stop_lat), lon: Number(r.stop_lon) }])
+      );
+      let currentSeconds =
+        parseTimeToSeconds(normalized[0]?.departure_time) ??
+        parseTimeToSeconds(normalized[0]?.arrival_time) ??
+        6 * 3600;
+      for (let i = 0; i < normalized.length; i += 1) {
+        if (i > 0) {
+          const prev = normalized[i - 1];
+          const curr = normalized[i];
+          const prevLoc = locById.get(String(prev.stop_id || ""));
+          const currLoc = locById.get(String(curr.stop_id || ""));
+          let travelSeconds = 60;
+          if (
+            prevLoc &&
+            currLoc &&
+            Number.isFinite(prevLoc.lat) &&
+            Number.isFinite(prevLoc.lon) &&
+            Number.isFinite(currLoc.lat) &&
+            Number.isFinite(currLoc.lon)
+          ) {
+            const km = haversineKm(prevLoc.lat, prevLoc.lon, currLoc.lat, currLoc.lon);
+            travelSeconds = Math.max(45, Math.round((km / avgSpeedKmh) * 3600));
+          }
+          currentSeconds += travelSeconds;
+        }
+        const arr = formatSecondsToTime(currentSeconds);
+        const dep = formatSecondsToTime(currentSeconds + dwellSeconds);
+        await client.query(
+          `UPDATE gtfs_stop_times
+           SET arrival_time = $3,
+               departure_time = $4
+           WHERE trip_id = $1
+             AND stop_sequence = $2`,
+          [targetTripId, normalized[i].stop_sequence, arr, dep]
+        );
+        currentSeconds += dwellSeconds;
+      }
+      affectedTrips += 1;
+    }
+
+    await client.query("COMMIT");
+    return res.json({
+      message:
+        applyScope === "route"
+          ? `Paragens reposicionadas e horários recalculados em ${affectedTrips} trips da carreira.`
+          : "Paragem reposicionada e horários recalculados na trip.",
+      affectedTrips,
+      applyScope,
+    });
+  } catch (_error) {
+    await client.query("ROLLBACK").catch(() => {});
+    return res.status(500).json({ message: "Erro ao reposicionar paragem da trip GTFS." });
+  } finally {
+    client.release();
+  }
+});
+
+router.patch("/editor/trip-stops/spine/normalize", async (req, res) => {
+  const tripId = String(req.body?.tripId || "").trim();
+  const applyScope = String(req.body?.applyScope || "trip")
+    .trim()
+    .toLowerCase();
+  if (!tripId) {
+    return res.status(400).json({ message: "Indique tripId." });
+  }
+  if (applyScope !== "trip" && applyScope !== "route") {
+    return res.status(400).json({ message: "applyScope inválido (use trip ou route)." });
+  }
+  const client = await db.pool.connect();
+  try {
+    await client.query("BEGIN");
+    const tripRes = await client.query(
+      `SELECT trip_id, feed_key, route_id
+       FROM gtfs_trips
+       WHERE trip_id = $1
+       FOR UPDATE`,
+      [tripId]
+    );
+    if (!tripRes.rowCount) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Trip GTFS não encontrada." });
+    }
+    const tripFeedKey = String(tripRes.rows[0].feed_key || "default");
+    const routeId = String(tripRes.rows[0].route_id || "");
+    const targetTripsRes =
+      applyScope === "route"
+        ? await client.query(
+            `SELECT trip_id
+             FROM gtfs_trips
+             WHERE feed_key = $1
+               AND route_id = $2
+             ORDER BY trip_id ASC
+             FOR UPDATE`,
+            [tripFeedKey, routeId]
+          )
+        : { rows: [{ trip_id: tripId }] };
+    const targetTripIds = targetTripsRes.rows.map((r) => String(r.trip_id || "").trim()).filter(Boolean);
+    let affectedTrips = 0;
+    for (const targetTripId of targetTripIds) {
+      const updateRes = await client.query(
+        `WITH ordered AS (
+           SELECT ctid, ROW_NUMBER() OVER (ORDER BY stop_sequence ASC, stop_id ASC) AS new_seq
+           FROM gtfs_stop_times
+           WHERE trip_id = $1
+         )
+         UPDATE gtfs_stop_times st
+         SET stop_sequence = o.new_seq
+         FROM ordered o
+         WHERE st.ctid = o.ctid`,
+        [targetTripId]
+      );
+      if (updateRes.rowCount > 0) affectedTrips += 1;
+    }
+    await client.query("COMMIT");
+    return res.json({
+      message:
+        applyScope === "route"
+          ? `Espinha normalizada em ${affectedTrips} trips da carreira.`
+          : "Espinha da trip normalizada.",
+      tripId,
+      applyScope,
+      affectedTrips,
+    });
+  } catch (_error) {
+    await client.query("ROLLBACK").catch(() => {});
+    return res.status(500).json({ message: "Erro ao normalizar espinha da trip/carreira." });
   } finally {
     client.release();
   }
