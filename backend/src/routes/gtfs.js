@@ -2152,13 +2152,24 @@ router.post("/editor/trip-stops", async (req, res) => {
     let stopId = stopIdRaw;
 
     if (stopId) {
-      const scopedStopId = scopedId(tripFeedKey, stopId);
-      const stopRes = await client.query(`SELECT stop_id FROM gtfs_stops WHERE stop_id = $1`, [scopedStopId]);
+      const stopTail = String(stopId || "").includes("::")
+        ? String(stopId).split("::").slice(1).join("::")
+        : String(stopId);
+      const scopedStopId = scopedId(tripFeedKey, stripFeedPrefix(stopId, tripFeedKey));
+      const scopedFromTail = scopedId(tripFeedKey, stopTail);
+      const candidates = [...new Set([String(stopId).trim(), scopedStopId, scopedFromTail].filter(Boolean))];
+      const stopRes = await client.query(
+        `SELECT stop_id
+         FROM gtfs_stops
+         WHERE stop_id = ANY($1::text[])
+         LIMIT 1`,
+        [candidates]
+      );
       if (!stopRes.rowCount) {
         await client.query("ROLLBACK");
         return res.status(404).json({ message: "stopId não existe em gtfs_stops." });
       }
-      stopId = scopedStopId;
+      stopId = String(stopRes.rows[0].stop_id || "");
     } else {
       stopId = scopedId(tripFeedKey, `custom_${Date.now()}`);
       await client.query(
