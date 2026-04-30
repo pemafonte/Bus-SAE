@@ -2322,9 +2322,11 @@ router.post("/editor/trips/create-on-route", async (req, res) => {
     );
 
     let copiedStops = 0;
+    let copiedShapePoints = 0;
+    let sourceShapeId = null;
     if (sourceTripId) {
       const srcRes = await client.query(
-        `SELECT feed_key, route_id
+        `SELECT feed_key, route_id, shape_id
          FROM gtfs_trips
          WHERE trip_id = $1
          LIMIT 1`,
@@ -2338,6 +2340,7 @@ router.post("/editor/trips/create-on-route", async (req, res) => {
         await client.query("ROLLBACK");
         return res.status(400).json({ message: "A trip base deve pertencer à mesma linha." });
       }
+      sourceShapeId = String(srcRes.rows[0].shape_id || "").trim() || null;
       const srcStopsRes = await client.query(
         `SELECT stop_sequence, stop_id, arrival_time, departure_time
          FROM gtfs_stop_times
@@ -2360,12 +2363,59 @@ router.post("/editor/trips/create-on-route", async (req, res) => {
       }
     }
 
+    if (sourceShapeId) {
+      const srcShapeRes = await client.query(
+        `SELECT shape_pt_lat, shape_pt_lon, shape_pt_sequence
+         FROM gtfs_shapes
+         WHERE feed_key = $1
+           AND shape_id = $2
+         ORDER BY shape_pt_sequence ASC`,
+        [feedKey, sourceShapeId]
+      );
+      for (const pt of srcShapeRes.rows) {
+        const lat = toFloat(pt.shape_pt_lat);
+        const lon = toFloat(pt.shape_pt_lon);
+        const seq = toInt(pt.shape_pt_sequence);
+        if (lat == null || lon == null || seq == null) continue;
+        await client.query(
+          `INSERT INTO gtfs_shapes (feed_key, shape_id, shape_pt_lat, shape_pt_lon, shape_pt_sequence)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [feedKey, shapeId, lat, lon, seq]
+        );
+        copiedShapePoints += 1;
+      }
+    }
+
+    if (!copiedShapePoints && copiedStops > 0) {
+      const rebuiltShapeRes = await client.query(
+        `SELECT st.stop_sequence, s.stop_lat, s.stop_lon
+         FROM gtfs_stop_times st
+         JOIN gtfs_stops s ON s.stop_id = st.stop_id
+         WHERE st.trip_id = $1
+         ORDER BY st.stop_sequence ASC`,
+        [tripId]
+      );
+      for (const row of rebuiltShapeRes.rows) {
+        const lat = toFloat(row.stop_lat);
+        const lon = toFloat(row.stop_lon);
+        const seq = toInt(row.stop_sequence);
+        if (lat == null || lon == null || seq == null) continue;
+        await client.query(
+          `INSERT INTO gtfs_shapes (feed_key, shape_id, shape_pt_lat, shape_pt_lon, shape_pt_sequence)
+           VALUES ($1, $2, $3, $4, $5)`,
+          [feedKey, shapeId, lat, lon, seq]
+        );
+        copiedShapePoints += 1;
+      }
+    }
+
     await client.query("COMMIT");
     return res.json({
       message: "Nova trip/horário criada na linha existente.",
       trip: { trip_id: tripId, route_id: routeId, service_id: serviceId, feed_key: feedKey },
       calendar: { startDate, endDate, days },
       copiedStops,
+      copiedShapePoints,
     });
   } catch (_error) {
     await client.query("ROLLBACK").catch(() => {});
