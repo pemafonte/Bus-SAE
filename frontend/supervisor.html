@@ -416,8 +416,14 @@
             <input id="gtfsEffectiveFrom" type="date" />
             <label for="calendarEffectiveFrom">Data entrada em vigor (calendários)</label>
             <input id="calendarEffectiveFrom" type="date" />
+            <label for="gtfsExportFormat">Formato de exportação de linhas completas</label>
+            <select id="gtfsExportFormat">
+              <option value="zip">GTFS modificado (.zip)</option>
+              <option value="kml">Linhas completas (.kml)</option>
+              <option value="kmz">Linhas completas (.kmz)</option>
+            </select>
             <button type="button" id="saveGtfsEffectiveDatesBtn">Guardar datas de entrada em vigor</button>
-            <button type="button" id="exportGtfsModifiedBtn">Exportar GTFS modificado (.zip)</button>
+            <button type="button" id="exportGtfsModifiedBtn">Exportar GTFS / linhas</button>
           </section>
           <section class="card card-top-gap">
             <h3>Calendários do feed</h3>

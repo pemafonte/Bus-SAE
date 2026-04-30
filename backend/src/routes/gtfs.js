@@ -703,6 +703,76 @@ function toCsv(rows, columns) {
   return `${header}\n${body}\n`;
 }
 
+function xmlEscape(value) {
+  return String(value == null ? "" : value)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
+function buildGtfsLinesKml(feedKey, shapeRows) {
+  const routeMap = new Map();
+  shapeRows.forEach((row) => {
+    const routeId = String(row.route_id || "").trim();
+    if (!routeId) return;
+    if (!routeMap.has(routeId)) {
+      routeMap.set(routeId, {
+        routeId,
+        routeShortName: String(row.route_short_name || "").trim(),
+        routeLongName: String(row.route_long_name || "").trim(),
+        shapes: new Map(),
+      });
+    }
+    const route = routeMap.get(routeId);
+    const shapeId = String(row.shape_id || "").trim() || `${routeId}_shape`;
+    if (!route.shapes.has(shapeId)) route.shapes.set(shapeId, []);
+    const seq = Number(row.shape_pt_sequence);
+    const lat = Number(row.shape_pt_lat);
+    const lon = Number(row.shape_pt_lon);
+    if (!Number.isFinite(seq) || !Number.isFinite(lat) || !Number.isFinite(lon)) return;
+    route.shapes.get(shapeId).push({ seq, lat, lon });
+  });
+
+  const placemarks = [];
+  routeMap.forEach((route) => {
+    const routeLabel = route.routeShortName || route.routeLongName || route.routeId;
+    route.shapes.forEach((points, shapeId) => {
+      const sorted = points.sort((a, b) => a.seq - b.seq);
+      if (sorted.length < 2) return;
+      const coords = sorted.map((p) => `${p.lon},${p.lat},0`).join(" ");
+      const desc = [
+        `<p><strong>Feed:</strong> ${xmlEscape(feedKey)}</p>`,
+        `<p><strong>Route ID:</strong> ${xmlEscape(route.routeId)}</p>`,
+        `<p><strong>Shape ID:</strong> ${xmlEscape(shapeId)}</p>`,
+      ].join("");
+      placemarks.push(
+        [
+          "<Placemark>",
+          `<name>${xmlEscape(routeLabel)}</name>`,
+          `<description><![CDATA[${desc}]]></description>`,
+          "<LineString>",
+          "<tessellate>1</tessellate>",
+          `<coordinates>${coords}</coordinates>`,
+          "</LineString>",
+          "</Placemark>",
+        ].join("")
+      );
+    });
+  });
+
+  return [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<kml xmlns="http://www.opengis.net/kml/2.2">',
+    "<Document>",
+    `<name>${xmlEscape(`linhas_completas_${feedKey}`)}</name>`,
+    ...placemarks,
+    "</Document>",
+    "</kml>",
+  ].join("\n");
+}
+
 function parseTimeToSeconds(raw) {
   const text = String(raw || "").trim();
   const m = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(text);
@@ -1397,6 +1467,53 @@ router.get("/feeds/:feedKey/export.zip", async (req, res) => {
     return res.status(200).send(fileBuffer);
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao exportar GTFS modificado." });
+  }
+});
+
+router.get("/feeds/:feedKey/export-lines.:format", async (req, res) => {
+  const feedKey = normalizeFeedKey(req.params.feedKey);
+  const format = String(req.params.format || "").trim().toLowerCase();
+  if (!feedKey) return res.status(400).json({ message: "feedKey invalido." });
+  if (format !== "kml" && format !== "kmz") {
+    return res.status(400).json({ message: "Formato inválido. Use kml ou kmz." });
+  }
+  try {
+    await ensureGtfsEditorIndexes();
+    const shapesRes = await db.query(
+      `SELECT DISTINCT
+         replace(r.route_id, $1 || '::', '') AS route_id,
+         COALESCE(r.route_short_name, '') AS route_short_name,
+         COALESCE(r.route_long_name, '') AS route_long_name,
+         replace(gs.shape_id, $1 || '::', '') AS shape_id,
+         gs.shape_pt_lat,
+         gs.shape_pt_lon,
+         gs.shape_pt_sequence
+       FROM gtfs_routes r
+       JOIN gtfs_trips t ON t.route_id = r.route_id
+       JOIN gtfs_shapes gs ON gs.feed_key = t.feed_key AND gs.shape_id = t.shape_id
+       WHERE r.feed_key = $1
+       ORDER BY route_id ASC, shape_id ASC, gs.shape_pt_sequence ASC`,
+      [feedKey]
+    );
+    if (!shapesRes.rowCount) {
+      return res.status(404).json({ message: "Sem geometria GTFS para exportar as linhas completas." });
+    }
+
+    const kmlText = buildGtfsLinesKml(feedKey, shapesRes.rows || []);
+    if (format === "kml") {
+      res.setHeader("Content-Type", "application/vnd.google-earth.kml+xml");
+      res.setHeader("Content-Disposition", `attachment; filename=gtfs_${feedKey}_linhas_completas.kml`);
+      return res.status(200).send(Buffer.from(kmlText, "utf8"));
+    }
+
+    const zip = new AdmZip();
+    zip.addFile(`gtfs_${feedKey}_linhas_completas.kml`, Buffer.from(kmlText, "utf8"));
+    const kmzBuffer = zip.toBuffer();
+    res.setHeader("Content-Type", "application/vnd.google-earth.kmz");
+    res.setHeader("Content-Disposition", `attachment; filename=gtfs_${feedKey}_linhas_completas.kmz`);
+    return res.status(200).send(kmzBuffer);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao exportar linhas completas em KML/KMZ." });
   }
 });
 

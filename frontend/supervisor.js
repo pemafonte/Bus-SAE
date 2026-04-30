@@ -160,6 +160,7 @@ const gtfsExistingRouteTripBuilderSummaryEl = document.getElementById("gtfsExist
 const gtfsRtPreviewReportEl = document.getElementById("gtfsRtPreviewReport");
 const gtfsEffectiveFromEl = document.getElementById("gtfsEffectiveFrom");
 const calendarEffectiveFromEl = document.getElementById("calendarEffectiveFrom");
+const gtfsExportFormatEl = document.getElementById("gtfsExportFormat");
 const gtfsEditorCalendarLegendEl = document.getElementById("gtfsEditorCalendarLegend");
 const gtfsAnalyticsCalendarLegendEl = document.getElementById("gtfsAnalyticsCalendarLegend");
 const gtfsCalendarsListEl = document.getElementById("gtfsCalendarsList");
@@ -3622,20 +3623,34 @@ async function exportGtfsModified() {
     alert("Selecione um feed GTFS.");
     return;
   }
-  const response = await fetch(`${API_BASE}/gtfs/feeds/${encodeURIComponent(selectedGtfsFeedKey)}/export.zip`, {
+  const exportFormat = String(gtfsExportFormatEl?.value || "zip").trim().toLowerCase();
+  const safeFormat = ["zip", "kml", "kmz"].includes(exportFormat) ? exportFormat : "zip";
+  const endpoint =
+    safeFormat === "zip"
+      ? `${API_BASE}/gtfs/feeds/${encodeURIComponent(selectedGtfsFeedKey)}/export.zip`
+      : `${API_BASE}/gtfs/feeds/${encodeURIComponent(selectedGtfsFeedKey)}/export-lines.${safeFormat}`;
+  const response = await fetch(endpoint, {
     headers: getAuthHeaders(),
   });
   if (!response.ok) {
     const data = await response.json().catch(() => ({}));
-    alert(data.message || "Erro ao exportar GTFS modificado.");
+    alert(data.message || "Erro ao exportar ficheiro GTFS.");
     return;
   }
   const buffer = await response.arrayBuffer();
-  const blob = new Blob([buffer], { type: "application/zip" });
+  const contentTypeByFormat = {
+    zip: "application/zip",
+    kml: "application/vnd.google-earth.kml+xml",
+    kmz: "application/vnd.google-earth.kmz",
+  };
+  const blob = new Blob([buffer], { type: contentTypeByFormat[safeFormat] || "application/octet-stream" });
   const url = URL.createObjectURL(blob);
   const a = document.createElement("a");
   a.href = url;
-  a.download = `gtfs_${selectedGtfsFeedKey}_modified.zip`;
+  a.download =
+    safeFormat === "zip"
+      ? `gtfs_${selectedGtfsFeedKey}_modified.zip`
+      : `gtfs_${selectedGtfsFeedKey}_linhas_completas.${safeFormat}`;
   document.body.appendChild(a);
   a.click();
   a.remove();
