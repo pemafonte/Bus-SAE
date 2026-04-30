@@ -362,8 +362,53 @@
             <select id="gtfsEditorTripSelect">
               <option value="">-- Selecionar trip --</option>
             </select>
+            <label for="gtfsTripDeactivateEffectiveDate">Desativar trip em (data entrada em vigor)</label>
+            <input id="gtfsTripDeactivateEffectiveDate" type="date" />
+            <div class="service-card-actions">
+              <button type="button" id="deactivateGtfsTripBtn">Desativar trip selecionada</button>
+              <button type="button" id="reactivateGtfsTripBtn">Reativar trip selecionada</button>
+            </div>
             <button type="button" id="loadGtfsEditorTripStopsBtn">Carregar paragens da trip</button>
             <pre id="gtfsEditorSummary">Sem linha/trip carregada.</pre>
+          </section>
+          <section class="card card-top-gap">
+            <h3>Criar trip/horário numa linha existente</h3>
+            <p class="field-help field-help-tight">
+              Cria uma nova trip e calendário na linha selecionada. Opcionalmente pode copiar as paragens/horários da trip
+              atualmente selecionada e aplicar desfasamento em minutos.
+            </p>
+            <form id="gtfsExistingRouteTripBuilderForm">
+              <label for="gtfsExistingRouteServiceId">Service ID (calendário)</label>
+              <input id="gtfsExistingRouteServiceId" type="text" placeholder="Ex.: A-U-EXTRA" required />
+              <label for="gtfsExistingRouteTripHeadsign">Headsign da trip</label>
+              <input id="gtfsExistingRouteTripHeadsign" type="text" placeholder="Ex.: Terminal Sul" />
+              <label for="gtfsExistingRouteDirectionId">Direção</label>
+              <select id="gtfsExistingRouteDirectionId">
+                <option value="0">0</option>
+                <option value="1">1</option>
+              </select>
+              <label for="gtfsExistingRouteStartDate">Início calendário</label>
+              <input id="gtfsExistingRouteStartDate" type="date" required />
+              <label for="gtfsExistingRouteEndDate">Fim calendário</label>
+              <input id="gtfsExistingRouteEndDate" type="date" required />
+              <div class="gtfs-line-builder-days">
+                <label class="inline-checkbox"><input id="gtfsExistingDayMonday" type="checkbox" checked />2ª</label>
+                <label class="inline-checkbox"><input id="gtfsExistingDayTuesday" type="checkbox" checked />3ª</label>
+                <label class="inline-checkbox"><input id="gtfsExistingDayWednesday" type="checkbox" checked />4ª</label>
+                <label class="inline-checkbox"><input id="gtfsExistingDayThursday" type="checkbox" checked />5ª</label>
+                <label class="inline-checkbox"><input id="gtfsExistingDayFriday" type="checkbox" checked />6ª</label>
+                <label class="inline-checkbox"><input id="gtfsExistingDaySaturday" type="checkbox" />Sáb</label>
+                <label class="inline-checkbox"><input id="gtfsExistingDaySunday" type="checkbox" />Dom</label>
+              </div>
+              <label class="inline-checkbox">
+                <input id="gtfsExistingRouteCloneStops" type="checkbox" checked />
+                Copiar paragens/horários da trip selecionada
+              </label>
+              <label for="gtfsExistingRouteTimeShiftMin">Desfasamento horário (minutos)</label>
+              <input id="gtfsExistingRouteTimeShiftMin" type="number" min="-180" max="180" value="0" />
+              <button type="submit">Criar trip na linha atual</button>
+            </form>
+            <pre id="gtfsExistingRouteTripBuilderSummary">Sem criação de trip executada.</pre>
           </section>
           <section class="card card-top-gap">
             <h3>Entrada em vigor e exportação</h3>

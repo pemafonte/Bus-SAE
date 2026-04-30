@@ -128,6 +128,9 @@ const refreshSupPresetListBtnEl = document.getElementById("refreshSupPresetListB
 const gtfsEditorRouteSelectEl = document.getElementById("gtfsEditorRouteSelect");
 const gtfsEditorFeedSelectEl = document.getElementById("gtfsEditorFeedSelect");
 const gtfsEditorTripSelectEl = document.getElementById("gtfsEditorTripSelect");
+const gtfsTripDeactivateEffectiveDateEl = document.getElementById("gtfsTripDeactivateEffectiveDate");
+const deactivateGtfsTripBtnEl = document.getElementById("deactivateGtfsTripBtn");
+const reactivateGtfsTripBtnEl = document.getElementById("reactivateGtfsTripBtn");
 const gtfsEditorSummaryEl = document.getElementById("gtfsEditorSummary");
 const gtfsEditorStopsListEl = document.getElementById("gtfsEditorStopsList");
 const gtfsEditorApplyScopeEl = document.getElementById("gtfsEditorApplyScope");
@@ -153,6 +156,7 @@ const gtfsStopsByAreaListEl = document.getElementById("gtfsStopsByAreaList");
 const gtfsGeocodeProgressEl = document.getElementById("gtfsGeocodeProgress");
 const gtfsLineBuilderStopsListEl = document.getElementById("gtfsLineBuilderStopsList");
 const gtfsLineBuilderSummaryEl = document.getElementById("gtfsLineBuilderSummary");
+const gtfsExistingRouteTripBuilderSummaryEl = document.getElementById("gtfsExistingRouteTripBuilderSummary");
 const gtfsRtPreviewReportEl = document.getElementById("gtfsRtPreviewReport");
 const gtfsEffectiveFromEl = document.getElementById("gtfsEffectiveFrom");
 const calendarEffectiveFromEl = document.getElementById("calendarEffectiveFrom");
@@ -553,6 +557,63 @@ function formatNumberPt(value, digits = 1) {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   });
+}
+
+function haversineDistanceKm(lat1, lon1, lat2, lon2) {
+  const aLat = Number(lat1);
+  const aLon = Number(lon1);
+  const bLat = Number(lat2);
+  const bLon = Number(lon2);
+  if (![aLat, aLon, bLat, bLon].every((v) => Number.isFinite(v))) return 0;
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(bLat - aLat);
+  const dLon = toRad(bLon - aLon);
+  const aa =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(aa), Math.sqrt(1 - aa));
+  return 6371 * c;
+}
+
+function computeGtfsTripDistanceKm(stops) {
+  if (!Array.isArray(stops) || stops.length < 2) return 0;
+  let totalKm = 0;
+  for (let i = 1; i < stops.length; i += 1) {
+    totalKm += haversineDistanceKm(stops[i - 1]?.stop_lat, stops[i - 1]?.stop_lon, stops[i]?.stop_lat, stops[i]?.stop_lon);
+  }
+  return totalKm;
+}
+
+async function computeGtfsRouteDistanceSummary(routeId) {
+  const safeRouteId = String(routeId || "").trim();
+  if (!supToken || !safeRouteId) {
+    return { totalKm: 0, activeTrips: 0 };
+  }
+  try {
+    const tripsRes = await fetch(`${API_BASE}/gtfs/editor/trips?routeId=${encodeURIComponent(safeRouteId)}`, {
+      headers: getAuthHeaders(),
+    });
+    const tripsData = await tripsRes.json().catch(() => ([]));
+    if (!tripsRes.ok) return { totalKm: 0, activeTrips: 0 };
+    const activeTrips = (Array.isArray(tripsData) ? tripsData : []).filter((t) => t?.is_deactivated !== true);
+    if (!activeTrips.length) return { totalKm: 0, activeTrips: 0 };
+    const distances = await Promise.all(
+      activeTrips.map(async (trip) => {
+        const tripId = String(trip?.trip_id || "").trim();
+        if (!tripId) return 0;
+        const stopsRes = await fetch(`${API_BASE}/gtfs/editor/trip-stops?tripId=${encodeURIComponent(tripId)}`, {
+          headers: getAuthHeaders(),
+        });
+        const stopsData = await stopsRes.json().catch(() => ({}));
+        if (!stopsRes.ok) return 0;
+        return computeGtfsTripDistanceKm(stopsData?.stops || []);
+      })
+    );
+    const totalKm = distances.reduce((sum, value) => sum + Number(value || 0), 0);
+    return { totalKm, activeTrips: activeTrips.length };
+  } catch (_error) {
+    return { totalKm: 0, activeTrips: 0 };
+  }
 }
 
 function formatDateTimePt(iso) {
@@ -3983,6 +4044,10 @@ function setGtfsLineBuilderSummary(text) {
   if (gtfsLineBuilderSummaryEl) gtfsLineBuilderSummaryEl.textContent = text || "";
 }
 
+function setGtfsExistingRouteTripBuilderSummary(text) {
+  if (gtfsExistingRouteTripBuilderSummaryEl) gtfsExistingRouteTripBuilderSummaryEl.textContent = text || "";
+}
+
 async function loadGtfsEditorTripsByRoute() {
   if (!supToken || !gtfsEditorRouteSelectEl || !gtfsEditorTripSelectEl) return;
   const routeId = String(gtfsEditorRouteSelectEl.value || "").trim();
@@ -4012,11 +4077,54 @@ async function loadGtfsEditorTripsByRoute() {
   rows.forEach((t) => {
     const option = document.createElement("option");
     option.value = t.trip_id;
-    option.textContent = `${t.trip_id} | headsign ${t.trip_headsign || "-"} | dir ${t.direction_id ?? "-"} | paragens ${t.stops_count || 0}`;
+    const deactivateDate = String(t.deactivate_effective_from || "").slice(0, 10);
+    const deactivateTag = t.is_deactivated ? ` | desativada desde ${deactivateDate || "-"}` : "";
+    option.textContent = `${t.trip_id} | headsign ${t.trip_headsign || "-"} | dir ${t.direction_id ?? "-"} | paragens ${t.stops_count || 0}${deactivateTag}`;
+    option.dataset.tripDeactivated = t.is_deactivated ? "1" : "0";
+    option.dataset.tripDeactivateDate = deactivateDate;
     gtfsEditorTripSelectEl.appendChild(option);
   });
+  syncGtfsTripDeactivationUiFromSelectedTrip();
   if (gtfsEditorStopsListEl) gtfsEditorStopsListEl.innerHTML = "";
   renderGtfsEditorSummary(`Trips da linha ${routeId}: ${rows.length}`);
+}
+
+function syncGtfsTripDeactivationUiFromSelectedTrip() {
+  if (!gtfsEditorTripSelectEl || !gtfsTripDeactivateEffectiveDateEl) return;
+  const opt = gtfsEditorTripSelectEl.selectedOptions?.[0] || null;
+  const date = String(opt?.dataset?.tripDeactivateDate || "").trim();
+  if (date) gtfsTripDeactivateEffectiveDateEl.value = date;
+}
+
+async function updateSelectedTripDeactivation(active) {
+  if (!supToken || !gtfsEditorTripSelectEl) return;
+  const tripId = String(gtfsEditorTripSelectEl.value || "").trim();
+  if (!tripId) {
+    alert("Selecione uma trip GTFS.");
+    return;
+  }
+  const deactivateEffectiveFrom = String(gtfsTripDeactivateEffectiveDateEl?.value || "").trim();
+  if (!active && !deactivateEffectiveFrom) {
+    alert("Indique a data de entrada em vigor para desativar.");
+    return;
+  }
+  const response = await fetch(`${API_BASE}/gtfs/editor/trips/${encodeURIComponent(tripId)}/deactivation`, {
+    method: "PATCH",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({
+      active: active === true,
+      deactivateEffectiveFrom: active ? null : deactivateEffectiveFrom,
+    }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao atualizar estado da trip.");
+    return;
+  }
+  alert(data.message || "Estado da trip atualizado.");
+  await loadGtfsEditorTripsByRoute();
+  gtfsEditorTripSelectEl.value = tripId;
+  syncGtfsTripDeactivationUiFromSelectedTrip();
 }
 
 function renderGtfsEditorStops(rows) {
@@ -4078,8 +4186,15 @@ async function loadGtfsEditorTripStops() {
   renderGtfsEditorStops(data.stops || []);
   drawGtfsEditorStopsMap(data.stops || []);
   populateGtfsEditorAddStopOptions(gtfsEditorStopsCatalog, data.stops || []);
+  const tripDistanceKm = computeGtfsTripDistanceKm(data.stops || []);
+  const applyScope = String(gtfsEditorApplyScopeEl?.value || "trip").trim().toLowerCase();
+  let routeDistanceSummary = "";
+  if (applyScope === "route") {
+    const routeSummary = await computeGtfsRouteDistanceSummary(data.trip?.route_id || "");
+    routeDistanceSummary = ` | km linha (trips ativas ${routeSummary.activeTrips}): ${formatNumberPt(routeSummary.totalKm, 3)}`;
+  }
   renderGtfsEditorSummary(
-    `Trip ${data.trip?.trip_id || tripId} | route ${data.trip?.route_id || "-"} | headsign ${data.trip?.trip_headsign || "-"} | paragens ${Array.isArray(data.stops) ? data.stops.length : 0}`
+    `Trip ${data.trip?.trip_id || tripId} | route ${data.trip?.route_id || "-"} | headsign ${data.trip?.trip_headsign || "-"} | paragens ${Array.isArray(data.stops) ? data.stops.length : 0} | km estimados ${formatNumberPt(tripDistanceKm, 3)}${routeDistanceSummary}`
   );
 }
 
@@ -4334,6 +4449,82 @@ async function submitGtfsLineBuilder(event) {
   );
   alert(data.message || "Nova linha GTFS criada.");
   await Promise.all([loadGtfsEditorLines(), loadGtfsAnalyticsOverview(), loadGtfsStopsByArea(), loadGtfsEditorStopsOptions()]);
+}
+
+async function submitGtfsExistingRouteTripBuilder(event) {
+  event.preventDefault();
+  if (!supToken || !gtfsEditorRouteSelectEl) return;
+  const routeId = String(gtfsEditorRouteSelectEl.value || "").trim();
+  if (!routeId) {
+    alert("Selecione uma linha GTFS antes de criar a trip.");
+    return;
+  }
+  const feedKey = String(gtfsEditorFeedSelectEl?.value || selectedGtfsFeedKey || "").trim();
+  const serviceId = String(document.getElementById("gtfsExistingRouteServiceId")?.value || "").trim();
+  const tripHeadsign = String(document.getElementById("gtfsExistingRouteTripHeadsign")?.value || "").trim();
+  const directionId = String(document.getElementById("gtfsExistingRouteDirectionId")?.value || "0").trim();
+  const startDate = String(document.getElementById("gtfsExistingRouteStartDate")?.value || "").trim();
+  const endDate = String(document.getElementById("gtfsExistingRouteEndDate")?.value || "").trim();
+  const cloneStops = document.getElementById("gtfsExistingRouteCloneStops")?.checked === true;
+  const sourceTripId = cloneStops ? String(gtfsEditorTripSelectEl?.value || "").trim() : "";
+  const timeShiftMinutes = String(document.getElementById("gtfsExistingRouteTimeShiftMin")?.value || "0").trim();
+
+  if (!serviceId || !startDate || !endDate) {
+    alert("Preencha serviceId, início e fim do calendário.");
+    return;
+  }
+  if (cloneStops && !sourceTripId) {
+    alert("Selecione uma trip base para copiar paragens/horários.");
+    return;
+  }
+
+  const payload = {
+    routeId,
+    feedKey: feedKey || null,
+    serviceId,
+    tripHeadsign: tripHeadsign || null,
+    directionId,
+    startDate,
+    endDate,
+    sourceTripId: sourceTripId || null,
+    timeShiftMinutes: timeShiftMinutes || 0,
+    days: {
+      monday: document.getElementById("gtfsExistingDayMonday")?.checked ? 1 : 0,
+      tuesday: document.getElementById("gtfsExistingDayTuesday")?.checked ? 1 : 0,
+      wednesday: document.getElementById("gtfsExistingDayWednesday")?.checked ? 1 : 0,
+      thursday: document.getElementById("gtfsExistingDayThursday")?.checked ? 1 : 0,
+      friday: document.getElementById("gtfsExistingDayFriday")?.checked ? 1 : 0,
+      saturday: document.getElementById("gtfsExistingDaySaturday")?.checked ? 1 : 0,
+      sunday: document.getElementById("gtfsExistingDaySunday")?.checked ? 1 : 0,
+    },
+  };
+
+  setGtfsExistingRouteTripBuilderSummary("A criar trip/horário na linha existente...");
+  const response = await fetch(`${API_BASE}/gtfs/editor/trips/create-on-route`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    setGtfsExistingRouteTripBuilderSummary(data.message || "Erro ao criar trip na linha.");
+    alert(data.message || "Erro ao criar trip na linha.");
+    return;
+  }
+  setGtfsExistingRouteTripBuilderSummary(
+    [
+      data.message || "Trip criada.",
+      `Trip ID: ${data.trip?.trip_id || "-"}`,
+      `Service ID: ${data.trip?.service_id || "-"}`,
+      `Paragens copiadas: ${data.copiedStops || 0}`,
+    ].join("\n")
+  );
+  alert(data.message || "Trip criada.");
+  await Promise.all([loadGtfsEditorTripsByRoute(), loadGtfsCalendars(), loadGtfsAnalyticsOverview()]);
+  if (data.trip?.trip_id && gtfsEditorTripSelectEl) {
+    gtfsEditorTripSelectEl.value = String(data.trip.trip_id);
+    await loadGtfsEditorTripStops();
+  }
 }
 
 async function downloadDriversTemplateCsv() {
@@ -5514,6 +5705,15 @@ if (gtfsAnalyticsTripSelectEl) {
 if (gtfsEditorRouteSelectEl) {
   gtfsEditorRouteSelectEl.addEventListener("change", loadGtfsEditorTripsByRoute);
 }
+if (gtfsEditorTripSelectEl) {
+  gtfsEditorTripSelectEl.addEventListener("change", syncGtfsTripDeactivationUiFromSelectedTrip);
+}
+if (deactivateGtfsTripBtnEl) {
+  deactivateGtfsTripBtnEl.addEventListener("click", () => updateSelectedTripDeactivation(false));
+}
+if (reactivateGtfsTripBtnEl) {
+  reactivateGtfsTripBtnEl.addEventListener("click", () => updateSelectedTripDeactivation(true));
+}
 if (gtfsEditorAddStopIdEl) {
   gtfsEditorAddStopIdEl.addEventListener("change", syncGtfsEditorStopSelectionFields);
 }
@@ -5538,6 +5738,10 @@ if (gtfsEditorSaveSpineBtnEl) {
 const gtfsLineBuilderFormEl = document.getElementById("gtfsLineBuilderForm");
 if (gtfsLineBuilderFormEl) {
   gtfsLineBuilderFormEl.addEventListener("submit", submitGtfsLineBuilder);
+}
+const gtfsExistingRouteTripBuilderFormEl = document.getElementById("gtfsExistingRouteTripBuilderForm");
+if (gtfsExistingRouteTripBuilderFormEl) {
+  gtfsExistingRouteTripBuilderFormEl.addEventListener("submit", submitGtfsExistingRouteTripBuilder);
 }
 bindById("gtfsLineBuilderAddStopBtn", "click", addGtfsLineBuilderStopRow);
 if (gtfsLineBuilderStopsListEl && !gtfsLineBuilderStopsListEl.dataset.gtfsLineBuilderDelegation) {

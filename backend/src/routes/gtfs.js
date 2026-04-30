@@ -816,6 +816,19 @@ async function ensureGtfsMultiFeedInfra() {
 async function ensureGtfsEditorIndexes() {
   await ensureGtfsMultiFeedInfra();
   await db.query(
+    `CREATE TABLE IF NOT EXISTS gtfs_trip_deactivations (
+      trip_id VARCHAR(120) PRIMARY KEY REFERENCES gtfs_trips(trip_id) ON DELETE CASCADE,
+      deactivate_effective_from DATE NOT NULL,
+      notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_gtfs_trip_deactivations_effective
+     ON gtfs_trip_deactivations(deactivate_effective_from, trip_id)`
+  );
+  await db.query(
     `CREATE INDEX IF NOT EXISTS idx_gtfs_trips_route_id
      ON gtfs_trips(route_id)`
   );
@@ -1429,19 +1442,59 @@ router.get("/editor/trips", async (req, res) => {
          COALESCE(t.trip_headsign, '') AS trip_headsign,
          t.direction_id,
          t.service_id,
-         COUNT(st.stop_id)::int AS stops_count
+         COUNT(st.stop_id)::int AS stops_count,
+         td.deactivate_effective_from,
+         (td.trip_id IS NOT NULL) AS is_deactivated
        FROM gtfs_trips t
        JOIN gtfs_feeds gf ON gf.feed_key = t.feed_key
        LEFT JOIN gtfs_stop_times st ON st.trip_id = t.trip_id
+       LEFT JOIN gtfs_trip_deactivations td ON td.trip_id = t.trip_id
        WHERE t.route_id = $1
          AND gf.is_active = TRUE
-       GROUP BY t.trip_id, t.feed_key, t.route_id, t.trip_headsign, t.direction_id, t.service_id
+       GROUP BY t.trip_id, t.feed_key, t.route_id, t.trip_headsign, t.direction_id, t.service_id, td.trip_id, td.deactivate_effective_from
        ORDER BY t.trip_id ASC`,
       [routeId]
     );
     return res.json(result.rows);
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao listar viagens GTFS." });
+  }
+});
+
+router.patch("/editor/trips/:tripId/deactivation", async (req, res) => {
+  const tripId = String(req.params.tripId || "").trim();
+  const deactivateEffectiveFrom = parseIsoDateInput(req.body?.deactivateEffectiveFrom);
+  const notes = String(req.body?.notes || "").trim() || null;
+  const active = req.body?.active === true;
+  if (!tripId) return res.status(400).json({ message: "Indique tripId." });
+  if (!active && !deactivateEffectiveFrom) {
+    return res.status(400).json({ message: "Indique deactivateEffectiveFrom para desativar a trip." });
+  }
+  try {
+    await ensureGtfsEditorIndexes();
+    const tripRes = await db.query(`SELECT trip_id FROM gtfs_trips WHERE trip_id = $1 LIMIT 1`, [tripId]);
+    if (!tripRes.rowCount) return res.status(404).json({ message: "Trip GTFS não encontrada." });
+    if (active) {
+      await db.query(`DELETE FROM gtfs_trip_deactivations WHERE trip_id = $1`, [tripId]);
+      return res.json({ message: "Trip reativada.", tripId, active: true });
+    }
+    const result = await db.query(
+      `INSERT INTO gtfs_trip_deactivations (trip_id, deactivate_effective_from, notes, updated_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (trip_id) DO UPDATE
+       SET deactivate_effective_from = EXCLUDED.deactivate_effective_from,
+           notes = EXCLUDED.notes,
+           updated_at = NOW()
+       RETURNING trip_id, deactivate_effective_from, notes`,
+      [tripId, deactivateEffectiveFrom, notes]
+    );
+    return res.json({
+      message: "Trip desativada com data de entrada em vigor.",
+      trip: result.rows[0],
+      active: false,
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao atualizar desativação da trip." });
   }
 });
 
@@ -2057,6 +2110,149 @@ router.post("/editor/line-builder", async (req, res) => {
   } catch (_error) {
     await client.query("ROLLBACK").catch(() => {});
     return res.status(500).json({ message: "Erro ao criar nova linha GTFS." });
+  } finally {
+    client.release();
+  }
+});
+
+router.post("/editor/trips/create-on-route", async (req, res) => {
+  const routeId = String(req.body?.routeId || "").trim();
+  const feedKeyRaw = normalizeFeedKey(req.body?.feedKey || "");
+  const tripHeadsign = String(req.body?.tripHeadsign || "").trim();
+  const serviceIdRaw = String(req.body?.serviceId || "").trim();
+  const startDate = parseIsoDateInput(req.body?.startDate);
+  const endDate = parseIsoDateInput(req.body?.endDate);
+  const directionId = toInt(req.body?.directionId);
+  const sourceTripId = String(req.body?.sourceTripId || "").trim() || null;
+  const timeShiftMinutes = toInt(req.body?.timeShiftMinutes);
+  const days = {
+    monday: toInt(req.body?.days?.monday) || 0,
+    tuesday: toInt(req.body?.days?.tuesday) || 0,
+    wednesday: toInt(req.body?.days?.wednesday) || 0,
+    thursday: toInt(req.body?.days?.thursday) || 0,
+    friday: toInt(req.body?.days?.friday) || 0,
+    saturday: toInt(req.body?.days?.saturday) || 0,
+    sunday: toInt(req.body?.days?.sunday) || 0,
+  };
+  if (!routeId || !serviceIdRaw || !startDate || !endDate) {
+    return res.status(400).json({ message: "Indique routeId, serviceId, startDate e endDate." });
+  }
+  if (endDate < startDate) {
+    return res.status(400).json({ message: "A data final do calendário não pode ser anterior à data inicial." });
+  }
+  if (Object.values(days).every((v) => Number(v) !== 1)) {
+    return res.status(400).json({ message: "Selecione pelo menos um dia da semana para o calendário." });
+  }
+
+  const client = await db.pool.connect();
+  try {
+    await ensureGtfsEditorIndexes();
+    await client.query("BEGIN");
+
+    const routeRes = await client.query(
+      `SELECT route_id, feed_key
+       FROM gtfs_routes
+       WHERE route_id = $1
+       FOR UPDATE`,
+      [routeId]
+    );
+    if (!routeRes.rowCount) {
+      await client.query("ROLLBACK");
+      return res.status(404).json({ message: "Linha GTFS não encontrada." });
+    }
+    const feedKey = String(feedKeyRaw || routeRes.rows[0].feed_key || "default");
+    const serviceId = scopedId(feedKey, stripFeedPrefix(serviceIdRaw, feedKey));
+    const nowTag = Date.now();
+    const routeShortFallback = String(routeId).split("::").pop() || "route";
+    const tripId = scopedId(feedKey, `trip_${routeShortFallback}_${nowTag}`);
+    const shapeId = scopedId(feedKey, `shape_${routeShortFallback}_${nowTag}`);
+
+    await client.query(
+      `INSERT INTO gtfs_calendars (
+         feed_key, service_id, monday, tuesday, wednesday, thursday, friday, saturday, sunday, start_date, end_date, is_active, updated_at
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, TRUE, NOW())
+       ON CONFLICT (feed_key, service_id) DO UPDATE SET
+         monday = EXCLUDED.monday,
+         tuesday = EXCLUDED.tuesday,
+         wednesday = EXCLUDED.wednesday,
+         thursday = EXCLUDED.thursday,
+         friday = EXCLUDED.friday,
+         saturday = EXCLUDED.saturday,
+         sunday = EXCLUDED.sunday,
+         start_date = EXCLUDED.start_date,
+         end_date = EXCLUDED.end_date,
+         is_active = TRUE,
+         updated_at = NOW()`,
+      [
+        feedKey,
+        serviceId,
+        days.monday,
+        days.tuesday,
+        days.wednesday,
+        days.thursday,
+        days.friday,
+        days.saturday,
+        days.sunday,
+        startDate,
+        endDate,
+      ]
+    );
+
+    await client.query(
+      `INSERT INTO gtfs_trips (trip_id, feed_key, route_id, service_id, trip_headsign, direction_id, shape_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+      [tripId, feedKey, routeId, serviceId, tripHeadsign || null, directionId ?? 0, shapeId]
+    );
+
+    let copiedStops = 0;
+    if (sourceTripId) {
+      const srcRes = await client.query(
+        `SELECT feed_key, route_id
+         FROM gtfs_trips
+         WHERE trip_id = $1
+         LIMIT 1`,
+        [sourceTripId]
+      );
+      if (!srcRes.rowCount) {
+        await client.query("ROLLBACK");
+        return res.status(404).json({ message: "Trip base (sourceTripId) não encontrada." });
+      }
+      if (String(srcRes.rows[0].route_id || "") !== routeId) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ message: "A trip base deve pertencer à mesma linha." });
+      }
+      const srcStopsRes = await client.query(
+        `SELECT stop_sequence, stop_id, arrival_time, departure_time
+         FROM gtfs_stop_times
+         WHERE trip_id = $1
+         ORDER BY stop_sequence ASC`,
+        [sourceTripId]
+      );
+      const shiftSec = (Number.isFinite(Number(timeShiftMinutes)) ? Number(timeShiftMinutes) : 0) * 60;
+      for (const st of srcStopsRes.rows) {
+        const arrSec = parseTimeToSeconds(st.arrival_time);
+        const depSec = parseTimeToSeconds(st.departure_time);
+        const arrival = arrSec == null ? st.arrival_time : formatSecondsToTime(arrSec + shiftSec);
+        const departure = depSec == null ? st.departure_time : formatSecondsToTime(depSec + shiftSec);
+        await client.query(
+          `INSERT INTO gtfs_stop_times (feed_key, trip_id, arrival_time, departure_time, stop_id, stop_sequence)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [feedKey, tripId, arrival, departure, st.stop_id, st.stop_sequence]
+        );
+        copiedStops += 1;
+      }
+    }
+
+    await client.query("COMMIT");
+    return res.json({
+      message: "Nova trip/horário criada na linha existente.",
+      trip: { trip_id: tripId, route_id: routeId, service_id: serviceId, feed_key: feedKey },
+      calendar: { startDate, endDate, days },
+      copiedStops,
+    });
+  } catch (_error) {
+    await client.query("ROLLBACK").catch(() => {});
+    return res.status(500).json({ message: "Erro ao criar trip/horário numa linha existente." });
   } finally {
     client.release();
   }
