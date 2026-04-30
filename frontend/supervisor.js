@@ -4063,6 +4063,21 @@ function setGtfsExistingRouteTripBuilderSummary(text) {
   if (gtfsExistingRouteTripBuilderSummaryEl) gtfsExistingRouteTripBuilderSummaryEl.textContent = text || "";
 }
 
+function syncGtfsExistingRouteScheduleModeUi() {
+  const modeEl = document.getElementById("gtfsExistingRouteCreationMode");
+  const startTimeEl = document.getElementById("gtfsExistingRouteStartTime");
+  const shiftEl = document.getElementById("gtfsExistingRouteTimeShiftMin");
+  const cloneStopsEl = document.getElementById("gtfsExistingRouteCloneStops");
+  if (!modeEl || !startTimeEl || !shiftEl || !cloneStopsEl) return;
+  const mode = String(modeEl.value || "from_existing").trim().toLowerCase();
+  const isFromScratch = mode === "from_scratch";
+  cloneStopsEl.checked = true;
+  cloneStopsEl.disabled = true;
+  startTimeEl.disabled = false;
+  shiftEl.disabled = isFromScratch;
+  if (isFromScratch) shiftEl.value = "0";
+}
+
 async function loadGtfsEditorTripsByRoute() {
   if (!supToken || !gtfsEditorRouteSelectEl || !gtfsEditorTripSelectEl) return;
   const routeId = String(gtfsEditorRouteSelectEl.value || "").trim();
@@ -4497,23 +4512,32 @@ async function submitGtfsExistingRouteTripBuilder(event) {
   const directionId = String(document.getElementById("gtfsExistingRouteDirectionId")?.value || "0").trim();
   const startDate = String(document.getElementById("gtfsExistingRouteStartDate")?.value || "").trim();
   const endDate = String(document.getElementById("gtfsExistingRouteEndDate")?.value || "").trim();
-  const cloneStops = document.getElementById("gtfsExistingRouteCloneStops")?.checked === true;
-  const sourceTripId = cloneStops ? String(gtfsEditorTripSelectEl?.value || "").trim() : "";
-  const startTime = String(document.getElementById("gtfsExistingRouteStartTime")?.value || "").trim();
-  const timeShiftMinutes = String(document.getElementById("gtfsExistingRouteTimeShiftMin")?.value || "0").trim();
+  const creationMode = String(document.getElementById("gtfsExistingRouteCreationMode")?.value || "from_existing")
+    .trim()
+    .toLowerCase();
+  const sourceTripId = String(gtfsEditorTripSelectEl?.value || "").trim();
+  const rawStartTime = String(document.getElementById("gtfsExistingRouteStartTime")?.value || "").trim();
+  const rawTimeShiftMinutes = String(document.getElementById("gtfsExistingRouteTimeShiftMin")?.value || "0").trim();
+  const startTime = rawStartTime;
+  const timeShiftMinutes = creationMode === "from_scratch" ? "0" : rawTimeShiftMinutes;
 
   if (!serviceId || !startDate || !endDate) {
     alert("Preencha serviceId, início e fim do calendário.");
     return;
   }
-  if (cloneStops && !sourceTripId) {
-    alert("Selecione uma trip base para copiar paragens/horários.");
+  if (!sourceTripId) {
+    alert("Selecione uma trip de referência para criar o novo horário.");
+    return;
+  }
+  if (creationMode === "from_scratch" && !startTime) {
+    alert("No modo 'novo de raiz', indique a hora de início.");
     return;
   }
 
   const payload = {
     routeId,
     feedKey: feedKey || null,
+    creationMode,
     serviceId,
     tripHeadsign: tripHeadsign || null,
     directionId,
@@ -5777,6 +5801,11 @@ const gtfsExistingRouteTripBuilderFormEl = document.getElementById("gtfsExisting
 if (gtfsExistingRouteTripBuilderFormEl) {
   gtfsExistingRouteTripBuilderFormEl.addEventListener("submit", submitGtfsExistingRouteTripBuilder);
 }
+const gtfsExistingRouteScheduleModeEl = document.getElementById("gtfsExistingRouteCreationMode");
+if (gtfsExistingRouteScheduleModeEl) {
+  gtfsExistingRouteScheduleModeEl.addEventListener("change", syncGtfsExistingRouteScheduleModeUi);
+}
+syncGtfsExistingRouteScheduleModeUi();
 bindById("gtfsLineBuilderAddStopBtn", "click", addGtfsLineBuilderStopRow);
 if (gtfsLineBuilderStopsListEl && !gtfsLineBuilderStopsListEl.dataset.gtfsLineBuilderDelegation) {
   gtfsLineBuilderStopsListEl.dataset.gtfsLineBuilderDelegation = "1";

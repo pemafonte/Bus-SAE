@@ -400,12 +400,20 @@
                 <label class="inline-checkbox"><input id="gtfsExistingDaySaturday" type="checkbox" />Sáb</label>
                 <label class="inline-checkbox"><input id="gtfsExistingDaySunday" type="checkbox" />Dom</label>
               </div>
+              <label for="gtfsExistingRouteCreationMode">Modo de criação do horário</label>
+              <select id="gtfsExistingRouteCreationMode">
+                <option value="from_existing">Com base em trip/calendário existente</option>
+                <option value="from_scratch">Novo de raiz (na linha atual)</option>
+              </select>
               <label class="inline-checkbox">
                 <input id="gtfsExistingRouteCloneStops" type="checkbox" checked />
-                Copiar paragens/horários da trip selecionada
+                Usar a trip selecionada como referência de paragens
               </label>
               <label for="gtfsExistingRouteStartTime">Hora de início da nova trip (HH:MM ou HH:MM:SS)</label>
               <input id="gtfsExistingRouteStartTime" type="text" placeholder="Ex.: 07:30:00" />
+              <p class="field-help field-help-tight">
+                Pode indicar hora de início em ambos os modos. Se preenchida, essa hora define o arranque do novo horário.
+              </p>
               <label for="gtfsExistingRouteTimeShiftMin">Desfasamento horário (minutos)</label>
               <input id="gtfsExistingRouteTimeShiftMin" type="number" min="-180" max="180" value="0" />
               <button type="submit">Criar trip na linha atual</button>

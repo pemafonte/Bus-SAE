@@ -2235,6 +2235,9 @@ router.post("/editor/line-builder", async (req, res) => {
 router.post("/editor/trips/create-on-route", async (req, res) => {
   const routeId = String(req.body?.routeId || "").trim();
   const feedKeyRaw = normalizeFeedKey(req.body?.feedKey || "");
+  const creationMode = String(req.body?.creationMode || "from_existing")
+    .trim()
+    .toLowerCase();
   const tripHeadsign = String(req.body?.tripHeadsign || "").trim();
   const serviceIdRaw = String(req.body?.serviceId || "").trim();
   const startDate = parseIsoDateInput(req.body?.startDate);
@@ -2262,11 +2265,17 @@ router.post("/editor/trips/create-on-route", async (req, res) => {
   if (Object.values(days).every((v) => Number(v) !== 1)) {
     return res.status(400).json({ message: "Selecione pelo menos um dia da semana para o calendário." });
   }
+  if (!["from_existing", "from_scratch"].includes(creationMode)) {
+    return res.status(400).json({ message: "creationMode inválido (from_existing/from_scratch)." });
+  }
   if (startTimeRaw && requestedStartSeconds == null) {
     return res.status(400).json({ message: "Hora de início inválida. Use HH:MM ou HH:MM:SS." });
   }
   if (requestedStartSeconds != null && !sourceTripId) {
     return res.status(400).json({ message: "Para usar hora de início, ative a cópia de paragens/horários de uma trip base." });
+  }
+  if (creationMode === "from_scratch" && requestedStartSeconds == null) {
+    return res.status(400).json({ message: "No modo novo de raiz, indique startTime válido." });
   }
 
   const client = await db.pool.connect();
@@ -2350,31 +2359,69 @@ router.post("/editor/trips/create-on-route", async (req, res) => {
       }
       sourceShapeId = String(srcRes.rows[0].shape_id || "").trim() || null;
       const srcStopsRes = await client.query(
-        `SELECT stop_sequence, stop_id, arrival_time, departure_time
+        `SELECT
+           st.stop_sequence,
+           st.stop_id,
+           st.arrival_time,
+           st.departure_time,
+           s.stop_lat,
+           s.stop_lon
          FROM gtfs_stop_times
+         LEFT JOIN gtfs_stops s ON s.stop_id = st.stop_id
          WHERE trip_id = $1
          ORDER BY stop_sequence ASC`,
         [sourceTripId]
       );
-      const manualShiftSec = (Number.isFinite(Number(timeShiftMinutes)) ? Number(timeShiftMinutes) : 0) * 60;
-      const firstStop = srcStopsRes.rows[0] || null;
-      const sourceBaseSeconds =
-        parseTimeToSeconds(firstStop?.departure_time) ??
-        parseTimeToSeconds(firstStop?.arrival_time) ??
-        0;
-      const shiftSec =
-        requestedStartSeconds != null ? requestedStartSeconds - sourceBaseSeconds : manualShiftSec;
-      for (const st of srcStopsRes.rows) {
-        const arrSec = parseTimeToSeconds(st.arrival_time);
-        const depSec = parseTimeToSeconds(st.departure_time);
-        const arrival = arrSec == null ? st.arrival_time : formatSecondsToTime(arrSec + shiftSec);
-        const departure = depSec == null ? st.departure_time : formatSecondsToTime(depSec + shiftSec);
-        await client.query(
-          `INSERT INTO gtfs_stop_times (feed_key, trip_id, arrival_time, departure_time, stop_id, stop_sequence)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [feedKey, tripId, arrival, departure, st.stop_id, st.stop_sequence]
-        );
-        copiedStops += 1;
+      if (creationMode === "from_scratch") {
+        const avgSpeedKmh = 22;
+        const dwellSeconds = 20;
+        let currentSeconds = Number(requestedStartSeconds || 0);
+        for (let i = 0; i < srcStopsRes.rows.length; i += 1) {
+          const st = srcStopsRes.rows[i];
+          if (i > 0) {
+            const prev = srcStopsRes.rows[i - 1];
+            const prevLat = toFloat(prev.stop_lat);
+            const prevLon = toFloat(prev.stop_lon);
+            const currLat = toFloat(st.stop_lat);
+            const currLon = toFloat(st.stop_lon);
+            let travelSeconds = 60;
+            if (prevLat != null && prevLon != null && currLat != null && currLon != null) {
+              const km = haversineKm(prevLat, prevLon, currLat, currLon);
+              travelSeconds = Math.max(45, Math.round((km / avgSpeedKmh) * 3600));
+            }
+            currentSeconds += travelSeconds;
+          }
+          const arrival = formatSecondsToTime(currentSeconds);
+          const departure = formatSecondsToTime(currentSeconds + dwellSeconds);
+          await client.query(
+            `INSERT INTO gtfs_stop_times (feed_key, trip_id, arrival_time, departure_time, stop_id, stop_sequence)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [feedKey, tripId, arrival, departure, st.stop_id, st.stop_sequence]
+          );
+          copiedStops += 1;
+          currentSeconds += dwellSeconds;
+        }
+      } else {
+        const manualShiftSec = (Number.isFinite(Number(timeShiftMinutes)) ? Number(timeShiftMinutes) : 0) * 60;
+        const firstStop = srcStopsRes.rows[0] || null;
+        const sourceBaseSeconds =
+          parseTimeToSeconds(firstStop?.departure_time) ??
+          parseTimeToSeconds(firstStop?.arrival_time) ??
+          0;
+        const shiftSec =
+          requestedStartSeconds != null ? requestedStartSeconds - sourceBaseSeconds : manualShiftSec;
+        for (const st of srcStopsRes.rows) {
+          const arrSec = parseTimeToSeconds(st.arrival_time);
+          const depSec = parseTimeToSeconds(st.departure_time);
+          const arrival = arrSec == null ? st.arrival_time : formatSecondsToTime(arrSec + shiftSec);
+          const departure = depSec == null ? st.departure_time : formatSecondsToTime(depSec + shiftSec);
+          await client.query(
+            `INSERT INTO gtfs_stop_times (feed_key, trip_id, arrival_time, departure_time, stop_id, stop_sequence)
+             VALUES ($1, $2, $3, $4, $5, $6)`,
+            [feedKey, tripId, arrival, departure, st.stop_id, st.stop_sequence]
+          );
+          copiedStops += 1;
+        }
       }
     }
 
@@ -2428,6 +2475,7 @@ router.post("/editor/trips/create-on-route", async (req, res) => {
     return res.json({
       message: "Nova trip/horário criada na linha existente.",
       trip: { trip_id: tripId, route_id: routeId, service_id: serviceId, feed_key: feedKey },
+      creationMode,
       calendar: { startDate, endDate, days },
       copiedStops,
       copiedShapePoints,
