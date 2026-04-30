@@ -2241,6 +2241,8 @@ router.post("/editor/trips/create-on-route", async (req, res) => {
   const endDate = parseIsoDateInput(req.body?.endDate);
   const directionId = toInt(req.body?.directionId);
   const sourceTripId = String(req.body?.sourceTripId || "").trim() || null;
+  const startTimeRaw = String(req.body?.startTime || "").trim();
+  const requestedStartSeconds = startTimeRaw ? parseTimeToSeconds(startTimeRaw) : null;
   const timeShiftMinutes = toInt(req.body?.timeShiftMinutes);
   const days = {
     monday: toInt(req.body?.days?.monday) || 0,
@@ -2259,6 +2261,12 @@ router.post("/editor/trips/create-on-route", async (req, res) => {
   }
   if (Object.values(days).every((v) => Number(v) !== 1)) {
     return res.status(400).json({ message: "Selecione pelo menos um dia da semana para o calendário." });
+  }
+  if (startTimeRaw && requestedStartSeconds == null) {
+    return res.status(400).json({ message: "Hora de início inválida. Use HH:MM ou HH:MM:SS." });
+  }
+  if (requestedStartSeconds != null && !sourceTripId) {
+    return res.status(400).json({ message: "Para usar hora de início, ative a cópia de paragens/horários de uma trip base." });
   }
 
   const client = await db.pool.connect();
@@ -2348,7 +2356,14 @@ router.post("/editor/trips/create-on-route", async (req, res) => {
          ORDER BY stop_sequence ASC`,
         [sourceTripId]
       );
-      const shiftSec = (Number.isFinite(Number(timeShiftMinutes)) ? Number(timeShiftMinutes) : 0) * 60;
+      const manualShiftSec = (Number.isFinite(Number(timeShiftMinutes)) ? Number(timeShiftMinutes) : 0) * 60;
+      const firstStop = srcStopsRes.rows[0] || null;
+      const sourceBaseSeconds =
+        parseTimeToSeconds(firstStop?.departure_time) ??
+        parseTimeToSeconds(firstStop?.arrival_time) ??
+        0;
+      const shiftSec =
+        requestedStartSeconds != null ? requestedStartSeconds - sourceBaseSeconds : manualShiftSec;
       for (const st of srcStopsRes.rows) {
         const arrSec = parseTimeToSeconds(st.arrival_time);
         const depSec = parseTimeToSeconds(st.departure_time);

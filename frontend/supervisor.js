@@ -4499,6 +4499,7 @@ async function submitGtfsExistingRouteTripBuilder(event) {
   const endDate = String(document.getElementById("gtfsExistingRouteEndDate")?.value || "").trim();
   const cloneStops = document.getElementById("gtfsExistingRouteCloneStops")?.checked === true;
   const sourceTripId = cloneStops ? String(gtfsEditorTripSelectEl?.value || "").trim() : "";
+  const startTime = String(document.getElementById("gtfsExistingRouteStartTime")?.value || "").trim();
   const timeShiftMinutes = String(document.getElementById("gtfsExistingRouteTimeShiftMin")?.value || "0").trim();
 
   if (!serviceId || !startDate || !endDate) {
@@ -4519,6 +4520,7 @@ async function submitGtfsExistingRouteTripBuilder(event) {
     startDate,
     endDate,
     sourceTripId: sourceTripId || null,
+    startTime: startTime || null,
     timeShiftMinutes: timeShiftMinutes || 0,
     days: {
       monday: document.getElementById("gtfsExistingDayMonday")?.checked ? 1 : 0,
