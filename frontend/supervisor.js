@@ -4142,14 +4142,27 @@ async function updateSelectedTripDeactivation(active) {
   syncGtfsTripDeactivationUiFromSelectedTrip();
 }
 
-function renderGtfsEditorStops(rows) {
+function renderGtfsEditorStops(rows, options = {}) {
   if (!gtfsEditorStopsListEl) return;
   gtfsEditorStopsListEl.innerHTML = "";
   if (!Array.isArray(rows) || !rows.length) {
     gtfsEditorStopsListEl.innerHTML = "<div>Sem paragens para esta trip.</div>";
     return;
   }
-  rows.forEach((stop) => {
+  const applyScope = String(options.applyScope || "trip").trim().toLowerCase();
+  const tripDistanceKm = Number(options.tripDistanceKm || 0);
+  const routeDistanceKm = Number(options.routeDistanceKm || 0);
+  rows.forEach((stop, index) => {
+    const nextStop = rows[index + 1] || null;
+    const segmentKm = nextStop
+      ? haversineDistanceKm(stop?.stop_lat, stop?.stop_lon, nextStop?.stop_lat, nextStop?.stop_lon)
+      : null;
+    const isLastStop = index === rows.length - 1;
+    const totalLabel = applyScope === "route" ? "Total da linha" : "Total da trip";
+    const totalKm = applyScope === "route" ? routeDistanceKm : tripDistanceKm;
+    const distanceLabel = isLastStop
+      ? `${totalLabel}: ${formatNumberPt(totalKm, 3)} km`
+      : `Distância até próxima: ${formatNumberPt(segmentKm, 3)} km`;
     const safeStopName = String(stop.stop_name || "").replace(/"/g, "&quot;");
     const article = document.createElement("article");
     article.className = "service-card-item";
@@ -4165,6 +4178,7 @@ function renderGtfsEditorStops(rows) {
         <div><small>Hora chegada</small><div>${stop.arrival_time || "-"}</div></div>
         <div><small>Hora partida</small><div>${stop.departure_time || "-"}</div></div>
         <div><small>Coordenadas</small><div>${stop.stop_lat ?? "-"}, ${stop.stop_lon ?? "-"}</div></div>
+        <div><small>Distância</small><div>${distanceLabel}</div></div>
       </div>
       <div class="service-card-actions gtfs-editor-stop-actions">
         <input type="text" data-gtfs-time-arrival value="${stop.arrival_time || ""}" placeholder="Chegada HH:MM:SS" />
@@ -4198,18 +4212,21 @@ async function loadGtfsEditorTripStops() {
     drawGtfsEditorStopsMap([]);
     return;
   }
-  renderGtfsEditorStops(data.stops || []);
-  drawGtfsEditorStopsMap(data.stops || []);
-  populateGtfsEditorAddStopOptions(gtfsEditorStopsCatalog, data.stops || []);
-  const tripDistanceKm = computeGtfsTripDistanceKm(data.stops || []);
+  const stops = data.stops || [];
+  const tripDistanceKm = computeGtfsTripDistanceKm(stops);
   const applyScope = String(gtfsEditorApplyScopeEl?.value || "trip").trim().toLowerCase();
+  let routeDistanceKm = 0;
   let routeDistanceSummary = "";
   if (applyScope === "route") {
     const routeSummary = await computeGtfsRouteDistanceSummary(data.trip?.route_id || "");
+    routeDistanceKm = Number(routeSummary.totalKm || 0);
     routeDistanceSummary = ` | km linha (trips ativas ${routeSummary.activeTrips}): ${formatNumberPt(routeSummary.totalKm, 3)}`;
   }
+  renderGtfsEditorStops(stops, { applyScope, tripDistanceKm, routeDistanceKm });
+  drawGtfsEditorStopsMap(stops);
+  populateGtfsEditorAddStopOptions(gtfsEditorStopsCatalog, stops);
   renderGtfsEditorSummary(
-    `Trip ${data.trip?.trip_id || tripId} | route ${data.trip?.route_id || "-"} | headsign ${data.trip?.trip_headsign || "-"} | paragens ${Array.isArray(data.stops) ? data.stops.length : 0} | km estimados ${formatNumberPt(tripDistanceKm, 3)}${routeDistanceSummary}`
+    `Trip ${data.trip?.trip_id || tripId} | route ${data.trip?.route_id || "-"} | headsign ${data.trip?.trip_headsign || "-"} | paragens ${Array.isArray(stops) ? stops.length : 0} | km estimados ${formatNumberPt(tripDistanceKm, 3)}${routeDistanceSummary}`
   );
 }
 
