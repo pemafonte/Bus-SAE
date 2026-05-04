@@ -4027,6 +4027,17 @@ async function fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormali
   const lineFilterNumericCanonical = [
     ...new Set(lineFilter.map((code) => canonicalNumericLineCodeToken(code)).filter(Boolean)),
   ];
+  /** calendars/calendar_dates importam service_id com prefixo feed::; trips.txt pode manter id bruto — mesma lógica que a análise por linha (gtfs.js). */
+  const calendarSidMatchSql = `(
+           c.service_id = tb.service_id
+        OR c.service_id = (tb.feed_key || '::' || tb.service_id)
+        OR tb.service_id = (tb.feed_key || '::' || c.service_id)
+      )`;
+  const calendarDatesSidMatchSql = `(
+           cd.service_id = tb.service_id
+        OR cd.service_id = (tb.feed_key || '::' || tb.service_id)
+        OR tb.service_id = (tb.feed_key || '::' || cd.service_id)
+      )`;
   const result = await db.query(
     `WITH trip_base AS (
        SELECT
@@ -4061,7 +4072,7 @@ async function fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormali
            SELECT 1
            FROM gtfs_calendars c
            WHERE c.feed_key = tb.feed_key
-             AND c.service_id = tb.service_id
+             AND ${calendarSidMatchSql}
              AND c.is_active = TRUE
              AND $1::date BETWEEN c.start_date AND c.end_date
              AND CASE $2::int
@@ -4079,7 +4090,7 @@ async function fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormali
            SELECT 1
            FROM gtfs_calendar_dates cd
            WHERE cd.feed_key = tb.feed_key
-             AND cd.service_id = tb.service_id
+             AND ${calendarDatesSidMatchSql}
              AND cd.calendar_date = $1::date
              AND cd.exception_type = 1
          ) AS added_by_exception,
@@ -4087,7 +4098,7 @@ async function fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormali
            SELECT 1
            FROM gtfs_calendar_dates cd
            WHERE cd.feed_key = tb.feed_key
-             AND cd.service_id = tb.service_id
+             AND ${calendarDatesSidMatchSql}
              AND cd.calendar_date = $1::date
              AND cd.exception_type = 2
          ) AS removed_by_exception
@@ -4605,7 +4616,11 @@ async function buildGtfsFeedInventory(options = {}) {
                OR NOT EXISTS (
                  SELECT 1 FROM gtfs_calendars c
                   WHERE c.feed_key = t.feed_key
-                    AND c.service_id = t.service_id
+                    AND (
+                      c.service_id = t.service_id
+                      OR c.service_id = (t.feed_key || '::' || t.service_id)
+                      OR t.service_id = (t.feed_key || '::' || c.service_id)
+                    )
                     AND c.is_active = TRUE
                )
              )) AS trips_without_active_calendar,

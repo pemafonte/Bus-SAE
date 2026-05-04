@@ -1017,6 +1017,8 @@ router.post("/import", async (req, res) => {
       const routeId = scopedId(feedKey, row.route_id);
       const shapeId = scopedId(feedKey, row.shape_id);
       if (!tripId || !routeId) continue;
+      const rawServiceId = stripFeedPrefix(row.service_id || "", feedKey);
+      const serviceIdForTrip = rawServiceId ? scopedId(feedKey, rawServiceId) : null;
       await db.query(
         `INSERT INTO gtfs_trips (trip_id, feed_key, route_id, service_id, trip_headsign, direction_id, shape_id)
          VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -1031,7 +1033,7 @@ router.post("/import", async (req, res) => {
           tripId,
           feedKey,
           routeId,
-          row.service_id || null,
+          serviceIdForTrip,
           row.trip_headsign || null,
           row.direction_id != null && row.direction_id !== "" ? Number(row.direction_id) : null,
           shapeId,
