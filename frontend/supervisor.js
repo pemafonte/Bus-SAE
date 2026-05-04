@@ -5349,6 +5349,9 @@ function getGtfsChapasParams() {
   const mode = String(document.getElementById("gtfsChapasMode")?.value || "balanced").trim() || "balanced";
   const minTurnaroundMin = Number(document.getElementById("gtfsChapasTurnaroundMin")?.value || 10);
   const lineCodes = String(document.getElementById("gtfsChapasLineCodes")?.value || "").trim();
+  const lineVoltaPairs = String(document.getElementById("gtfsChapasLineVoltaPairs")?.value || "").trim();
+  const autoLineVoltaPairs = document.getElementById("gtfsChapasAutoLineVoltaPairs")?.checked !== false;
+  const lineVoltaAutoThresholdM = Number(document.getElementById("gtfsChapasLineVoltaAutoThresholdM")?.value);
   const maxVehicles = Number(document.getElementById("gtfsChapasMaxVehicles")?.value);
   const fleetCapFromTrackers = document.getElementById("gtfsChapasFleetCapFromTrackers")?.checked === true;
   const planningClass = String(document.getElementById("gtfsChapasPlanningClass")?.value || "").trim();
@@ -5362,6 +5365,11 @@ function getGtfsChapasParams() {
   params.set("mode", mode);
   if (Number.isFinite(minTurnaroundMin)) params.set("minTurnaroundMin", String(minTurnaroundMin));
   if (lineCodes) params.set("lineCodes", lineCodes);
+  if (lineVoltaPairs) params.set("lineVoltaPairs", lineVoltaPairs);
+  if (!autoLineVoltaPairs) params.set("autoLineVoltaPairs", "0");
+  if (Number.isFinite(lineVoltaAutoThresholdM) && lineVoltaAutoThresholdM > 0) {
+    params.set("lineVoltaAutoThresholdM", String(Math.round(lineVoltaAutoThresholdM)));
+  }
   if (Number.isFinite(maxVehicles) && maxVehicles > 0) params.set("maxVehicles", String(Math.floor(maxVehicles)));
   if (fleetCapFromTrackers) params.set("fleetCapFromTrackers", "1");
   if (planningClass) params.set("planningClass", planningClass);
@@ -5404,14 +5412,21 @@ function renderGtfsChapasVehiclePlansCards(vehiclePlans, baseDepot) {
     .map((plan) => {
       const svcs = Array.isArray(plan.services) ? plan.services : [];
       const items = svcs
-        .map(
-          (svc) =>
-            `<li><code>${escapeHtmlGtfs(svc.trip_id || svc.service_code || "")}</code> · linha ${escapeHtmlGtfs(
-              svc.line_code || "-"
-            )} · ${escapeHtmlGtfs(svc.first_departure_time || "?")} → ${escapeHtmlGtfs(svc.last_departure_time || "?")}${
-              svc.coverage_overflow ? ' <span class="gtfs-coverage-flag">(cupo extra)</span>' : ""
-            }</li>`
-        )
+        .map((svc) => {
+          const dir =
+            svc.direction_id == null || svc.direction_id === ""
+              ? ""
+              : ` · dir GTFS ${escapeHtmlGtfs(String(svc.direction_id))}`;
+          const tip = [svc.start_stop_name, svc.end_stop_name, svc.start_stop_id, svc.end_stop_id]
+            .filter(Boolean)
+            .join(" | ");
+          const titleAttr = tip ? ` title="${escapeHtmlGtfs(tip)}"` : "";
+          return `<li${titleAttr}><code>${escapeHtmlGtfs(svc.trip_id || svc.service_code || "")}</code> · linha ${escapeHtmlGtfs(
+            svc.line_code || "-"
+          )} · ${escapeHtmlGtfs(svc.first_departure_time || "?")} → ${escapeHtmlGtfs(svc.last_departure_time || "?")}${dir}${
+            svc.coverage_overflow ? ' <span class="gtfs-coverage-flag">(cupo extra)</span>' : ""
+          }</li>`;
+        })
         .join("");
       const bdLabel = baseDepot ? "Parque base (fixo)" : "Parque sugerido";
       return `<article class="service-card-item gtfs-chapas-vehicle-card">
@@ -5516,6 +5531,20 @@ async function generateGtfsAutonomousChapas() {
       feedHint,
       warnLines,
       calNote,
+      data?.trip_endpoints_note_pt ? `\n${data.trip_endpoints_note_pt}` : "",
+      data?.auto_line_volta_pairs === false ? "Deteção automática ida/volta: desligada" : "",
+      data?.auto_line_volta_pairs !== false && data?.line_volta_auto_threshold_m != null
+        ? `Deteção automática ida/volta: activa (limiar ${data.line_volta_auto_threshold_m} m)`
+        : "",
+      Array.isArray(data?.line_volta_pairs_manual) && data.line_volta_pairs_manual.length
+        ? `Pares manuais: ${data.line_volta_pairs_manual.map((p) => `${p[0]}=${p[1]}`).join(", ")}`
+        : "",
+      Array.isArray(data?.line_volta_pairs_auto_detected) && data.line_volta_pairs_auto_detected.length
+        ? `Pares detectados automaticamente: ${data.line_volta_pairs_auto_detected.map((p) => `${p[0]}=${p[1]}`).join(", ")}`
+        : "",
+      Array.isArray(data?.line_volta_pairs_applied) && data.line_volta_pairs_applied.length
+        ? `Pares aplicados no plano (manual ∪ auto): ${data.line_volta_pairs_applied.map((p) => `${p[0]}=${p[1]}`).join(", ")}`
+        : "",
     ]
       .filter(Boolean)
       .join("\n");
@@ -5524,7 +5553,7 @@ async function generateGtfsAutonomousChapas() {
       gtfsChapasListEl.innerHTML = '<article class="service-card-item">Sem serviços GTFS ativos para esta data.</article>';
       return;
     }
-    gtfsChapasListEl.innerHTML = `<p class="field-help field-help-tight">Serviços por viatura (lista completa por chapa)</p>${renderGtfsChapasVehiclePlansCards(
+    gtfsChapasListEl.innerHTML = `<p class="field-help field-help-tight">Serviços por viatura (lista completa; passe o rato num serviço para ver paragens e IDs GTFS)</p>${renderGtfsChapasVehiclePlansCards(
       plans,
       bd
     )}`;
@@ -5582,6 +5611,20 @@ async function generateGtfsAutonomousChapasRange() {
       `Vazio total estimado: ${Number(t.total_deadhead_km || 0).toFixed(3)} km`,
       rangeFeedHint,
       calNoteRange,
+      firstDetailed?.trip_endpoints_note_pt ? `\n${firstDetailed.trip_endpoints_note_pt}` : "",
+      firstDetailed?.auto_line_volta_pairs === false ? "Deteção automática ida/volta: desligada" : "",
+      firstDetailed?.auto_line_volta_pairs !== false && firstDetailed?.line_volta_auto_threshold_m != null
+        ? `Deteção automática ida/volta: activa (limiar ${firstDetailed.line_volta_auto_threshold_m} m) — valores do 1.º dia do período`
+        : "",
+      Array.isArray(firstDetailed?.line_volta_pairs_manual) && firstDetailed.line_volta_pairs_manual.length
+        ? `Pares manuais: ${firstDetailed.line_volta_pairs_manual.map((p) => `${p[0]}=${p[1]}`).join(", ")}`
+        : "",
+      Array.isArray(firstDetailed?.line_volta_pairs_auto_detected) && firstDetailed.line_volta_pairs_auto_detected.length
+        ? `Pares auto (1.º dia): ${firstDetailed.line_volta_pairs_auto_detected.map((p) => `${p[0]}=${p[1]}`).join(", ")}`
+        : "",
+      Array.isArray(firstDetailed?.line_volta_pairs_applied) && firstDetailed.line_volta_pairs_applied.length
+        ? `Pares aplicados no plano (1.º dia): ${firstDetailed.line_volta_pairs_applied.map((p) => `${p[0]}=${p[1]}`).join(", ")}`
+        : "",
     ]
       .filter(Boolean)
       .join("\n");
@@ -5593,7 +5636,7 @@ async function generateGtfsAutonomousChapasRange() {
     if (detailed.length === 1) {
       const p0 = detailed[0];
       const bd0 = p0?.base_depot || null;
-      gtfsChapasListEl.innerHTML = `<p class="field-help field-help-tight">Serviços por viatura — ${p0.date || "-"} (lista completa)</p>${renderGtfsChapasVehiclePlansCards(
+      gtfsChapasListEl.innerHTML = `<p class="field-help field-help-tight">Serviços por viatura — ${p0.date || "-"} (lista completa; passe o rato num serviço para ver paragens e IDs GTFS)</p>${renderGtfsChapasVehiclePlansCards(
         p0.vehicle_plans,
         bd0
       )}`;

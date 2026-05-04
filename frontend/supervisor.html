@@ -796,9 +796,14 @@
                 <dt>Cenário (equilibrado / …)</dt>
                 <dd>Peso na escolha de encadear trocas de linha versus tempo de espera e vazio—não muda quantas trips vêm do GTFS.</dd>
                 <dt>Turnaround mínimo</dt>
-                <dd>Tempo obrigatório entre fim da viagem anterior e início da seguinte na <em>mesma</em> viatura.</dd>
+                <dd>Tempo obrigatório entre fim da viagem anterior e início da seguinte na <em>mesma</em> viatura (até 12&nbsp;h).</dd>
                 <dt>Filtro de linhas</dt>
                 <dd><strong>Deixe vazio para todas as linhas.</strong> Com texto, apenas trips cuja linha coincide (após vírgulas). Um código errado dá resultado zero.</dd>
+                <dt>Pares ida / volta</dt>
+                <dd>
+                  Opcional: duas linhas do GTFS que são o mesmo serviço em sentidos opostos (ex. 1013 e 1023). Pode definir pares à mão ou activar a deteção automática (geometria: fim de uma linha perto do início da outra em ambos os sentidos, com limiar em metros). Pares manuais prevalecem se coincidirem com um par sugerido. Origem e destino de cada trip vêm da 1.ª e última
+                  <code>stop_time</code>; <code>direction_id</code> no feed indica o sentido quando existir.
+                </dd>
                 <dt>Máx. viaturas</dt>
                 <dd>Limite manual ao número de chapas; combine com capacidade do parque / Teltonika.</dd>
                 <dt>Cupar pela frota Teltonika</dt>
@@ -845,7 +850,7 @@
                 <option value="aggressive">Agressivo (menos viaturas)</option>
               </select>
               <label class="compact-label-inline" for="gtfsChapasTurnaroundMin">Turnaround (min)</label>
-              <input id="gtfsChapasTurnaroundMin" type="number" min="3" max="120" value="10" title="Entre dois serviços na mesma viatura" />
+              <input id="gtfsChapasTurnaroundMin" type="number" min="3" max="720" value="10" title="Entre dois serviços na mesma viatura (máx. 720 min = 12 h)" />
               <button type="button" id="generateGtfsChapasBtn">Gerar dia</button>
             </div>
             <details class="gtfs-chapas-section">
@@ -858,6 +863,27 @@
                   autocomplete="off"
                   placeholder="Ex.: 9, 405 — deixe vazio para TODAS as linhas da feed neste dia"
                 />
+              </div>
+            </details>
+            <details class="gtfs-chapas-section">
+              <summary>Pares ida / volta de linha (opcional)</summary>
+              <div class="depot-form-fields">
+                <label for="gtfsChapasLineVoltaPairs">Linhas que partilham a mesma viatura ida e regresso</label>
+                <input
+                  id="gtfsChapasLineVoltaPairs"
+                  type="text"
+                  autocomplete="off"
+                  placeholder="Ex.: 1013=1023, 1016=1026, 1014=1024 — use o mesmo código que no GTFS (route_short_name)"
+                />
+                <label class="inline-checkbox">
+                  <input id="gtfsChapasAutoLineVoltaPairs" type="checkbox" checked />
+                  Detectar automaticamente pares ida/volta (geometria entre término e origem das trips mais cedo por linha)
+                </label>
+                <label for="gtfsChapasLineVoltaAutoThresholdM">Limiar da deteção (metros, 50–5000)</label>
+                <input id="gtfsChapasLineVoltaAutoThresholdM" type="number" min="50" max="5000" value="450" title="Distância máxima entre fim de uma linha e início da outra, nos dois sentidos" />
+                <p class="field-help field-help-tight">
+                  O planeador deixa de penalizar a mudança entre os dois códigos de cada par (como se fossem a mesma linha). A deteção automática sugere pares com base nas coordenadas GTFS; acrescente pares manuais para corrigir ou forçar — têm prioridade quando o par é o mesmo.
+                </p>
               </div>
             </details>
             <details class="gtfs-chapas-section">
