@@ -4547,7 +4547,11 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
   if (autoVoltaOn && candidates.length) {
     lineVoltaPairsAuto = computeAutoLineVoltaPairsFromCandidates(candidates, lineVoltaAutoThresholdResolved);
   }
-  const lineVoltaPairsMerged = mergeVoltaPairLists(userVoltaPairs, lineVoltaPairsAuto);
+  const lineVoltaPairsDefaultNetwork = defaultVoltaPairsForCandidates(candidates);
+  const lineVoltaPairsMerged = mergeVoltaPairLists(
+    mergeVoltaPairLists(userVoltaPairs, lineVoltaPairsDefaultNetwork),
+    lineVoltaPairsAuto
+  );
   const modePolicy = { ...resolveModeWeights(mode), line_volta_pair_tokens: lineVoltaPairsMerged };
   const unassignedServices = [];
   const vehicles = [];
