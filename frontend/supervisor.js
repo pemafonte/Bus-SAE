@@ -181,6 +181,7 @@ const gtfsChapasSummaryEl = document.getElementById("gtfsChapasSummary");
 const gtfsChapasListEl = document.getElementById("gtfsChapasList");
 const gtfsServicesDiagSummaryEl = document.getElementById("gtfsServicesDiagSummary");
 const gtfsServicesDiagListEl = document.getElementById("gtfsServicesDiagList");
+const gtfsFeedInventorySummaryEl = document.getElementById("gtfsFeedInventorySummary");
 
 let driversCache = [];
 let usersCache = [];
@@ -5648,6 +5649,69 @@ async function diagnoseGtfsServicesInPeriod() {
   }
 }
 
+async function loadGtfsFeedInventory() {
+  if (!supToken || !gtfsFeedInventorySummaryEl) return;
+  const params = new URLSearchParams();
+  const feedKey = String(document.getElementById("gtfsChapasFeedKey")?.value || "").trim();
+  if (feedKey) params.set("feedKey", feedKey);
+  gtfsFeedInventorySummaryEl.textContent = "A carregar inventário da feed...";
+  try {
+    const qs = params.toString();
+    const response = await fetch(`${API_BASE}/supervisor/planning/gtfs-feed-inventory${qs ? `?${qs}` : ""}`, {
+      headers: getAuthHeaders(),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      gtfsFeedInventorySummaryEl.textContent = data.message || "Erro ao carregar inventário GTFS.";
+      return;
+    }
+    const c = data.counts || {};
+    const cal = data.calendar_coverage || {};
+    const meta = data.feed_metadata || {};
+    const lines = Array.isArray(data.per_line_top) ? data.per_line_top : [];
+    const hints = Array.isArray(data.hints_pt) ? data.hints_pt : [];
+    const topTxt = lines.length ? lines.map((x) => `  ${x.line_code}: ${x.trip_count} trips`).join("\n") : "  (nenhuma)";
+    const truncNote = data.per_line_truncated
+      ? `\n  … listagem limitada às ${data.per_line_top_limit || 50} linhas com mais trips (${data.distinct_lines_total || 0} linhas distintas no total).`
+      : "";
+    const metaLine = [
+      meta.source_filename ? `Último ficheiro: ${meta.source_filename}` : "",
+      meta.last_imported_at ? `Última importação: ${formatDateTimePt(meta.last_imported_at)}` : "",
+      Number.isFinite(Number(meta.trips_count))
+        ? `Metadados do registo da feed: ${meta.routes_count ?? "-"} routes, ${meta.trips_count} trips, ${meta.stop_times_count ?? "-"} stop_times (campos gtfs_feeds).`
+        : "",
+    ]
+      .filter(Boolean)
+      .join("\n");
+    gtfsFeedInventorySummaryEl.textContent = [
+      `Feed: ${data.feed_name_used || data.feed_key_used} (${data.feed_key_used})${data.feed_auto_selected ? " — selecção automática" : ""}`,
+      data.feed_selection_hint || "",
+      metaLine,
+      "",
+      "— Inventário em gtfs_trips (esta feed) —",
+      `Trips na BD: ${c.trips_in_db ?? 0}`,
+      `Routes distintas (em trips): ${c.routes_distinct_in_trips ?? 0} | service_id distintos: ${c.service_ids_distinct ?? 0}`,
+      `stop_times (linhas na tabela): ${c.stop_times_rows ?? 0}`,
+      `Trips sem calendário activo: ${c.trips_without_active_calendar ?? 0}`,
+      `Trips sem stop_times: ${c.trips_without_stop_times ?? 0}`,
+      `Trips com 1.ª partida vazia: ${c.trips_blank_first_departure ?? 0}`,
+      "",
+      "— Calendário (gtfs_calendars activos) —",
+      `Linhas de calendário: ${c.calendar_rows ?? 0} (${c.calendar_rows_active ?? 0} activas, ${c.calendar_rows_inactive ?? 0} inactivas)`,
+      `Vigência (activas): ${cal.active_service_window_start || "—"} → ${cal.active_service_window_end || "—"}`,
+      `calendar_dates: ${c.calendar_dates_rows ?? 0} linhas | datas: ${cal.calendar_dates_min || "—"} → ${cal.calendar_dates_max || "—"}`,
+      "",
+      `— Top linhas por n.º de trips (código = route_short_name ou fallback, como no gerador) —${truncNote}`,
+      topTxt,
+      "",
+      "— Notas —",
+      hints.length ? hints.map((h) => `• ${h}`).join("\n") : "• —",
+    ].join("\n");
+  } catch (_error) {
+    gtfsFeedInventorySummaryEl.textContent = "Erro de rede ao carregar inventário GTFS.";
+  }
+}
+
 function formatDateTimePt(value) {
   if (!value) return "-";
   const dt = new Date(value);
@@ -6310,6 +6374,10 @@ if (generateGtfsChapasRangeBtnEl) {
 const diagnoseGtfsServicesBtnEl = document.getElementById("diagnoseGtfsServicesBtn");
 if (diagnoseGtfsServicesBtnEl) {
   diagnoseGtfsServicesBtnEl.addEventListener("click", diagnoseGtfsServicesInPeriod);
+}
+const loadGtfsFeedInventoryBtnEl = document.getElementById("loadGtfsFeedInventoryBtn");
+if (loadGtfsFeedInventoryBtnEl) {
+  loadGtfsFeedInventoryBtnEl.addEventListener("click", loadGtfsFeedInventory);
 }
 const exportGtfsChapasDayXlsxBtnEl = document.getElementById("exportGtfsChapasDayXlsxBtn");
 if (exportGtfsChapasDayXlsxBtnEl) {

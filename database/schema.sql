@@ -176,6 +176,8 @@ CREATE TABLE IF NOT EXISTS gtfs_stops (
   stop_id VARCHAR(120) PRIMARY KEY,
   feed_key VARCHAR(80) NOT NULL DEFAULT 'default',
   stop_code VARCHAR(120),
+  municipality VARCHAR(120),
+  parish VARCHAR(120),
   stop_name VARCHAR(255),
   stop_lat DOUBLE PRECISION NOT NULL,
   stop_lon DOUBLE PRECISION NOT NULL
@@ -201,6 +203,10 @@ ALTER TABLE gtfs_stops
   ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default';
 ALTER TABLE gtfs_stops
   ADD COLUMN IF NOT EXISTS stop_code VARCHAR(120);
+ALTER TABLE gtfs_stops
+  ADD COLUMN IF NOT EXISTS municipality VARCHAR(120);
+ALTER TABLE gtfs_stops
+  ADD COLUMN IF NOT EXISTS parish VARCHAR(120);
 ALTER TABLE gtfs_stop_times
   ADD COLUMN IF NOT EXISTS feed_key VARCHAR(80) NOT NULL DEFAULT 'default';
 
@@ -281,6 +287,37 @@ CREATE INDEX IF NOT EXISTS idx_gtfs_calendars_feed_service
   ON gtfs_calendars(feed_key, service_id);
 CREATE INDEX IF NOT EXISTS idx_gtfs_calendar_dates_feed_service
   ON gtfs_calendar_dates(feed_key, service_id, calendar_date);
+
+-- Fronteiras administrativas (editor GTFS / enriquecimento de paragens; ensureGtfsMultiFeedInfra em gtfs.js)
+CREATE TABLE IF NOT EXISTS gtfs_admin_boundaries (
+  id BIGSERIAL PRIMARY KEY,
+  level VARCHAR(20) NOT NULL,
+  boundary_name VARCHAR(160) NOT NULL,
+  municipality_name VARCHAR(160),
+  geometry_type VARCHAR(20) NOT NULL,
+  geometry_json JSONB NOT NULL,
+  min_lat DOUBLE PRECISION,
+  max_lat DOUBLE PRECISION,
+  min_lon DOUBLE PRECISION,
+  max_lon DOUBLE PRECISION,
+  source_tag VARCHAR(160),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_gtfs_admin_boundaries_level_bbox
+  ON gtfs_admin_boundaries(level, min_lat, max_lat, min_lon, max_lon);
+
+-- Desactivação manual de trips (editor; ensureGtfsEditorIndexes em gtfs.js)
+CREATE TABLE IF NOT EXISTS gtfs_trip_deactivations (
+  trip_id VARCHAR(120) PRIMARY KEY REFERENCES gtfs_trips(trip_id) ON DELETE CASCADE,
+  deactivate_effective_from DATE NOT NULL,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_gtfs_trip_deactivations_effective
+  ON gtfs_trip_deactivations(deactivate_effective_from, trip_id);
 
 ALTER TABLE service_handover_events
   ADD COLUMN IF NOT EXISTS handover_lat DOUBLE PRECISION;
@@ -549,9 +586,3 @@ CREATE TABLE IF NOT EXISTS ops_message_presets (
 
 CREATE INDEX IF NOT EXISTS idx_ops_message_presets_scope_active
   ON ops_message_presets(scope, is_active);
-
--- GTFS editor/query performance indexes
-CREATE INDEX IF NOT EXISTS idx_gtfs_trips_route_id
-  ON gtfs_trips(route_id);
-CREATE INDEX IF NOT EXISTS idx_gtfs_stop_times_trip_seq
-  ON gtfs_stop_times(trip_id, stop_sequence);

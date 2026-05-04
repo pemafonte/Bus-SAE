@@ -4569,6 +4569,190 @@ async function buildGtfsServiceDiagnostics(fromDate, toDate, options = {}) {
   };
 }
 
+/**
+ * Inventário estático do GTFS importado para uma feed (sem filtro de datas).
+ * Serve para comparar com o diagnóstico por período (que só conta trips activas no calendário por dia).
+ */
+async function buildGtfsFeedInventory(options = {}) {
+  const feedRes = await resolveGtfsPlanningFeedKey(options.feedKey);
+  if (!feedRes.ok) {
+    const err = new Error(feedRes.message);
+    err.statusCode = 400;
+    throw err;
+  }
+  const fk = feedRes.feed_key;
+  const [feedRowRes, countsRes, distinctLinesRes, linesRes] = await Promise.all([
+    db.query(
+      `SELECT feed_key, feed_name, is_active, source_filename, last_imported_at, updated_at,
+              trips_count, routes_count, shapes_count, stops_count, stop_times_count,
+              gtfs_effective_from, calendar_effective_from
+       FROM gtfs_feeds
+       WHERE feed_key = $1
+       LIMIT 1`,
+      [fk]
+    ),
+    db.query(
+      `SELECT
+         (SELECT COUNT(*)::int FROM gtfs_trips WHERE feed_key = $1) AS trips_in_db,
+         (SELECT COUNT(DISTINCT route_id)::int FROM gtfs_trips WHERE feed_key = $1) AS routes_distinct_in_trips,
+         (SELECT COUNT(DISTINCT service_id)::int
+            FROM gtfs_trips
+           WHERE feed_key = $1 AND service_id IS NOT NULL AND TRIM(service_id) <> '') AS service_ids_distinct,
+         (SELECT COUNT(*)::int FROM gtfs_trips t
+           WHERE t.feed_key = $1
+             AND (
+               t.service_id IS NULL OR TRIM(t.service_id) = ''
+               OR NOT EXISTS (
+                 SELECT 1 FROM gtfs_calendars c
+                  WHERE c.feed_key = t.feed_key
+                    AND c.service_id = t.service_id
+                    AND c.is_active = TRUE
+               )
+             )) AS trips_without_active_calendar,
+         (SELECT COUNT(*)::int FROM gtfs_trips t
+           WHERE t.feed_key = $1
+             AND NOT EXISTS (
+               SELECT 1 FROM gtfs_stop_times st
+                WHERE st.feed_key = t.feed_key AND st.trip_id = t.trip_id
+             )) AS trips_without_stop_times,
+         (SELECT COUNT(*)::int FROM gtfs_trips t
+           WHERE t.feed_key = $1
+             AND EXISTS (
+               SELECT 1 FROM gtfs_stop_times st
+                WHERE st.feed_key = t.feed_key AND st.trip_id = t.trip_id
+             )
+             AND COALESCE(
+               TRIM(
+                 (SELECT st.departure_time
+                    FROM gtfs_stop_times st
+                   WHERE st.feed_key = t.feed_key AND st.trip_id = t.trip_id
+                   ORDER BY st.stop_sequence ASC NULLS LAST
+                   LIMIT 1)
+               ),
+               ''
+             ) = '') AS trips_blank_first_departure,
+         (SELECT COUNT(*)::int FROM gtfs_stop_times WHERE feed_key = $1) AS stop_times_rows,
+         (SELECT COUNT(*)::int FROM gtfs_calendars WHERE feed_key = $1) AS calendar_rows,
+         (SELECT COUNT(*)::int FROM gtfs_calendars WHERE feed_key = $1 AND is_active = TRUE) AS calendar_rows_active,
+         (SELECT COUNT(*)::int FROM gtfs_calendars WHERE feed_key = $1 AND is_active = FALSE) AS calendar_rows_inactive,
+         (SELECT MIN(start_date)::text FROM gtfs_calendars WHERE feed_key = $1 AND is_active = TRUE) AS calendar_min_start,
+         (SELECT MAX(end_date)::text FROM gtfs_calendars WHERE feed_key = $1 AND is_active = TRUE) AS calendar_max_end,
+         (SELECT COUNT(*)::int FROM gtfs_calendar_dates WHERE feed_key = $1) AS calendar_dates_rows,
+         (SELECT MIN(calendar_date)::text FROM gtfs_calendar_dates WHERE feed_key = $1) AS calendar_dates_min,
+         (SELECT MAX(calendar_date)::text FROM gtfs_calendar_dates WHERE feed_key = $1) AS calendar_dates_max`,
+      [fk]
+    ),
+    db.query(
+      `SELECT COUNT(*)::int AS distinct_lines
+       FROM (
+         SELECT 1
+           FROM gtfs_trips t
+           LEFT JOIN LATERAL (
+             SELECT rr.route_short_name, rr.route_long_name
+               FROM gtfs_routes rr
+              WHERE rr.route_id = t.route_id
+              ORDER BY
+                    CASE WHEN rr.feed_key = t.feed_key THEN 0 ELSE 1 END,
+                    CASE WHEN TRIM(COALESCE(rr.route_short_name, '')) <> '' THEN 0 ELSE 1 END,
+                    rr.route_id
+              LIMIT 1
+           ) r ON TRUE
+          WHERE t.feed_key = $1
+          GROUP BY COALESCE(NULLIF(TRIM(r.route_short_name), ''), NULLIF(TRIM(r.route_long_name), ''), t.route_id)
+       ) q`,
+      [fk]
+    ),
+    db.query(
+      `SELECT
+         COALESCE(NULLIF(TRIM(r.route_short_name), ''), NULLIF(TRIM(r.route_long_name), ''), t.route_id) AS line_code,
+         COUNT(*)::int AS trip_count
+       FROM gtfs_trips t
+       LEFT JOIN LATERAL (
+         SELECT rr.route_short_name, rr.route_long_name
+           FROM gtfs_routes rr
+          WHERE rr.route_id = t.route_id
+          ORDER BY
+                CASE WHEN rr.feed_key = t.feed_key THEN 0 ELSE 1 END,
+                CASE WHEN TRIM(COALESCE(rr.route_short_name, '')) <> '' THEN 0 ELSE 1 END,
+                rr.route_id
+          LIMIT 1
+       ) r ON TRUE
+      WHERE t.feed_key = $1
+      GROUP BY 1
+      ORDER BY trip_count DESC, line_code ASC
+      LIMIT 50`,
+      [fk]
+    ),
+  ]);
+
+  const feedRow = feedRowRes.rows[0] || null;
+  const c = countsRes.rows[0] || {};
+  const distinctLines = Number(distinctLinesRes.rows[0]?.distinct_lines || 0);
+  const perLine = (linesRes.rows || []).map((row) => ({
+    line_code: String(row.line_code ?? "").trim() || "-",
+    trip_count: Number(row.trip_count || 0),
+  }));
+
+  const tripsInDb = Number(c.trips_in_db || 0);
+  const metaTrips = Number(feedRow?.trips_count || 0);
+  const hintsPt = [];
+  hintsPt.push(
+    "Resumo da feed na base de dados (todas as trips importadas). O «Diagnóstico GTFS» por datas conta só serviços que correm nesse dia segundo calendário e excepções — pode ser bem menor se o dia escolhido estiver fora da vigência ou for falso feriado."
+  );
+  if (metaTrips > 0 && tripsInDb !== metaTrips) {
+    hintsPt.push(
+      `O registo da feed indica ${metaTrips} trips, mas existem ${tripsInDb} linhas em gtfs_trips — reimporte ou verifique integridade se não for intencional.`
+    );
+  }
+  if (Number(c.trips_without_active_calendar || 0) > 0) {
+    hintsPt.push(
+      `${Number(c.trips_without_active_calendar)} trip(s) sem calendário activo correspondente ao service_id — não entram no planeamento diário até o calendário estar activo e coerente.`
+    );
+  }
+  if (Number(c.trips_without_stop_times || 0) > 0) {
+    hintsPt.push(`${Number(c.trips_without_stop_times)} trip(s) sem stop_times — não podem ser planeadas.`);
+  }
+  if (Number(c.trips_blank_first_departure || 0) > 0) {
+    hintsPt.push(
+      `${Number(c.trips_blank_first_departure)} trip(s) com 1.ª partida vazia nas stop_times — o gerador pode ignorá-las.`
+    );
+  }
+
+  return {
+    feed_key_used: feedRes.feed_key,
+    feed_name_used: feedRes.feed_name,
+    feed_auto_selected: feedRes.auto_selected,
+    feed_selection_hint: feedRes.auto_selected
+      ? "Modo automático: feed activo mais recentemente actualizado. Escolha explicitamente o feed «mobilis» no selector se tiver vários activos."
+      : null,
+    feed_metadata: feedRow,
+    counts: {
+      trips_in_db: tripsInDb,
+      routes_distinct_in_trips: Number(c.routes_distinct_in_trips || 0),
+      service_ids_distinct: Number(c.service_ids_distinct || 0),
+      trips_without_active_calendar: Number(c.trips_without_active_calendar || 0),
+      trips_without_stop_times: Number(c.trips_without_stop_times || 0),
+      trips_blank_first_departure: Number(c.trips_blank_first_departure || 0),
+      stop_times_rows: Number(c.stop_times_rows || 0),
+      calendar_rows: Number(c.calendar_rows || 0),
+      calendar_rows_active: Number(c.calendar_rows_active || 0),
+      calendar_rows_inactive: Number(c.calendar_rows_inactive || 0),
+      calendar_dates_rows: Number(c.calendar_dates_rows || 0),
+    },
+    calendar_coverage: {
+      active_service_window_start: c.calendar_min_start || null,
+      active_service_window_end: c.calendar_max_end || null,
+      calendar_dates_min: c.calendar_dates_min || null,
+      calendar_dates_max: c.calendar_dates_max || null,
+    },
+    per_line_top: perLine,
+    distinct_lines_total: distinctLines,
+    per_line_top_limit: 50,
+    per_line_truncated: distinctLines > perLine.length,
+    hints_pt: hintsPt,
+  };
+}
+
 router.get("/planning/gtfs-autonomous-chapas", async (req, res) => {
   try {
     const plannerOpts = parseGtfsChapasPlanningParams(req.query);
@@ -4601,6 +4785,20 @@ router.get("/planning/gtfs-services-diagnostics", async (req, res) => {
       return res.status(400).json({ message: error.message || "Parâmetros inválidos para diagnóstico GTFS." });
     }
     return res.status(500).json({ message: "Erro ao gerar diagnóstico de serviços GTFS." });
+  }
+});
+
+router.get("/planning/gtfs-feed-inventory", async (req, res) => {
+  try {
+    const plannerOpts = parseGtfsChapasPlanningParams(req.query);
+    const inv = await buildGtfsFeedInventory({ feedKey: plannerOpts.feedKey });
+    return res.json(inv);
+  } catch (error) {
+    const code = Number(error?.statusCode);
+    if (code === 400) {
+      return res.status(400).json({ message: error.message || "Parâmetros inválidos para inventário GTFS." });
+    }
+    return res.status(500).json({ message: "Erro ao gerar inventário da feed GTFS." });
   }
 });
 

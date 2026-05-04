@@ -1445,8 +1445,17 @@ pre {
 }
 
 .gtfs-chapas-day-row,
-.gtfs-chapas-range-export {
+.gtfs-chapas-range-export,
+.gtfs-feed-inventory-row {
   align-items: center;
+}
+
+.gtfs-feed-inventory-pre {
+  max-height: 22rem;
+  overflow: auto;
+  font-size: 12px;
+  white-space: pre-wrap;
+  margin-top: 0.35rem;
 }
 
 .announce-head {

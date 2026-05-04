@@ -721,7 +721,7 @@
                 <label for="depotLng">Longitude</label>
                 <input id="depotLng" type="number" step="any" placeholder="Duplo clique / clique no mapa para preencher" required />
                 <label for="depotNotes">Notas <span class="depot-form-optional">(opcional)</span></label>
-                <textarea id="depotNotes" rows="2" placeholder="Observações internas"></textarea>
+                <textarea id="depotNotes" rows="2" placeholder="Opcional: texto interno (ex.: contactos, regras do parque)."></textarea>
               </div>
               <label class="inline-checkbox">
                 <input id="depotIsActive" type="checkbox" checked />
@@ -828,6 +828,13 @@
                 Atribuir todos os serviços (chapas extra se cupo ou regras UE bloquearem)
               </label>
             </div>
+            <div class="ops-layout-compact gtfs-feed-inventory-row">
+              <button type="button" id="loadGtfsFeedInventoryBtn">Resumo da feed (sem datas)</button>
+            </div>
+            <p class="field-help field-help-tight">
+              Conta todas as trips importadas e a janela do calendário activo — útil antes de escolher o período para diagnóstico ou chapas.
+            </p>
+            <pre id="gtfsFeedInventorySummary" class="gtfs-feed-inventory-pre">Inventário da feed ainda não pedido.</pre>
             <div class="ops-layout-compact gtfs-chapas-day-row">
               <label class="compact-label-inline" for="gtfsChapasDate">Dia único</label>
               <input id="gtfsChapasDate" type="date" />
