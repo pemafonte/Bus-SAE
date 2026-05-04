@@ -199,6 +199,7 @@ let currentLiveServices = [];
 let serviceDetailRouteMap = null;
 let serviceDetailRouteLayer = null;
 const LIVE_MAP_REFRESH_MS = 5000;
+let gtfsChapasBaseDepotSelectDefaulted = false;
 let supLiveMapUserAdjustedView = false;
 let reportsLoadedOnce = false;
 let selectedOpsDriverId = null;
@@ -4998,6 +4999,34 @@ function populateDepotSelectOptions(rows) {
   select.innerHTML = options.join("");
 }
 
+function populateGtfsChapasBaseDepotSelect(rows) {
+  const select = document.getElementById("gtfsChapasBaseDepot");
+  if (!select) return;
+  const preserved = String(select.value || "");
+  const options = [
+    '<option value="">Automático (menor vazio entre parques activos)</option>',
+  ].concat(
+    (rows || []).map(
+      (item) =>
+        `<option value="${item.id}">${item.depot_name || "-"} (cap. ${item.capacity_total ?? 0})</option>`
+    )
+  );
+  select.innerHTML = options.join("");
+  if (preserved && [...select.options].some((o) => o.value === preserved)) {
+    select.value = preserved;
+  } else if (!gtfsChapasBaseDepotSelectDefaulted && rows?.length) {
+    const preferred = rows.find(
+      (r) => /\boficinas\b/i.test(String(r.depot_name || "")) && /\bleiria\b/i.test(String(r.depot_name || ""))
+    );
+    if (preferred) {
+      select.value = String(preferred.id);
+      const capBox = document.getElementById("gtfsChapasUseDepotCapacityAsCap");
+      if (capBox) capBox.checked = true;
+    }
+    gtfsChapasBaseDepotSelectDefaulted = true;
+  }
+}
+
 async function loadDepots() {
   if (!supToken || !depotsListEl) return;
   ensureDepotMap();
@@ -5011,6 +5040,7 @@ async function loadDepots() {
     }
     const rows = Array.isArray(data) ? data : [];
     populateDepotSelectOptions(rows);
+    populateGtfsChapasBaseDepotSelect(rows);
     if (depotMapMarkersLayer) depotMapMarkersLayer.clearLayers();
     if (!rows.length) {
       depotsListEl.innerHTML = '<article class="service-card-item">Sem parques registados.</article>';
@@ -5224,6 +5254,8 @@ function getGtfsChapasParams() {
   const maxVehicles = Number(document.getElementById("gtfsChapasMaxVehicles")?.value);
   const fleetCapFromTrackers = document.getElementById("gtfsChapasFleetCapFromTrackers")?.checked === true;
   const planningClass = String(document.getElementById("gtfsChapasPlanningClass")?.value || "").trim();
+  const baseDepotIdRaw = Number(document.getElementById("gtfsChapasBaseDepot")?.value);
+  const useBaseDepotCapacityAsCap = document.getElementById("gtfsChapasUseDepotCapacityAsCap")?.checked === true;
   const maxDriveBlockMin = Number(document.getElementById("gtfsChapasMaxDriveBlockMin")?.value ?? 270);
   const minUninterruptedBreakMin = Number(document.getElementById("gtfsChapasMinUninterruptedBreakMin")?.value ?? 45);
   const euSplitBreak = document.getElementById("gtfsChapasEuSplitBreak")?.checked === true;
@@ -5244,6 +5276,10 @@ function getGtfsChapasParams() {
   if (Number.isFinite(operativeIdleResetMin) && operativeIdleResetMin > 0) {
     params.set("operativeIdleResetMin", String(operativeIdleResetMin));
   }
+  if (Number.isFinite(baseDepotIdRaw) && baseDepotIdRaw > 0) {
+    params.set("baseDepotId", String(Math.floor(baseDepotIdRaw)));
+  }
+  if (useBaseDepotCapacityAsCap) params.set("useBaseDepotCapacityAsCap", "1");
   return params;
 }
 
@@ -5310,10 +5346,18 @@ async function generateGtfsAutonomousChapas() {
       return;
     }
     const s = data?.summary || {};
+    const bd = data?.base_depot || null;
+    const firstSvc = data?.day_schedule_anchor?.first_services_preview?.[0];
     const warnLines = Array.isArray(data?.warnings) && data.warnings.length ? `\nAlertas:\n${data.warnings.join("\n")}` : "";
     gtfsChapasSummaryEl.textContent = [
       `Data: ${data?.date || "hoje"}`,
       `Modo: ${data?.mode || "-"}`,
+      bd
+        ? `Parque base: ${bd.depot_name || "-"} (#${bd.id}); capacidade registada ${bd.capacity_total ?? "—"}${data.depot_capacity_used_as_fleet_cap ? " — cupo limitado por esta capacidade" : ""}`
+        : "Parque base: automático (menor vazio entre parques activos)",
+      firstSvc?.first_departure_time != null
+        ? `1.ª trip na ordem do dia (GTFS): ${firstSvc.line_code || "-"} · ${firstSvc.first_departure_time || "-"} (${firstSvc.start_stop_name || "1.ª paragem"})`
+        : "",
       `Viaturas necessárias: ${s.vehicles_required || 0}`,
       `Serviços GTFS atribuídos: ${(s.services_assigned != null ? s.services_assigned : s.services_total) || 0}`,
       `Serviços por atribuir: ${s.services_unassigned ?? 0}`,
@@ -5341,7 +5385,7 @@ async function generateGtfsAutonomousChapas() {
           : "<li>Sem serviços.</li>";
         return `<article class="service-card-item">
           <strong>${plan.vehicle_plan_id || "-"}</strong>
-          <div>Parque sugerido: ${plan.depot_name || "Sem parque"}</div>
+          <div>${bd ? "Parque base (fixo)" : "Parque sugerido"}: ${plan.depot_name || "Sem parque"}</div>
           <div>Serviços: ${plan.services_count || 0}</div>
           <div>Condução: ${plan.total_drive_min || 0} min</div>
           <div>Vazio total estimado: ${Number(plan.total_deadhead_km || 0).toFixed(3)} km</div>
@@ -5379,9 +5423,14 @@ async function generateGtfsAutonomousChapasRange() {
       return;
     }
     const t = data?.totals || {};
+    const sampleBd = Array.isArray(data?.detailed_daily_plans) && data.detailed_daily_plans.length ? data.detailed_daily_plans[0].base_depot : null;
+    const depotCapGlob = Array.isArray(data?.detailed_daily_plans) && data.detailed_daily_plans.length ? !!data.detailed_daily_plans[0].depot_capacity_used_as_fleet_cap : false;
     gtfsChapasSummaryEl.textContent = [
       `Período: ${data?.from_date || "-"} -> ${data?.to_date || "-"}`,
       `Modo: ${data?.mode || "-"}`,
+      sampleBd
+        ? `Parque base (todos os dias): ${sampleBd.depot_name || "-"} (#${sampleBd.id})${depotCapGlob ? "; cupo máx. limitado pela capacidade do parque onde aplicável" : ""}`
+        : "Parque base: automático",
       `Dias analisados: ${t.days || 0}`,
       `Serviços GTFS atribuídos (total): ${t.services_total || 0}`,
       `Serviços por atribuir (total): ${t.services_unassigned_total || 0}`,

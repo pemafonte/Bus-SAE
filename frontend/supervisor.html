@@ -764,8 +764,19 @@
             <h3>Gerador automático de chapas (GTFS)</h3>
             <p class="field-help field-help-tight">
               Gera chapas autonomamente por viatura com base no GTFS e calendário ativo, minimizando frota necessária e
-              apresentando o impacto em vazio/carga para dia ou período (até mensal).
+              apresentando o impacto em vazio/carga para dia ou período (até mensal). Nesta fase sem Teltonika, as partidas ordenam‑se pela
+              primeira hora GTFS da trip e o vazio parque&nbsp;→&nbsp;serviço usa as coordenadas da primeira stop_time até ao parque base escolhido.
             </p>
+            <div class="ops-layout-compact">
+              <label for="gtfsChapasBaseDepot">Parque base (início/fim do dia)</label>
+              <select id="gtfsChapasBaseDepot" title="Viaturas partem e regressam sempre a este parque (vazio calculado até à 1.ª paragem GTFS da trip).">
+                <option value="">Automático (menor vazio entre parques activos)</option>
+              </select>
+              <label class="inline-checkbox">
+                <input id="gtfsChapasUseDepotCapacityAsCap" type="checkbox" />
+                Limitar número de chapas à capacidade do parque seleccionado
+              </label>
+            </div>
             <div class="ops-layout-compact">
               <input id="gtfsChapasDate" type="date" />
               <select id="gtfsChapasMode">

@@ -209,33 +209,46 @@ function estimateCompatCost(prevService, nextService, policy) {
   return { score, wait_min: waitMin, deadhead_km: deadheadKm };
 }
 
-function chooseBestDepotForVehicle(vehicle, depots) {
-  if (!Array.isArray(depots) || !depots.length || !vehicle?.services?.length) return null;
+function computeDepotVehicleDeadheadSummary(depot, vehicle) {
+  if (!vehicle?.services?.length || !depot) return null;
   const first = vehicle.services[0];
   const last = vehicle.services[vehicle.services.length - 1];
+  const toFirst = haversineDistanceKm(depot.lat, depot.lng, first.start_lat, first.start_lng) || 0;
+  const fromLast = haversineDistanceKm(last.end_lat, last.end_lng, depot.lat, depot.lng) || 0;
+  const total = toFirst + fromLast;
+  return {
+    depot_id: depot.id,
+    depot_name: depot.depot_name,
+    deadhead_to_first_km: Number(toFirst.toFixed(3)),
+    deadhead_back_to_depot_km: Number(fromLast.toFixed(3)),
+    total_deadhead_km: Number(total.toFixed(3)),
+  };
+}
+
+function chooseBestDepotForVehicle(vehicle, depots) {
+  if (!Array.isArray(depots) || !depots.length || !vehicle?.services?.length) return null;
   let best = null;
   for (const depot of depots) {
-    const toFirst = haversineDistanceKm(depot.lat, depot.lng, first.start_lat, first.start_lng) || 0;
-    const fromLast = haversineDistanceKm(last.end_lat, last.end_lng, depot.lat, depot.lng) || 0;
-    const total = toFirst + fromLast;
-    if (!best || total < best.total_deadhead_km) {
-      best = {
-        depot_id: depot.id,
-        depot_name: depot.depot_name,
-        deadhead_to_first_km: Number(toFirst.toFixed(3)),
-        deadhead_back_to_depot_km: Number(fromLast.toFixed(3)),
-        total_deadhead_km: total,
-      };
-    }
+    const row = computeDepotVehicleDeadheadSummary(depot, vehicle);
+    if (!row) continue;
+    if (!best || row.total_deadhead_km < best.total_deadhead_km) best = row;
   }
-  if (!best) return null;
-  return {
-    depot_id: best.depot_id,
-    depot_name: best.depot_name,
-    deadhead_to_first_km: best.deadhead_to_first_km,
-    deadhead_back_to_depot_km: best.deadhead_back_to_depot_km,
-    total_deadhead_km: Number(best.total_deadhead_km.toFixed(3)),
-  };
+  return best || null;
+}
+
+function resolveForcedBaseDepot(depotsRows, opts) {
+  if (!Array.isArray(depotsRows) || !depotsRows.length) return null;
+  const depotIdRaw = Number(opts?.baseDepotId);
+  if (Number.isFinite(depotIdRaw) && depotIdRaw > 0) {
+    const row = depotsRows.find((d) => Number(d.id) === depotIdRaw);
+    if (row) return row;
+  }
+  const nameHint = String(opts?.baseDepotName || "").trim().toLowerCase();
+  if (nameHint) {
+    const hit = depotsRows.find((d) => String(d.depot_name || "").toLowerCase().includes(nameHint));
+    if (hit) return hit;
+  }
+  return null;
 }
 
 function normalizeLineCodesInput(raw) {
@@ -284,6 +297,10 @@ function parseGtfsChapasPlanningParams(queryLike = {}) {
   let operativeIdleResetMin = Number(queryLike.operativeIdleResetMin ?? queryLike.overnightIdleResetMin);
   if (!Number.isFinite(operativeIdleResetMin)) operativeIdleResetMin = 0;
   operativeIdleResetMin = Math.min(Math.max(Math.round(operativeIdleResetMin), 0), 24 * 60);
+  /** Parque físico obrigatório para vazio inicial/final (fase sem Teltonika / base única). */
+  const baseDepotId = Number(queryLike.baseDepotId);
+  const baseDepotName = String(queryLike.baseDepotName || "").trim();
+  const useBaseDepotCapacityAsCap = parseBooleanLike(queryLike.useBaseDepotCapacityAsCap, false);
   const lineCodesNormalized = normalizeLineCodesInput(queryLike.lineCodes ?? queryLike.lines ?? queryLike.line);
   return {
     mode,
@@ -298,6 +315,9 @@ function parseGtfsChapasPlanningParams(queryLike = {}) {
     splitBreakFirstSegmentMin,
     splitBreakSecondSegmentMin,
     operativeIdleResetMin,
+    baseDepotId: Number.isFinite(baseDepotId) && baseDepotId > 0 ? Math.floor(baseDepotId) : null,
+    baseDepotName,
+    useBaseDepotCapacityAsCap,
     lineCodesNormalized,
   };
 }
@@ -500,6 +520,7 @@ function buildGtfsChapasUnassignedRows(plan) {
 
 async function respondGtfsChapasDailyXlsx(res, planningOpts, serviceDate, plan) {
   const wb = XLSX.utils.book_new();
+  const bd = plan.base_depot || null;
   const summarySheet = XLSX.utils.json_to_sheet([
     {
       data: plan.date,
@@ -511,6 +532,12 @@ async function respondGtfsChapasDailyXlsx(res, planningOpts, serviceDate, plan) 
       pausa_ue_frac_15_30: planningOpts.euSplitBreak ? "sim" : "nao",
       reset_contador_intervalo_oper_min: planningOpts.operativeIdleResetMin || 0,
       linhas_filtradas: (plan.line_codes_filter || []).join(", ") || "(todas)",
+      parque_base_id: bd?.id ?? "",
+      parque_base_nome: bd?.depot_name ?? "",
+      parque_capacidade_registada: bd?.capacity_total ?? "",
+      capacidade_parque_aplicada_ao_cupo: plan.depot_capacity_used_as_fleet_cap ? "sim" : "nao",
+      primeira_partida_dia_preview: plan.day_schedule_anchor?.first_services_preview?.[0]?.first_departure_time ?? "",
+      trip_primeira_do_dia: plan.day_schedule_anchor?.first_services_preview?.[0]?.trip_id ?? "",
       cupo_max_viaturas: plan.fleet_cap_applied ?? "",
       ...(plan.summary || {}),
     },
@@ -550,6 +577,12 @@ async function respondGtfsChapasRangeXlsx(res, planningOpts, fromDate, toDate, b
         pausa_ue_frac_15_30: planningOpts.euSplitBreak ? "sim" : "nao",
         reset_contador_intervalo_oper_min: planningOpts.operativeIdleResetMin || 0,
         linhas_filtradas: (planningOpts.lineCodesNormalized || []).join(", ") || "(todas)",
+        parque_base_id_pedido: planningOpts.baseDepotId ?? "",
+        parque_base_nome_pedido: planningOpts.baseDepotName || "",
+        capacidade_parque_aplicada_ao_cupo: planningOpts.useBaseDepotCapacityAsCap ? "sim" : "nao",
+        parque_base_resolvido_nome:
+          bundle.detailed_daily_plans?.[0]?.base_depot?.depot_name ?? "",
+        parque_base_resolvido_id: bundle.detailed_daily_plans?.[0]?.base_depot?.id ?? "",
         ...bundle.totals,
       },
     ]),
@@ -4068,13 +4101,20 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
   };
   await ensureDepotTables();
   const depotsRes = await db.query(
-    `SELECT id, depot_name, lat, lng
+    `SELECT id, depot_code, depot_name, lat, lng, capacity_total
      FROM depots
      WHERE is_active = TRUE
      ORDER BY depot_name ASC`
   );
   const depots = depotsRes.rows || [];
-  const fleetCap = await resolveFleetVehicleCap(options);
+  const forcedBaseDepot = resolveForcedBaseDepot(depots, options);
+  let fleetCap = await resolveFleetVehicleCap(options);
+  if (forcedBaseDepot && parseBooleanLike(options.useBaseDepotCapacityAsCap, false)) {
+    const capCt = Math.max(0, Math.round(Number(forcedBaseDepot.capacity_total || 0)));
+    if (capCt > 0) {
+      fleetCap = fleetCap == null ? capCt : Math.min(fleetCap, capCt);
+    }
+  }
   const candidates = await fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormalized);
   const unassignedServices = [];
   const vehicles = [];
@@ -4132,7 +4172,9 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
   }
 
   const vehiclePlans = vehicles.map((vehicle) => {
-    const assignedDepot = chooseBestDepotForVehicle(vehicle, depots);
+    const assignedDepot = forcedBaseDepot
+      ? computeDepotVehicleDeadheadSummary(forcedBaseDepot, vehicle)
+      : chooseBestDepotForVehicle(vehicle, depots);
     const driveMin = vehicle.services.reduce((acc, s) => acc + Number(s.drive_min || 0), 0);
     const interServiceDeadhead = vehicle.services.reduce((acc, s) => acc + Number(s.deadhead_from_previous_km || 0), 0);
     return {
@@ -4165,7 +4207,29 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
       vehicles_without_depot: 0,
     }
   );
+  const dayWindow = candidates.length
+    ? {
+        note:
+          "Construção das chapas por ordem cronológica das primeiras partidas GTFS do dia; vazio parque↔1.ª paragem usa coordenadas da primeira stop_time (sem Teltonika nesta fase).",
+        earliest_start_min: Number(candidates[0].start_min),
+        first_services_preview: candidates.slice(0, Math.min(12, candidates.length)).map((c) => ({
+          trip_id: c.trip_id,
+          line_code: c.line_code,
+          first_departure_time: c.first_departure_time,
+          start_stop_name: c.start_stop_name,
+          start_lat: c.start_lat,
+          start_lng: c.start_lng,
+        })),
+      }
+    : null;
+
   const warnings = [];
+  if ((options.baseDepotId || String(options.baseDepotName || "").trim()) && !forcedBaseDepot) {
+    warnings.push("Parque base (baseDepotId / baseDepotName) não corresponde a nenhum parque activo.");
+  }
+  if (forcedBaseDepot && candidates.some((c) => !Number.isFinite(Number(c.start_lat)) || !Number.isFinite(Number(c.start_lng)))) {
+    warnings.push("Algumas trips sem coordenadas na primeira paragem GTFS: vazio parque↔origem pode ficar indisponível.");
+  }
   if (maxDriveBlockMin > 0) {
     const longBlocks = candidates.filter((trip) => Number(trip.drive_min) > maxDriveBlockMin);
     if (longBlocks.length) {
@@ -4178,6 +4242,20 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
     min_turnaround_min: minTurnaroundMin,
     line_codes_filter: lineCodesNormalized,
     fleet_cap_applied: fleetCap,
+    base_depot: forcedBaseDepot
+      ? {
+          id: forcedBaseDepot.id,
+          depot_name: forcedBaseDepot.depot_name,
+          depot_code: forcedBaseDepot.depot_code ?? null,
+          lat: forcedBaseDepot.lat,
+          lng: forcedBaseDepot.lng,
+          capacity_total: forcedBaseDepot.capacity_total,
+        }
+      : null,
+    depot_capacity_used_as_fleet_cap: !!(forcedBaseDepot && parseBooleanLike(options.useBaseDepotCapacityAsCap, false)),
+    day_schedule_anchor: dayWindow,
+    phase_note:
+      "Fase inicial: construção a partir das primeiras partidas GTFS do dia; vazio parque↔origem usa 1.ª stop_time da trip (Teltonika não necessário para este modelo).",
     fleet_cap_from_trackers: parseBooleanLike(options.fleetCapFromTrackers, false),
     planning_class_filter: options.planningClassFilter || "",
     constraints: {
