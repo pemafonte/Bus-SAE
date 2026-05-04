@@ -265,6 +265,15 @@ function normalizeLineCodesInput(raw) {
   return [...out];
 }
 
+function canonicalNumericLineCodeToken(raw) {
+  const token = String(raw || "")
+    .trim()
+    .replace(/\s+/g, "");
+  if (!token || !/^\d+$/.test(token)) return null;
+  const normalized = token.replace(/^0+/, "");
+  return normalized || "0";
+}
+
 function parseGtfsChapasPlanningParams(queryLike = {}) {
   const mode = normalizePlanMode(queryLike.mode);
   const minTurnaroundMin = Number.isFinite(Number(queryLike.minTurnaroundMin))
@@ -4012,7 +4021,12 @@ async function fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormali
   const dateObj = new Date(`${dateIso}T00:00:00Z`);
   const jsWeekday = dateObj.getUTCDay();
   const weekday = jsWeekday === 0 ? 7 : jsWeekday; // 1..7, Monday-first
-  const lineFilter = Array.isArray(lineCodesNormalized) ? lineCodesNormalized.map((code) => String(code || "").trim().toLowerCase()).filter(Boolean) : [];
+  const lineFilter = Array.isArray(lineCodesNormalized)
+    ? lineCodesNormalized.map((code) => String(code || "").trim().toLowerCase()).filter(Boolean)
+    : [];
+  const lineFilterNumericCanonical = [
+    ...new Set(lineFilter.map((code) => canonicalNumericLineCodeToken(code)).filter(Boolean)),
+  ];
   const result = await db.query(
     `WITH trip_base AS (
        SELECT
@@ -4105,8 +4119,15 @@ async function fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormali
       AND (
         COALESCE(array_length($3::text[], 1), 0) = 0
         OR LOWER(TRIM(COALESCE(af.line_code, ''))) = ANY ($3::text[])
+        OR (
+          COALESCE(array_length($5::text[], 1), 0) > 0
+          AND COALESCE(
+            NULLIF(REGEXP_REPLACE(LOWER(TRIM(COALESCE(af.line_code, ''))), '^0+', ''), ''),
+            '0'
+          ) = ANY ($5::text[])
+        )
       )`,
-    [dateIso, weekday, lineFilter, feedKey]
+    [dateIso, weekday, lineFilter, feedKey, lineFilterNumericCanonical]
   );
   return result.rows
     .map((row) => {
