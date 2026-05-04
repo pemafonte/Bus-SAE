@@ -886,10 +886,13 @@
               <input id="gtfsChapasFromDate" type="date" />
               <label class="compact-label-inline" for="gtfsChapasToDate">Até</label>
               <input id="gtfsChapasToDate" type="date" />
+              <button type="button" id="diagnoseGtfsServicesBtn">Diagnóstico GTFS</button>
               <button type="button" id="generateGtfsChapasRangeBtn">Gerar período</button>
               <button type="button" id="exportGtfsChapasDayXlsxBtn">Excel (dia)</button>
               <button type="button" id="exportGtfsChapasRangeXlsxBtn">Excel (período)</button>
             </div>
+            <pre id="gtfsServicesDiagSummary">Diagnóstico GTFS não executado.</pre>
+            <div id="gtfsServicesDiagList" class="service-cards"></div>
             <pre id="gtfsChapasSummary">Sem geração executada.</pre>
             <div id="gtfsChapasList" class="service-cards"></div>
           </section>

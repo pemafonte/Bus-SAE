@@ -179,6 +179,8 @@ const continuityPlanSummaryEl = document.getElementById("continuityPlanSummary")
 const continuityPlanListEl = document.getElementById("continuityPlanList");
 const gtfsChapasSummaryEl = document.getElementById("gtfsChapasSummary");
 const gtfsChapasListEl = document.getElementById("gtfsChapasList");
+const gtfsServicesDiagSummaryEl = document.getElementById("gtfsServicesDiagSummary");
+const gtfsServicesDiagListEl = document.getElementById("gtfsServicesDiagList");
 
 let driversCache = [];
 let usersCache = [];
@@ -5574,6 +5576,63 @@ async function generateGtfsAutonomousChapasRange() {
   }
 }
 
+async function diagnoseGtfsServicesInPeriod() {
+  if (!supToken || !gtfsServicesDiagSummaryEl || !gtfsServicesDiagListEl) return;
+  const fromDate = String(document.getElementById("gtfsChapasFromDate")?.value || "").trim();
+  const toDate = String(document.getElementById("gtfsChapasToDate")?.value || "").trim();
+  if (!fromDate || !toDate) {
+    alert("Indique data inicial e final para diagnóstico.");
+    return;
+  }
+  const params = getGtfsChapasParams();
+  params.set("fromDate", fromDate);
+  params.set("toDate", toDate);
+  gtfsServicesDiagSummaryEl.textContent = "A gerar diagnóstico GTFS...";
+  gtfsServicesDiagListEl.innerHTML = '<article class="service-card-item">A processar...</article>';
+  try {
+    const response = await fetch(`${API_BASE}/supervisor/planning/gtfs-services-diagnostics?${params.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      gtfsServicesDiagSummaryEl.textContent = data.message || "Erro no diagnóstico GTFS.";
+      gtfsServicesDiagListEl.innerHTML = "";
+      return;
+    }
+    const t = data?.totals || {};
+    gtfsServicesDiagSummaryEl.textContent = [
+      `Período: ${data?.from_date || "-"} -> ${data?.to_date || "-"}`,
+      data?.feed_key_used ? `Feed: ${data.feed_name_used || data.feed_key_used} (${data.feed_key_used})` : "",
+      `Dias: ${t.days || 0} | Com serviços: ${t.days_with_services || 0} | Sem serviços: ${t.days_without_services || 0}`,
+      `Serviços GTFS no período: ${t.total_services || 0} (média/dia ${Number(t.average_services_per_day || 0).toFixed(2)})`,
+      `Linhas únicas no período: ${t.unique_lines_in_period || 0}`,
+      `Filtro aplicado: ${(data?.line_codes_filter || []).length ? data.line_codes_filter.join(", ") : "(sem filtro de linhas)"}`,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const rows = Array.isArray(data?.daily_rows) ? data.daily_rows : [];
+    if (!rows.length) {
+      gtfsServicesDiagListEl.innerHTML = '<article class="service-card-item">Sem dados no período.</article>';
+      return;
+    }
+    gtfsServicesDiagListEl.innerHTML = rows
+      .map((row) => {
+        const top = Array.isArray(row.top_lines) ? row.top_lines : [];
+        const topTxt = top.length ? top.map((x) => `${x.line_code}: ${x.services_count}`).join(" | ") : "Sem linhas";
+        return `<article class="service-card-item">
+          <strong>${row.date || "-"}</strong>
+          <div>Serviços: ${row.services_count || 0}</div>
+          <div>Linhas únicas: ${row.unique_lines_count || 0}</div>
+          <div>Top linhas: ${topTxt}</div>
+        </article>`;
+      })
+      .join("");
+  } catch (_error) {
+    gtfsServicesDiagSummaryEl.textContent = "Erro de rede no diagnóstico GTFS.";
+    gtfsServicesDiagListEl.innerHTML = "";
+  }
+}
+
 function formatDateTimePt(value) {
   if (!value) return "-";
   const dt = new Date(value);
@@ -6232,6 +6291,10 @@ if (generateGtfsChapasBtnEl) {
 const generateGtfsChapasRangeBtnEl = document.getElementById("generateGtfsChapasRangeBtn");
 if (generateGtfsChapasRangeBtnEl) {
   generateGtfsChapasRangeBtnEl.addEventListener("click", generateGtfsAutonomousChapasRange);
+}
+const diagnoseGtfsServicesBtnEl = document.getElementById("diagnoseGtfsServicesBtn");
+if (diagnoseGtfsServicesBtnEl) {
+  diagnoseGtfsServicesBtnEl.addEventListener("click", diagnoseGtfsServicesInPeriod);
 }
 const exportGtfsChapasDayXlsxBtnEl = document.getElementById("exportGtfsChapasDayXlsxBtn");
 if (exportGtfsChapasDayXlsxBtnEl) {

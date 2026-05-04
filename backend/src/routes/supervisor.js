@@ -4464,6 +4464,68 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
   };
 }
 
+async function buildGtfsServiceDiagnostics(fromDate, toDate, options = {}) {
+  const days = enumerateDates(fromDate, toDate, 92);
+  if (!days.length) {
+    const err = new Error("Período inválido. Indique fromDate e toDate válidas.");
+    err.statusCode = 400;
+    throw err;
+  }
+  const feedRes = await resolveGtfsPlanningFeedKey(options.feedKey);
+  if (!feedRes.ok) {
+    const err = new Error(feedRes.message);
+    err.statusCode = 400;
+    throw err;
+  }
+  const lineCodesNormalized = Array.isArray(options.lineCodesNormalized) ? options.lineCodesNormalized : [];
+  const daily_rows = [];
+  const lineTotalsMap = new Map();
+  for (const day of days) {
+    // eslint-disable-next-line no-await-in-loop
+    const services = await fetchGtfsOperationalServicesForDate(day, lineCodesNormalized, feedRes.feed_key);
+    const byLine = new Map();
+    services.forEach((svc) => {
+      const lc = String(svc.line_code || "").trim() || "-";
+      byLine.set(lc, (byLine.get(lc) || 0) + 1);
+      lineTotalsMap.set(lc, (lineTotalsMap.get(lc) || 0) + 1);
+    });
+    const top_lines = [...byLine.entries()]
+      .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
+      .slice(0, 8)
+      .map(([line_code, services_count]) => ({ line_code, services_count }));
+    daily_rows.push({
+      date: day,
+      services_count: services.length,
+      unique_lines_count: byLine.size,
+      top_lines,
+    });
+  }
+  const line_totals = [...lineTotalsMap.entries()]
+    .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
+    .slice(0, 20)
+    .map(([line_code, services_count]) => ({ line_code, services_count }));
+  const total_services = daily_rows.reduce((acc, r) => acc + Number(r.services_count || 0), 0);
+  const days_with_services = daily_rows.filter((r) => Number(r.services_count || 0) > 0).length;
+  return {
+    from_date: fromDate,
+    to_date: toDate,
+    feed_key_used: feedRes.feed_key,
+    feed_name_used: feedRes.feed_name,
+    feed_auto_selected: feedRes.auto_selected,
+    line_codes_filter: lineCodesNormalized,
+    totals: {
+      days: days.length,
+      days_with_services,
+      days_without_services: days.length - days_with_services,
+      total_services,
+      average_services_per_day: days.length ? Number((total_services / days.length).toFixed(2)) : 0,
+      unique_lines_in_period: lineTotalsMap.size,
+    },
+    line_totals,
+    daily_rows,
+  };
+}
+
 router.get("/planning/gtfs-autonomous-chapas", async (req, res) => {
   try {
     const plannerOpts = parseGtfsChapasPlanningParams(req.query);
@@ -4480,6 +4542,22 @@ router.get("/planning/gtfs-autonomous-chapas", async (req, res) => {
       return res.status(400).json({ message: error.message || "Pedido inválido para chapas GTFS." });
     }
     return res.status(500).json({ message: "Erro ao gerar chapas automáticas por GTFS." });
+  }
+});
+
+router.get("/planning/gtfs-services-diagnostics", async (req, res) => {
+  try {
+    const fromDate = parseDateOnly(String(req.query.fromDate || "").trim());
+    const toDate = parseDateOnly(String(req.query.toDate || "").trim());
+    const plannerOpts = parseGtfsChapasPlanningParams(req.query);
+    const diag = await buildGtfsServiceDiagnostics(fromDate, toDate, plannerOpts);
+    return res.json(diag);
+  } catch (error) {
+    const code = Number(error?.statusCode);
+    if (code === 400) {
+      return res.status(400).json({ message: error.message || "Parâmetros inválidos para diagnóstico GTFS." });
+    }
+    return res.status(500).json({ message: "Erro ao gerar diagnóstico de serviços GTFS." });
   }
 });
 
