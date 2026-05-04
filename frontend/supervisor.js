@@ -5386,6 +5386,45 @@ function getGtfsChapasParams() {
   return params;
 }
 
+function escapeHtmlGtfs(text) {
+  return String(text ?? "")
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
+}
+
+/** Lista completa de serviços GTFS por viatura (chapas automáticas). */
+function renderGtfsChapasVehiclePlansCards(vehiclePlans, baseDepot) {
+  const plans = Array.isArray(vehiclePlans) ? vehiclePlans : [];
+  if (!plans.length) {
+    return '<article class="service-card-item">Sem chapas (nenhuma viatura no plano).</article>';
+  }
+  return plans
+    .map((plan) => {
+      const svcs = Array.isArray(plan.services) ? plan.services : [];
+      const items = svcs
+        .map(
+          (svc) =>
+            `<li><code>${escapeHtmlGtfs(svc.trip_id || svc.service_code || "")}</code> · linha ${escapeHtmlGtfs(
+              svc.line_code || "-"
+            )} · ${escapeHtmlGtfs(svc.first_departure_time || "?")} → ${escapeHtmlGtfs(svc.last_departure_time || "?")}${
+              svc.coverage_overflow ? ' <span class="gtfs-coverage-flag">(cupo extra)</span>' : ""
+            }</li>`
+        )
+        .join("");
+      const bdLabel = baseDepot ? "Parque base (fixo)" : "Parque sugerido";
+      return `<article class="service-card-item gtfs-chapas-vehicle-card">
+          <strong>${escapeHtmlGtfs(plan.vehicle_plan_id || "-")}</strong>
+          <div>${bdLabel}: ${escapeHtmlGtfs(plan.depot_name || "Sem parque")}</div>
+          <div>Serviços nesta viatura: ${svcs.length}</div>
+          <div>Condução: ${plan.total_drive_min || 0} min · Vazio estimado: ${Number(plan.total_deadhead_km || 0).toFixed(3)} km</div>
+          <ul class="gtfs-chapas-service-list">${items || "<li>Sem serviços.</li>"}</ul>
+        </article>`;
+    })
+    .join("");
+}
+
 async function downloadGtfsAutonomousChapasXlsx(scope) {
   if (!supToken) return;
   const params = getGtfsChapasParams();
@@ -5453,6 +5492,7 @@ async function generateGtfsAutonomousChapas() {
     const firstSvc = data?.day_schedule_anchor?.first_services_preview?.[0];
     const feedHint = data?.feed_selection_hint ? `\n${data.feed_selection_hint}` : "";
     const warnLines = Array.isArray(data?.warnings) && data.warnings.length ? `\nAlertas:\n${data.warnings.join("\n")}` : "";
+    const calNote = data?.calendar_logic_note_pt ? `\n${data.calendar_logic_note_pt}` : "";
     gtfsChapasSummaryEl.textContent = [
       `Data: ${data?.date || "hoje"}`,
       `Modo: ${data?.mode || "-"}`,
@@ -5475,6 +5515,7 @@ async function generateGtfsAutonomousChapas() {
       `Viaturas sem parque definido: ${s.vehicles_without_depot || 0}`,
       feedHint,
       warnLines,
+      calNote,
     ]
       .filter(Boolean)
       .join("\n");
@@ -5483,24 +5524,10 @@ async function generateGtfsAutonomousChapas() {
       gtfsChapasListEl.innerHTML = '<article class="service-card-item">Sem serviços GTFS ativos para esta data.</article>';
       return;
     }
-    gtfsChapasListEl.innerHTML = plans
-      .map((plan) => {
-        const preview = Array.isArray(plan.services)
-          ? plan.services
-              .slice(0, 7)
-              .map((svc) => `<li>${svc.line_code || "-"} | ${svc.first_departure_time || "-"} -> ${svc.last_departure_time || "-"}</li>`)
-              .join("")
-          : "<li>Sem serviços.</li>";
-        return `<article class="service-card-item">
-          <strong>${plan.vehicle_plan_id || "-"}</strong>
-          <div>${bd ? "Parque base (fixo)" : "Parque sugerido"}: ${plan.depot_name || "Sem parque"}</div>
-          <div>Serviços: ${plan.services_count || 0}</div>
-          <div>Condução: ${plan.total_drive_min || 0} min</div>
-          <div>Vazio total estimado: ${Number(plan.total_deadhead_km || 0).toFixed(3)} km</div>
-          <ul>${preview}</ul>
-        </article>`;
-      })
-      .join("");
+    gtfsChapasListEl.innerHTML = `<p class="field-help field-help-tight">Serviços por viatura (lista completa por chapa)</p>${renderGtfsChapasVehiclePlansCards(
+      plans,
+      bd
+    )}`;
   } catch (_error) {
     gtfsChapasSummaryEl.textContent = "Erro de rede ao gerar chapas automáticas.";
     gtfsChapasListEl.innerHTML = "";
@@ -5535,6 +5562,8 @@ async function generateGtfsAutonomousChapasRange() {
     const depotCapGlob = Array.isArray(data?.detailed_daily_plans) && data.detailed_daily_plans.length ? !!data.detailed_daily_plans[0].depot_capacity_used_as_fleet_cap : false;
     const rangeFeedHint = data?.feed_selection_hint ? `\n${data.feed_selection_hint}` : "";
     const rangeDiagHint = data?.chapas_diagnostics?.hint_pt ? `${data.chapas_diagnostics.hint_pt}` : "";
+    const firstDetailed = Array.isArray(data?.detailed_daily_plans) && data.detailed_daily_plans.length ? data.detailed_daily_plans[0] : null;
+    const calNoteRange = firstDetailed?.calendar_logic_note_pt ? `\n${firstDetailed.calendar_logic_note_pt}` : "";
     gtfsChapasSummaryEl.textContent = [
       rangeDiagHint,
       `Período: ${data?.from_date || "-"} -> ${data?.to_date || "-"}`,
@@ -5552,25 +5581,34 @@ async function generateGtfsAutonomousChapasRange() {
       `Condução total: ${t.total_drive_min || 0} min`,
       `Vazio total estimado: ${Number(t.total_deadhead_km || 0).toFixed(3)} km`,
       rangeFeedHint,
+      calNoteRange,
     ]
       .filter(Boolean)
       .join("\n");
-    const rows = Array.isArray(data?.daily_plans) ? data.daily_plans : [];
-    if (!rows.length) {
+    const detailed = Array.isArray(data?.detailed_daily_plans) ? data.detailed_daily_plans : [];
+    if (!detailed.length) {
       gtfsChapasListEl.innerHTML = '<article class="service-card-item">Sem resultados no período.</article>';
       return;
     }
-    gtfsChapasListEl.innerHTML = rows
-      .map(
-        (row) => `<article class="service-card-item">
-          <strong>${row.date || "-"}</strong>
-          <div>Viaturas necessárias: ${row?.summary?.vehicles_required || 0}</div>
-          <div>Serviços GTFS: ${row?.summary?.services_total || 0}</div>
-          <div>Condução total: ${row?.summary?.total_drive_min || 0} min</div>
-          <div>Vazio estimado: ${Number(row?.summary?.total_deadhead_km || 0).toFixed(3)} km</div>
-        </article>`
-      )
-      .join("");
+    if (detailed.length === 1) {
+      const p0 = detailed[0];
+      const bd0 = p0?.base_depot || null;
+      gtfsChapasListEl.innerHTML = `<p class="field-help field-help-tight">Serviços por viatura — ${p0.date || "-"} (lista completa)</p>${renderGtfsChapasVehiclePlansCards(
+        p0.vehicle_plans,
+        bd0
+      )}`;
+      return;
+    }
+    gtfsChapasListEl.innerHTML = `<p class="field-help field-help-tight">Serviços por viatura por dia — expanda cada data.</p>${detailed
+      .map((p) => {
+        const bdDay = p?.base_depot || null;
+        const inner = renderGtfsChapasVehiclePlansCards(p.vehicle_plans, bdDay);
+        return `<details class="gtfs-chapas-day-details">
+          <summary><strong>${p.date || "-"}</strong> — ${p?.summary?.vehicles_required || 0} viaturas · ${p?.summary?.services_total || 0} serviços · ${p?.summary?.total_drive_min || 0} min condução</summary>
+          <div class="gtfs-chapas-day-details-body">${inner}</div>
+        </details>`;
+      })
+      .join("")}`;
   } catch (_error) {
     gtfsChapasSummaryEl.textContent = "Erro de rede ao gerar período.";
     gtfsChapasListEl.innerHTML = "";

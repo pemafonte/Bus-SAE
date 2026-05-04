@@ -4462,6 +4462,8 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
     day_schedule_anchor: dayWindow,
     phase_note:
       "Fase inicial: construção a partir das primeiras partidas GTFS do dia; vazio parque↔origem usa 1.ª stop_time da trip (Teltonika não necessário para este modelo).",
+    calendar_logic_note_pt:
+      "Calendário GTFS: cada trip conta para o dia se existir linha activa em gtfs_calendars (is_active, data entre start_date/end_date, bit do dia da semana) OU calendar_dates com exception_type=1 nessa data (serviço extra); exception_type=2 na mesma data remove. O trip liga ao calendário por service_id (id bruto ou feed_key::id, como no import).",
     fleet_cap_from_trackers: parseBooleanLike(options.fleetCapFromTrackers, false),
     planning_class_filter: options.planningClassFilter || "",
     constraints: {
