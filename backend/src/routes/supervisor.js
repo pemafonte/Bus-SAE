@@ -181,12 +181,12 @@ function normalizePlanMode(rawMode) {
 
 function resolveModeWeights(mode) {
   if (mode === "conservative") {
-    return { waitWeight: 0.04, deadheadWeight: 2.0, lineChangePenalty: 18 };
+    return { waitWeight: 0.04, deadheadWeight: 2.0, lineChangePenalty: 18, voltaPairAffinity: 34 };
   }
   if (mode === "aggressive") {
-    return { waitWeight: 0.015, deadheadWeight: 1.0, lineChangePenalty: 4 };
+    return { waitWeight: 0.015, deadheadWeight: 1.0, lineChangePenalty: 4, voltaPairAffinity: 14 };
   }
-  return { waitWeight: 0.025, deadheadWeight: 1.4, lineChangePenalty: 10 };
+  return { waitWeight: 0.025, deadheadWeight: 1.4, lineChangePenalty: 10, voltaPairAffinity: 26 };
 }
 
 function parseServiceWindowFromGtfs(row) {
@@ -210,6 +210,38 @@ function estimateCompatCost(prevService, nextService, policy) {
     : policy.lineChangePenalty;
   const score = waitMin * policy.waitWeight + deadheadKm * policy.deadheadWeight + lineChangePenalty;
   return { score, wait_min: waitMin, deadhead_km: deadheadKm };
+}
+
+/**
+ * Reduz o score quando a viatura já opera (ou acaba de operar) a linha parceira ida/volta,
+ * para manter 1013↔1023 e pares semelhantes na mesma chapa em vez de espalhar por várias viaturas.
+ */
+function computeVoltaPairingScoreBonus(vehicle, lastService, nextService, pairTokens, affinityWeight) {
+  const w = Number(affinityWeight);
+  if (!Number.isFinite(w) || w <= 0 || !Array.isArray(pairTokens) || !pairTokens.length) return 0;
+  if (!vehicle?.services?.length || !lastService || !nextService) return 0;
+  const nextN = normalizeLineCodeForPairing(nextService.line_code);
+  if (!nextN) return 0;
+  if (lineCodesSameOrVoltaPair(lastService.line_code, nextService.line_code, pairTokens)) return w;
+  for (const s of vehicle.services) {
+    const sn = normalizeLineCodeForPairing(s.line_code);
+    if (!sn || sn === nextN) continue;
+    if (lineCodesSameOrVoltaPair(s.line_code, nextService.line_code, pairTokens)) return w * 0.58;
+  }
+  return 0;
+}
+
+function estimateGtfsChapasChainCost(vehicle, lastService, nextService, modePolicy) {
+  const base = estimateCompatCost(lastService, nextService, modePolicy);
+  const affW = modePolicy?.voltaPairAffinity ?? 0;
+  const bonus = computeVoltaPairingScoreBonus(
+    vehicle,
+    lastService,
+    nextService,
+    modePolicy?.line_volta_pair_tokens || [],
+    affW
+  );
+  return { ...base, score: base.score - bonus, volta_pairing_bonus: bonus };
 }
 
 function computeDepotVehicleDeadheadSummary(depot, vehicle) {
@@ -327,6 +359,29 @@ function lineCodesSameOrVoltaPair(lineA, lineB, pairTokens) {
 /** Distância término→origem (metros) abaixo da qual se sugere par ida/volta entre duas linhas. */
 const GTFS_LINE_VOLTA_AUTO_THRESHOLD_M = 450;
 
+/** Pares ida/volta típicos da rede (route_short_name); só entram no planeador se ambas as linhas existirem nas trips do dia. */
+const GTFS_DEFAULT_VOLTA_LINE_PAIRS = [
+  ["1013", "1023"],
+  ["1014", "1024"],
+  ["1016", "1026"],
+];
+
+function defaultVoltaPairsForCandidates(candidates) {
+  if (!Array.isArray(candidates) || !candidates.length) return [];
+  const lines = new Set();
+  for (const c of candidates) {
+    const k = normalizeLineCodeForPairing(c.line_code);
+    if (k) lines.add(k);
+  }
+  const out = [];
+  for (const pr of GTFS_DEFAULT_VOLTA_LINE_PAIRS) {
+    const a = normalizeLineCodeForPairing(pr[0]);
+    const b = normalizeLineCodeForPairing(pr[1]);
+    if (a && b && a !== b && lines.has(a) && lines.has(b)) out.push([a, b]);
+  }
+  return out;
+}
+
 function mergeVoltaPairLists(listA, listB) {
   const seen = new Set();
   const out = [];
@@ -434,6 +489,14 @@ function parseGtfsChapasPlanningParams(queryLike = {}) {
   let operativeIdleResetMin = Number(queryLike.operativeIdleResetMin ?? queryLike.overnightIdleResetMin);
   if (!Number.isFinite(operativeIdleResetMin)) operativeIdleResetMin = 0;
   operativeIdleResetMin = Math.min(Math.max(Math.round(operativeIdleResetMin), 0), 24 * 60);
+  /** Amplitude máx. da chapa: da 1.ª partida à última chegada na mesma viatura (min). Por defeito 12 h; 0 ou vazio após trim = sem limite. */
+  let maxDutySpanMin = 720;
+  const maxDutyRaw = queryLike.maxDutySpanMin;
+  if (maxDutyRaw != null && String(maxDutyRaw).trim() !== "") {
+    const n = Number(maxDutyRaw);
+    if (Number.isFinite(n) && n <= 0) maxDutySpanMin = null;
+    else if (Number.isFinite(n)) maxDutySpanMin = Math.min(Math.max(Math.round(n), 240), 24 * 60);
+  }
   /** Parque físico obrigatório para vazio inicial/final (fase sem Teltonika / base única). */
   const baseDepotId = Number(queryLike.baseDepotId);
   const baseDepotName = String(queryLike.baseDepotName || "").trim();
@@ -472,6 +535,7 @@ function parseGtfsChapasPlanningParams(queryLike = {}) {
     lineVoltaPairsNormalized,
     autoLineVoltaPairs,
     lineVoltaAutoThresholdM,
+    maxDutySpanMin,
   };
 }
 
@@ -502,13 +566,22 @@ async function resolveFleetVehicleCap(planningOpts) {
 
 /** Rótulo legível das opções UE (informação apenas). */
 function plannerRestPolicyDescription(opts) {
+  let base;
   if (!opts?.euSplitBreak) {
-    return `Pausa única (${opts?.minUninterruptedBreakMin || 45} min) após atingir limite UE de condução continua (${opts?.maxDriveBlockMin || 270} min)`;
+    base = `Pausa única (${opts?.minUninterruptedBreakMin || 45} min) após atingir limite UE de condução continua (${opts?.maxDriveBlockMin || 270} min)`;
+  } else {
+    const a = opts.splitBreakFirstSegmentMin || 15;
+    const b = opts.splitBreakSecondSegmentMin || 30;
+    const u = opts.minUninterruptedBreakMin ?? opts.minRestBetweenBlocksMin ?? 45;
+    base = `Limite UE ${opts?.maxDriveBlockMin || 270} min; depois: ${u} min ininterruptos OU ${a} min num intervalo entre serviços + ${b} min noutro intervalo entre serviços`;
   }
-  const a = opts.splitBreakFirstSegmentMin || 15;
-  const b = opts.splitBreakSecondSegmentMin || 30;
-  const u = opts.minUninterruptedBreakMin ?? opts.minRestBetweenBlocksMin ?? 45;
-  return `Limite UE ${opts?.maxDriveBlockMin || 270} min; depois: ${u} min ininterruptos OU ${a} min num intervalo entre serviços + ${b} min noutro intervalo entre serviços`;
+  const span = opts?.maxDutySpanMin;
+  if (Number.isFinite(span) && span > 0) {
+    base += `; amplitude máx. da chapa (1.ª partida→última chegada na mesma viatura) ${span} min`;
+  } else {
+    base += "; amplitude máx. da chapa: sem limite explícito";
+  }
+  return base;
 }
 
 /** Estado interno planeamento viatura (motorista UE simplificado nos intervalos entre serviços). */
@@ -591,6 +664,12 @@ function gtfsPlannerDriverRulesAllow(vehicle, svc, plannerOpts) {
   if (!prev) {
     if (maxBlock > 0 && svcDrive > maxBlock) return false;
     return true;
+  }
+  const maxDutySpan = plannerOpts.maxDutySpanMin == null ? NaN : Number(plannerOpts.maxDutySpanMin);
+  if (Number.isFinite(maxDutySpan) && maxDutySpan > 0 && vehicle.services.length) {
+    const dutyStart = Number(vehicle.services[0].start_min);
+    const newEnd = Number(svc.end_min);
+    if (Number.isFinite(dutyStart) && Number.isFinite(newEnd) && newEnd - dutyStart > maxDutySpan) return false;
   }
   if (Number(prev.end_min) + plannerOpts.minTurnaroundMin > Number(svc.start_min)) return false;
   const idleGap = Number(svc.start_min) - Number(prev.end_min);
@@ -700,6 +779,9 @@ async function respondGtfsChapasDailyXlsx(res, planningOpts, serviceDate, plan) 
         (plan.line_volta_pairs_applied || []).map((pr) => `${pr[0]}=${pr[1]}`).join(", ") || "(nenhum)",
       deteccao_auto_ida_volta: plan.auto_line_volta_pairs ? "sim" : "nao",
       limiar_geom_m_detecao: plan.line_volta_auto_threshold_m ?? "",
+      amplitude_chapa_max_min: plan.max_duty_span_min ?? "",
+      pares_ida_volta_rede:
+        (plan.line_volta_pairs_default_network || []).map((pr) => `${pr[0]}=${pr[1]}`).join(", ") || "(nenhum)",
       parque_base_id: bd?.id ?? "",
       parque_base_nome: bd?.depot_name ?? "",
       parque_capacidade_registada: bd?.capacity_total ?? "",
@@ -760,6 +842,11 @@ async function respondGtfsChapasRangeXlsx(res, planningOpts, fromDate, toDate, b
             .join(", ") || "(nenhum)",
         deteccao_auto_ida_volta: planningOpts.autoLineVoltaPairs ? "sim" : "nao",
         limiar_geom_m_detecao: planningOpts.lineVoltaAutoThresholdM ?? "",
+        amplitude_chapa_max_min: bundle.detailed_daily_plans?.[0]?.max_duty_span_min ?? planningOpts.maxDutySpanMin ?? "",
+        pares_ida_volta_rede_primeiro_dia:
+          (bundle.detailed_daily_plans?.[0]?.line_volta_pairs_default_network || [])
+            .map((pr) => `${pr[0]}=${pr[1]}`)
+            .join(", ") || "(nenhum)",
         parque_base_id_pedido: planningOpts.baseDepotId ?? "",
         parque_base_nome_pedido: planningOpts.baseDepotName || "",
         capacidade_parque_aplicada_ao_cupo: planningOpts.useBaseDepotCapacityAsCap ? "sim" : "nao",
@@ -4407,6 +4494,14 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
   let operativeIdleResetMin = Number(options.operativeIdleResetMin);
   if (!Number.isFinite(operativeIdleResetMin)) operativeIdleResetMin = 0;
   operativeIdleResetMin = Math.min(Math.max(Math.round(operativeIdleResetMin), 0), 24 * 60);
+  let maxDutySpanMin;
+  if (options.maxDutySpanMin === null) maxDutySpanMin = null;
+  else if (options.maxDutySpanMin === undefined || options.maxDutySpanMin === "") maxDutySpanMin = 720;
+  else {
+    const n = Number(options.maxDutySpanMin);
+    if (!Number.isFinite(n) || n <= 0) maxDutySpanMin = null;
+    else maxDutySpanMin = Math.min(Math.max(Math.round(n), 240), 24 * 60);
+  }
   const plannerDriverOpts = {
     minTurnaroundMin,
     maxDriveBlockMin,
@@ -4416,6 +4511,7 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
     splitBreakFirstSegmentMin,
     splitBreakSecondSegmentMin,
     operativeIdleResetMin,
+    maxDutySpanMin,
   };
   const feedRes = await resolveGtfsPlanningFeedKey(options.feedKey);
   if (!feedRes.ok) {
@@ -4466,8 +4562,14 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
       const last = vehicle.services[vehicle.services.length - 1];
       if (!last) continue;
       if (!gtfsPlannerDriverRulesAllow(vehicle, svc, plannerDriverOpts)) continue;
-      const meta = estimateCompatCost(last, svc, modePolicy);
-      if (!bestMeta || meta.score < bestMeta.score) {
+      const meta = estimateGtfsChapasChainCost(vehicle, last, svc, modePolicy);
+      const tol = 1e-6;
+      const better =
+        !bestMeta ||
+        meta.score < bestMeta.score - tol ||
+        (Math.abs(meta.score - bestMeta.score) <= tol &&
+          Number(meta.volta_pairing_bonus || 0) > Number(bestMeta.volta_pairing_bonus || 0));
+      if (better) {
         bestMeta = meta;
         bestVehicle = vehicle;
       }
@@ -4625,6 +4727,7 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
     line_volta_pairs_raw: options.lineVoltaPairsRaw || "",
     line_volta_pairs_manual: userVoltaPairs,
     line_volta_pairs_auto_detected: lineVoltaPairsAuto,
+    line_volta_pairs_default_network: lineVoltaPairsDefaultNetwork,
     line_volta_pairs_applied: lineVoltaPairsMerged,
     auto_line_volta_pairs: autoVoltaOn,
     line_volta_auto_threshold_m: lineVoltaAutoThresholdResolved,
@@ -4652,8 +4755,9 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
       : null,
     depot_capacity_used_as_fleet_cap: !!(forcedBaseDepot && parseBooleanLike(options.useBaseDepotCapacityAsCap, false)),
     day_schedule_anchor: dayWindow,
+    max_duty_span_min: maxDutySpanMin,
     phase_note:
-      "Fase inicial: construção a partir das primeiras partidas GTFS do dia; vazio parque↔origem usa 1.ª stop_time da trip (Teltonika não necessário para este modelo).",
+      "Fase inicial: construção a partir das primeiras partidas GTFS do dia; vazio parque↔origem usa 1.ª stop_time da trip (Teltonika não necessário para este modelo). Pares 1013↔1023, 1014↔1024 e 1016↔1026 aplicam-se automaticamente quando ambas as linhas existem no dia; o planeador favorece encadear ida/volta na mesma viatura e limita a amplitude da chapa (1.ª partida → última chegada) ao valor configurado.",
     calendar_logic_note_pt:
       "Calendário GTFS: cada trip conta para o dia se existir linha activa em gtfs_calendars (is_active, data entre start_date/end_date, bit do dia da semana) OU calendar_dates com exception_type=1 nessa data (serviço extra); exception_type=2 na mesma data remove. O trip liga ao calendário por service_id (id bruto ou feed_key::id, como no import).",
     fleet_cap_from_trackers: parseBooleanLike(options.fleetCapFromTrackers, false),

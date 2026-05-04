@@ -810,6 +810,10 @@
                 <dd>Limita ao número de rastreadores activos (+ tipologia opcional). Sem viaturas no registo, o cupo automático já não é forçado a zero.</dd>
                 <dt>Bloco UE / pausa / 15+30 / Reset operacional</dt>
                 <dd>Modelo simplificado de tempos obrigatórios entre bloques de condução na mesma chapa — só quando encadeia vários serviços.</dd>
+                <dt>Amplitude máx. da chapa</dt>
+                <dd>
+                  Limite entre a primeira partida e a última chegada na mesma viatura no plano (ex.: 720&nbsp;min = 12&nbsp;h para encadear ida/volta com dois blocos de 4h30 e pausas). Use 0 para desactivar o limite.
+                </dd>
               </dl>
             </details>
             <div class="depot-form-fields gtfs-chapas-main-fields">
@@ -912,6 +916,15 @@
                 </label>
                 <label for="gtfsChapasOperativeIdleResetMin">Zerar contador de bloco após folga longa entre serviços (min)—0 desactiva</label>
                 <input id="gtfsChapasOperativeIdleResetMin" type="number" min="0" max="1440" value="0" placeholder="480 pernoita típica" />
+                <label for="gtfsChapasMaxDutySpanMin">Amplitude máx. da chapa (min)—1.ª partida → última chegada na mesma viatura</label>
+                <input
+                  id="gtfsChapasMaxDutySpanMin"
+                  type="number"
+                  min="0"
+                  max="1440"
+                  value="720"
+                  title="720 = 12 h (dois blocos UE de 4h30 com pausa). 0 = sem limite de amplitude."
+                />
               </div>
             </details>
             <div class="ops-layout-compact gtfs-chapas-range-export">

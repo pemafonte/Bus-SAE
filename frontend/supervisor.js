@@ -5361,6 +5361,7 @@ function getGtfsChapasParams() {
   const minUninterruptedBreakMin = Number(document.getElementById("gtfsChapasMinUninterruptedBreakMin")?.value ?? 45);
   const euSplitBreak = document.getElementById("gtfsChapasEuSplitBreak")?.checked === true;
   const operativeIdleResetMin = Number(document.getElementById("gtfsChapasOperativeIdleResetMin")?.value ?? 0);
+  const maxDutySpanRaw = document.getElementById("gtfsChapasMaxDutySpanMin")?.value;
   const params = new URLSearchParams();
   params.set("mode", mode);
   if (Number.isFinite(minTurnaroundMin)) params.set("minTurnaroundMin", String(minTurnaroundMin));
@@ -5381,6 +5382,12 @@ function getGtfsChapasParams() {
   if (euSplitBreak) params.set("euSplitBreak", "1");
   if (Number.isFinite(operativeIdleResetMin) && operativeIdleResetMin > 0) {
     params.set("operativeIdleResetMin", String(operativeIdleResetMin));
+  }
+  if (maxDutySpanRaw != null && String(maxDutySpanRaw).trim() !== "") {
+    const maxDutySpanMin = Number(maxDutySpanRaw);
+    if (Number.isFinite(maxDutySpanMin)) {
+      params.set("maxDutySpanMin", maxDutySpanMin <= 0 ? "0" : String(Math.round(maxDutySpanMin)));
+    }
   }
   const feedKey = String(document.getElementById("gtfsChapasFeedKey")?.value || "").trim();
   if (feedKey) params.set("feedKey", feedKey);
@@ -5528,6 +5535,14 @@ async function generateGtfsAutonomousChapas() {
       `Condução total: ${s.total_drive_min || 0} min`,
       `Vazio estimado total: ${Number(s.total_deadhead_km || 0).toFixed(3)} km`,
       `Viaturas sem parque definido: ${s.vehicles_without_depot || 0}`,
+      data?.max_duty_span_min != null && data.max_duty_span_min !== ""
+        ? `Amplitude máx. da chapa: ${data.max_duty_span_min} min (1.ª partida → última chegada)`
+        : data?.max_duty_span_min === null
+          ? "Amplitude máx. da chapa: sem limite"
+          : "",
+      Array.isArray(data?.line_volta_pairs_default_network) && data.line_volta_pairs_default_network.length
+        ? `Pares ida/volta rede (automáticos neste dia): ${data.line_volta_pairs_default_network.map((p) => `${p[0]}=${p[1]}`).join(", ")}`
+        : "",
       feedHint,
       warnLines,
       calNote,
@@ -5609,6 +5624,14 @@ async function generateGtfsAutonomousChapasRange() {
       `Viaturas/dia (média): ${Number(t.average_vehicles_per_day || 0).toFixed(2)}`,
       `Condução total: ${t.total_drive_min || 0} min`,
       `Vazio total estimado: ${Number(t.total_deadhead_km || 0).toFixed(3)} km`,
+      firstDetailed?.max_duty_span_min != null && firstDetailed.max_duty_span_min !== ""
+        ? `Amplitude máx. da chapa (1.º dia): ${firstDetailed.max_duty_span_min} min`
+        : firstDetailed && firstDetailed.max_duty_span_min === null
+          ? "Amplitude máx. da chapa (1.º dia): sem limite"
+          : "",
+      Array.isArray(firstDetailed?.line_volta_pairs_default_network) && firstDetailed.line_volta_pairs_default_network.length
+        ? `Pares rede no 1.º dia: ${firstDetailed.line_volta_pairs_default_network.map((p) => `${p[0]}=${p[1]}`).join(", ")}`
+        : "",
       rangeFeedHint,
       calNoteRange,
       firstDetailed?.trip_endpoints_note_pt ? `\n${firstDetailed.trip_endpoints_note_pt}` : "",
