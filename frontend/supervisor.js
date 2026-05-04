@@ -5611,11 +5611,26 @@ async function diagnoseGtfsServicesInPeriod() {
       .filter(Boolean)
       .join("\n");
     const rows = Array.isArray(data?.daily_rows) ? data.daily_rows : [];
+    const feedRows = Array.isArray(data?.per_feed_totals) ? data.per_feed_totals : [];
+    const feedCompareHtml = feedRows.length
+      ? `<article class="service-card-item">
+          <strong>Comparação entre feeds activas (mesmo período/filtro)</strong>
+          ${feedRows
+            .slice(0, 6)
+            .map(
+              (f) =>
+                `<div>${f.feed_name || f.feed_key} (${f.feed_key}): ${f.total_services || 0} serviços, ${f.days_with_services || 0}/${
+                  t.days || 0
+                } dias com serviço, média ${(Number(f.average_services_per_day || 0)).toFixed(2)}/dia</div>`
+            )
+            .join("")}
+        </article>`
+      : "";
     if (!rows.length) {
-      gtfsServicesDiagListEl.innerHTML = '<article class="service-card-item">Sem dados no período.</article>';
+      gtfsServicesDiagListEl.innerHTML = `${feedCompareHtml}<article class="service-card-item">Sem dados no período.</article>`;
       return;
     }
-    gtfsServicesDiagListEl.innerHTML = rows
+    gtfsServicesDiagListEl.innerHTML = `${feedCompareHtml}${rows
       .map((row) => {
         const top = Array.isArray(row.top_lines) ? row.top_lines : [];
         const topTxt = top.length ? top.map((x) => `${x.line_code}: ${x.services_count}`).join(" | ") : "Sem linhas";
@@ -5626,7 +5641,7 @@ async function diagnoseGtfsServicesInPeriod() {
           <div>Top linhas: ${topTxt}</div>
         </article>`;
       })
-      .join("");
+      .join("")}`;
   } catch (_error) {
     gtfsServicesDiagSummaryEl.textContent = "Erro de rede no diagnóstico GTFS.";
     gtfsServicesDiagListEl.innerHTML = "";

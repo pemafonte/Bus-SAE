@@ -4036,7 +4036,18 @@ async function fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormali
          COALESCE(NULLIF(TRIM(r.route_short_name), ''), NULLIF(TRIM(r.route_long_name), ''), t.route_id) AS line_code,
          t.trip_headsign
        FROM gtfs_trips t
-       JOIN gtfs_routes r ON r.feed_key = t.feed_key AND r.route_id = t.route_id
+      LEFT JOIN LATERAL (
+        SELECT
+          rr.route_short_name,
+          rr.route_long_name
+        FROM gtfs_routes rr
+        WHERE rr.route_id = t.route_id
+        ORDER BY
+          CASE WHEN rr.feed_key = t.feed_key THEN 0 ELSE 1 END,
+          CASE WHEN TRIM(COALESCE(rr.route_short_name, '')) <> '' THEN 0 ELSE 1 END,
+          rr.route_id
+        LIMIT 1
+      ) r ON TRUE
        WHERE t.feed_key = $4::text
      ),
      active_flags AS (
@@ -4478,8 +4489,24 @@ async function buildGtfsServiceDiagnostics(fromDate, toDate, options = {}) {
     throw err;
   }
   const lineCodesNormalized = Array.isArray(options.lineCodesNormalized) ? options.lineCodesNormalized : [];
+  const activeFeedsRes = await db.query(
+    `SELECT feed_key, feed_name
+     FROM gtfs_feeds
+     WHERE is_active = TRUE
+     ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST`
+  );
+  const activeFeeds = activeFeedsRes.rows || [];
   const daily_rows = [];
   const lineTotalsMap = new Map();
+  const perFeedTotalsMap = new Map();
+  activeFeeds.forEach((f) => {
+    perFeedTotalsMap.set(String(f.feed_key), {
+      feed_key: f.feed_key,
+      feed_name: f.feed_name || f.feed_key,
+      total_services: 0,
+      days_with_services: 0,
+    });
+  });
   for (const day of days) {
     // eslint-disable-next-line no-await-in-loop
     const services = await fetchGtfsOperationalServicesForDate(day, lineCodesNormalized, feedRes.feed_key);
@@ -4499,6 +4526,14 @@ async function buildGtfsServiceDiagnostics(fromDate, toDate, options = {}) {
       unique_lines_count: byLine.size,
       top_lines,
     });
+    for (const f of activeFeeds) {
+      // eslint-disable-next-line no-await-in-loop
+      const sv = await fetchGtfsOperationalServicesForDate(day, lineCodesNormalized, f.feed_key);
+      const row = perFeedTotalsMap.get(String(f.feed_key));
+      if (!row) continue;
+      row.total_services += sv.length;
+      if (sv.length > 0) row.days_with_services += 1;
+    }
   }
   const line_totals = [...lineTotalsMap.entries()]
     .sort((a, b) => b[1] - a[1] || String(a[0]).localeCompare(String(b[0])))
@@ -4506,6 +4541,13 @@ async function buildGtfsServiceDiagnostics(fromDate, toDate, options = {}) {
     .map(([line_code, services_count]) => ({ line_code, services_count }));
   const total_services = daily_rows.reduce((acc, r) => acc + Number(r.services_count || 0), 0);
   const days_with_services = daily_rows.filter((r) => Number(r.services_count || 0) > 0).length;
+  const per_feed_totals = [...perFeedTotalsMap.values()]
+    .map((r) => ({
+      ...r,
+      days_without_services: days.length - Number(r.days_with_services || 0),
+      average_services_per_day: days.length ? Number((Number(r.total_services || 0) / days.length).toFixed(2)) : 0,
+    }))
+    .sort((a, b) => Number(b.total_services) - Number(a.total_services) || String(a.feed_key).localeCompare(String(b.feed_key)));
   return {
     from_date: fromDate,
     to_date: toDate,
@@ -4521,6 +4563,7 @@ async function buildGtfsServiceDiagnostics(fromDate, toDate, options = {}) {
       average_services_per_day: days.length ? Number((total_services / days.length).toFixed(2)) : 0,
       unique_lines_in_period: lineTotalsMap.size,
     },
+    per_feed_totals,
     line_totals,
     daily_rows,
   };
