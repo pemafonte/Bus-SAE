@@ -1365,6 +1365,45 @@ pre {
   color: #1f2937;
 }
 
+.depot-form-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-width: 440px;
+  margin-bottom: 12px;
+}
+
+.depot-form-fields label {
+  font-size: 13px;
+  font-weight: 600;
+  color: #1f2937;
+}
+
+.depot-form-fields input,
+.depot-form-fields textarea {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.depot-form-optional {
+  font-weight: 400;
+  color: #6b7280;
+}
+
+.depot-form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.depot-form-actions button[type="button"] {
+  border: 1px solid #94a3b8;
+  background: #f8fafc;
+  color: #334155;
+}
+
 .announce-head {
   display: flex;
   justify-content: space-between;

@@ -708,19 +708,34 @@
           <section class="card">
             <h3>Novo parque (marcação no mapa)</h3>
             <form id="depotForm">
-              <input id="depotCode" type="text" placeholder="Código (opcional): DEP-01" />
-              <input id="depotName" type="text" placeholder="Nome do parque" required />
-              <input id="depotCapacityTotal" type="number" min="0" placeholder="Capacidade total de viaturas" value="0" />
-              <input id="depotLat" type="number" step="0.000001" placeholder="Latitude" required />
-              <input id="depotLng" type="number" step="0.000001" placeholder="Longitude" required />
-              <textarea id="depotNotes" rows="2" placeholder="Notas (opcional)"></textarea>
+              <input type="hidden" id="depotEditingId" value="" />
+              <div class="depot-form-fields">
+                <label for="depotCode">Código <span class="depot-form-optional">(opcional)</span></label>
+                <input id="depotCode" type="text" maxlength="40" autocomplete="off" placeholder="Ex.: DEP-01" />
+                <label for="depotName">Nome do parque</label>
+                <input id="depotName" type="text" required autocomplete="organization" placeholder="Nome visível nas listas e reportes" />
+                <label for="depotCapacityTotal">Capacidade (viaturas)</label>
+                <input id="depotCapacityTotal" type="number" min="0" step="1" placeholder="Ex.: 28 — usado também para limitar chapas quando activo no gerador GTFS" />
+                <label for="depotLat">Latitude</label>
+                <input id="depotLat" type="number" step="any" placeholder="Duplo clique / clique no mapa para preencher" required />
+                <label for="depotLng">Longitude</label>
+                <input id="depotLng" type="number" step="any" placeholder="Duplo clique / clique no mapa para preencher" required />
+                <label for="depotNotes">Notas <span class="depot-form-optional">(opcional)</span></label>
+                <textarea id="depotNotes" rows="2" placeholder="Observações internas"></textarea>
+              </div>
               <label class="inline-checkbox">
                 <input id="depotIsActive" type="checkbox" checked />
                 Parque ativo
               </label>
-              <button type="submit">Guardar parque</button>
+              <div class="depot-form-actions">
+                <button type="submit" id="depotFormSubmitBtn">Guardar parque</button>
+                <button type="button" id="depotFormCancelBtn" hidden>Cancelar edição</button>
+              </div>
             </form>
-            <small class="field-help">Dica: clique no mapa para preencher latitude/longitude automaticamente.</small>
+            <small class="field-help">
+              Dica: clique no mapa para preencher latitude/longitude. Use <strong>Editar</strong> num parque já criado para acrescentar código (ex.
+              DEP-01) sem voltar a criar o registo.
+            </small>
             <div id="depotMap"></div>
           </section>
           <section class="card card-top-gap">
@@ -766,7 +781,17 @@
               Gera chapas autonomamente por viatura com base no GTFS e calendário ativo, minimizando frota necessária e
               apresentando o impacto em vazio/carga para dia ou período (até mensal). Nesta fase sem Teltonika, as partidas ordenam‑se pela
               primeira hora GTFS da trip e o vazio parque&nbsp;→&nbsp;serviço usa as coordenadas da primeira stop_time até ao parque base escolhido.
+              Com vários ficheiros GTFS importados, escolha explicitamente o <strong>feed</strong> abaixo; caso contrário usa-se o feed activo mais recentemente actualizado.
             </p>
+            <div class="ops-layout-compact">
+              <label for="gtfsChapasFeedKey">Feed GTFS</label>
+              <select
+                id="gtfsChapasFeedKey"
+                title="Chapas e calendário vêm apenas deste feed. Automático = feed activo com updated_at mais recente."
+              >
+                <option value="">Automático (feed activo mais recentemente actualizado)</option>
+              </select>
+            </div>
             <div class="ops-layout-compact">
               <label for="gtfsChapasBaseDepot">Parque base (início/fim do dia)</label>
               <select id="gtfsChapasBaseDepot" title="Viaturas partem e regressam sempre a este parque (vazio calculado até à 1.ª paragem GTFS da trip).">
@@ -775,6 +800,10 @@
               <label class="inline-checkbox">
                 <input id="gtfsChapasUseDepotCapacityAsCap" type="checkbox" />
                 Limitar número de chapas à capacidade do parque seleccionado
+              </label>
+              <label class="inline-checkbox">
+                <input id="gtfsChapasAssignAllServices" type="checkbox" />
+                Atribuir todos os serviços (viaturas extra se o cupo ou regras UE bloquearem)
               </label>
             </div>
             <div class="ops-layout-compact">

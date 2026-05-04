@@ -301,6 +301,10 @@ function parseGtfsChapasPlanningParams(queryLike = {}) {
   const baseDepotId = Number(queryLike.baseDepotId);
   const baseDepotName = String(queryLike.baseDepotName || "").trim();
   const useBaseDepotCapacityAsCap = parseBooleanLike(queryLike.useBaseDepotCapacityAsCap, false);
+  /** Chave do feed GTFS (ex.: urbano_leiria). Vazio = automático: último feed activo por data de actualização. */
+  const feedKey = String(queryLike.feedKey ?? queryLike.feed_key ?? "").trim();
+  /** Após o plano normal, cria viaturas extra (uma por serviço) para tudo o que ficou por cupo/regras — cobertura total de trips do dia. */
+  const assignAllServices = parseBooleanLike(queryLike.assignAllServices, false);
   const lineCodesNormalized = normalizeLineCodesInput(queryLike.lineCodes ?? queryLike.lines ?? queryLike.line);
   return {
     mode,
@@ -318,6 +322,8 @@ function parseGtfsChapasPlanningParams(queryLike = {}) {
     baseDepotId: Number.isFinite(baseDepotId) && baseDepotId > 0 ? Math.floor(baseDepotId) : null,
     baseDepotName,
     useBaseDepotCapacityAsCap,
+    assignAllServices,
+    feedKey: feedKey || null,
     lineCodesNormalized,
   };
 }
@@ -338,6 +344,10 @@ async function resolveFleetVehicleCap(planningOpts) {
       [cls]
     );
     const trackersCount = counted.rows[0]?.c ?? 0;
+    /** Sem rastreadores activos: não forçar cupo 0 (bloqueava qualquer chapa). Mantém-se só maxVehicles, se houver. */
+    if (trackersCount <= 0) {
+      return cap;
+    }
     cap = cap == null ? trackersCount : Math.min(cap, trackersCount);
   }
   return cap;
@@ -538,6 +548,9 @@ async function respondGtfsChapasDailyXlsx(res, planningOpts, serviceDate, plan) 
       capacidade_parque_aplicada_ao_cupo: plan.depot_capacity_used_as_fleet_cap ? "sim" : "nao",
       primeira_partida_dia_preview: plan.day_schedule_anchor?.first_services_preview?.[0]?.first_departure_time ?? "",
       trip_primeira_do_dia: plan.day_schedule_anchor?.first_services_preview?.[0]?.trip_id ?? "",
+      feed_gtfs_chave: plan.feed_key_used ?? "",
+      feed_gtfs_nome: plan.feed_name_used ?? "",
+      feed_gtfs_seleccao_automatica: plan.feed_auto_selected ? "sim" : "nao",
       cupo_max_viaturas: plan.fleet_cap_applied ?? "",
       ...(plan.summary || {}),
     },
@@ -583,6 +596,9 @@ async function respondGtfsChapasRangeXlsx(res, planningOpts, fromDate, toDate, b
         parque_base_resolvido_nome:
           bundle.detailed_daily_plans?.[0]?.base_depot?.depot_name ?? "",
         parque_base_resolvido_id: bundle.detailed_daily_plans?.[0]?.base_depot?.id ?? "",
+        feed_gtfs_usado: bundle.detailed_daily_plans?.[0]?.feed_key_used ?? "",
+        feed_gtfs_nome: bundle.detailed_daily_plans?.[0]?.feed_name_used ?? "",
+        feed_gtfs_auto: bundle.detailed_daily_plans?.[0]?.feed_auto_selected ? "sim" : "nao",
         ...bundle.totals,
       },
     ]),
@@ -3940,22 +3956,65 @@ router.patch("/vehicles/:imei/depot", async (req, res) => {
   }
 });
 
-async function fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormalized = []) {
+async function resolveGtfsPlanningFeedKey(explicitFeedKeyRaw) {
+  const explicit = String(explicitFeedKeyRaw || "").trim();
+  if (explicit) {
+    const hit = await db.query(
+      `SELECT feed_key, feed_name, is_active FROM gtfs_feeds WHERE feed_key = $1 LIMIT 1`,
+      [explicit]
+    );
+    if (!hit.rowCount) {
+      return {
+        ok: false,
+        message: `Feed GTFS "${explicit}" não encontrado. Indique a chave exacta (Dados → feeds) ou use modo automático.`,
+      };
+    }
+    if (!hit.rows[0].is_active) {
+      return {
+        ok: false,
+        message: `O feed "${explicit}" está inactivo. Active-o na lista de feeds GTFS ou escolha outro feed.`,
+      };
+    }
+    return {
+      ok: true,
+      feed_key: hit.rows[0].feed_key,
+      feed_name: hit.rows[0].feed_name || hit.rows[0].feed_key,
+      auto_selected: false,
+    };
+  }
+  const auto = await db.query(
+    `SELECT feed_key, feed_name
+     FROM gtfs_feeds
+     WHERE is_active = TRUE
+     ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+     LIMIT 1`
+  );
+  if (!auto.rowCount) {
+    return {
+      ok: false,
+      message:
+        "Não existe nenhum feed GTFS activo. Importe um GTFS em Dados ou active um feed na lista — o gerador de chapas usa um único feed de cada vez.",
+    };
+  }
+  return {
+    ok: true,
+    feed_key: auto.rows[0].feed_key,
+    feed_name: auto.rows[0].feed_name || auto.rows[0].feed_key,
+    auto_selected: true,
+  };
+}
+
+async function fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormalized = [], resolvedFeedKey) {
   const dateIso = parseDateOnly(serviceDate) || parseDateOnly(new Date().toISOString().slice(0, 10));
   if (!dateIso) return [];
+  const feedKey = String(resolvedFeedKey || "").trim();
+  if (!feedKey) return [];
   const dateObj = new Date(`${dateIso}T00:00:00Z`);
   const jsWeekday = dateObj.getUTCDay();
   const weekday = jsWeekday === 0 ? 7 : jsWeekday; // 1..7, Monday-first
   const lineFilter = Array.isArray(lineCodesNormalized) ? lineCodesNormalized.map((code) => String(code || "").trim().toLowerCase()).filter(Boolean) : [];
   const result = await db.query(
-    `WITH target_feed AS (
-       SELECT feed_key
-       FROM gtfs_feeds
-       WHERE is_active = TRUE
-       ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
-       LIMIT 1
-     ),
-     trip_base AS (
+    `WITH trip_base AS (
        SELECT
          t.trip_id,
          t.service_id,
@@ -3963,8 +4022,8 @@ async function fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormali
          COALESCE(NULLIF(TRIM(r.route_short_name), ''), NULLIF(TRIM(r.route_long_name), ''), t.route_id) AS line_code,
          t.trip_headsign
        FROM gtfs_trips t
-       JOIN gtfs_routes r ON r.route_id = t.route_id
-       JOIN target_feed tf ON tf.feed_key = t.feed_key
+       JOIN gtfs_routes r ON r.feed_key = t.feed_key AND r.route_id = t.route_id
+       WHERE t.feed_key = $4::text
      ),
      active_flags AS (
        SELECT
@@ -4047,7 +4106,7 @@ async function fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormali
         COALESCE(array_length($3::text[], 1), 0) = 0
         OR LOWER(TRIM(COALESCE(af.line_code, ''))) = ANY ($3::text[])
       )`,
-    [dateIso, weekday, lineFilter]
+    [dateIso, weekday, lineFilter, feedKey]
   );
   return result.rows
     .map((row) => {
@@ -4099,6 +4158,12 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
     splitBreakSecondSegmentMin,
     operativeIdleResetMin,
   };
+  const feedRes = await resolveGtfsPlanningFeedKey(options.feedKey);
+  if (!feedRes.ok) {
+    const err = new Error(feedRes.message);
+    err.statusCode = 400;
+    throw err;
+  }
   await ensureDepotTables();
   const depotsRes = await db.query(
     `SELECT id, depot_code, depot_name, lat, lng, capacity_total
@@ -4115,7 +4180,7 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
       fleetCap = fleetCap == null ? capCt : Math.min(fleetCap, capCt);
     }
   }
-  const candidates = await fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormalized);
+  const candidates = await fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormalized, feedRes.feed_key);
   const unassignedServices = [];
   const vehicles = [];
   let nextVehicleId = 1;
@@ -4152,7 +4217,9 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
         ...svc,
         unassigned_reason: fleetCap != null ? "cupo_viaturas_atribuicao_impossivel" : "sem_viatura_compative",
         unassigned_detail:
-          fleetCap != null ? `Limite físico (${fleetCap} viaturas) com regras de pausa/rotação.` : "Sem viatura válida cumprindo turnaround e pausas.",
+          fleetCap != null
+            ? `Limite de ${fleetCap} viatura(s) atingido: não cabem mais serviços cumprindo turnaround e regras UE entre serviços da mesma viatura. Use «atribuir todos os serviços» ou aumente o cupo.`
+            : "Sem viatura válida cumprindo turnaround e pausas (caso raro: contacte suporte).",
       });
       continue;
     }
@@ -4169,6 +4236,29 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
       waiting_from_previous_min: waitMin,
     });
     gtfsPlannerUpdateDriveAccumulator(chosen, svc, plannerDriverOpts);
+  }
+
+  let coverageOverflowVehicles = 0;
+  if (parseBooleanLike(options.assignAllServices, false) && unassignedServices.length) {
+    const spill = unassignedServices.splice(0, unassignedServices.length);
+    coverageOverflowVehicles = spill.length;
+    for (const u of spill) {
+      const v = {
+        vehicle_plan_id: `AUTO-${String(nextVehicleId).padStart(3, "0")}`,
+        services: [],
+        ...plannerInitDutyVehicleSkeleton(),
+      };
+      nextVehicleId += 1;
+      vehicles.push(v);
+      const { unassigned_reason: _ur, unassigned_detail: _ud, ...clean } = u;
+      v.services.push({
+        ...clean,
+        deadhead_from_previous_km: 0,
+        waiting_from_previous_min: 0,
+        coverage_overflow: true,
+      });
+      gtfsPlannerUpdateDriveAccumulator(v, clean, plannerDriverOpts);
+    }
   }
 
   const vehiclePlans = vehicles.map((vehicle) => {
@@ -4236,12 +4326,30 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
       warnings.push(`${longBlocks.length} serviços excedem o limite ${maxDriveBlockMin} min (condução contínua do trip GTFS).`);
     }
   }
+  if (coverageOverflowVehicles > 0) {
+    const capTxt = fleetCap != null ? `${fleetCap} viaturas` : "cupo anterior";
+    warnings.push(
+      `Cobertura total: ${coverageOverflowVehicles} viatura(s) extra criada(s) para serviços que excediam ${capTxt}. Revise cupo (parque / máx. viaturas / Teltonika) se quiser reduzir frota.`
+    );
+  } else if (unassignedServices.length) {
+    warnings.push(
+      `${unassignedServices.length} serviço(s) por atribuir. Active «Atribuir todos os serviços» para forçar uma viatura por serviço em falta, ou aumente o cupo (desactive limite do parque, «Cupar pela frota Teltonika» se não houver rastreadores, ou indique um máximo de viaturas maior).`
+    );
+  }
   return {
     date: parseDateOnly(serviceDate),
     mode,
     min_turnaround_min: minTurnaroundMin,
     line_codes_filter: lineCodesNormalized,
+    feed_key_used: feedRes.feed_key,
+    feed_name_used: feedRes.feed_name,
+    feed_auto_selected: feedRes.auto_selected,
+    feed_selection_hint: feedRes.auto_selected
+      ? "Modo automático: está a usar o feed GTFS activo mais recentemente actualizado. Com vários feeds importados, seleccione explicitamente o feed no selector «GTFS» do gerador de chapas se os serviços não corresponderem à operação."
+      : null,
     fleet_cap_applied: fleetCap,
+    assign_all_services: parseBooleanLike(options.assignAllServices, false),
+    coverage_overflow_vehicles: coverageOverflowVehicles,
     base_depot: forcedBaseDepot
       ? {
           id: forcedBaseDepot.id,
@@ -4290,7 +4398,11 @@ router.get("/planning/gtfs-autonomous-chapas", async (req, res) => {
       return respondGtfsChapasDailyXlsx(res, plannerOpts, date, plan);
     }
     return res.json(plan);
-  } catch (_error) {
+  } catch (error) {
+    const code = Number(error?.statusCode);
+    if (code === 400) {
+      return res.status(400).json({ message: error.message || "Pedido inválido para chapas GTFS." });
+    }
     return res.status(500).json({ message: "Erro ao gerar chapas automáticas por GTFS." });
   }
 });
@@ -4337,6 +4449,10 @@ router.get("/planning/gtfs-autonomous-chapas-range", async (req, res) => {
       to_date: toDate,
       mode: plannerOpts.mode,
       min_turnaround_min: plannerOpts.minTurnaroundMin,
+      feed_key_used: dailyPlansFull[0]?.feed_key_used ?? null,
+      feed_name_used: dailyPlansFull[0]?.feed_name_used ?? null,
+      feed_auto_selected: dailyPlansFull[0]?.feed_auto_selected ?? null,
+      feed_selection_hint: dailyPlansFull[0]?.feed_selection_hint ?? null,
       totals: {
         ...totals,
         total_deadhead_km: Number(totals.total_deadhead_km.toFixed(3)),
@@ -4353,7 +4469,11 @@ router.get("/planning/gtfs-autonomous-chapas-range", async (req, res) => {
       return respondGtfsChapasRangeXlsx(res, plannerOpts, fromDate, toDate, bundle);
     }
     return res.json(bundle);
-  } catch (_error) {
+  } catch (error) {
+    const code = Number(error?.statusCode);
+    if (code === 400) {
+      return res.status(400).json({ message: error.message || "Pedido inválido para chapas GTFS em período." });
+    }
     return res.status(500).json({ message: "Erro ao gerar cenário GTFS para o período." });
   }
 });
