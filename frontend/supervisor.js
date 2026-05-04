@@ -171,6 +171,14 @@ const gtfsFeedsListEl = document.getElementById("gtfsFeedsList");
 const vehicleRegistryFormEl = document.getElementById("vehicleRegistryForm");
 const vehicleRegistryListEl = document.getElementById("vehicleRegistryList");
 const odometerReconciliationListEl = document.getElementById("odometerReconciliationList");
+const depotsListEl = document.getElementById("depotsList");
+const depotMapEl = document.getElementById("depotMap");
+const depotDeadheadSummaryEl = document.getElementById("depotDeadheadSummary");
+const depotDeadheadListEl = document.getElementById("depotDeadheadList");
+const continuityPlanSummaryEl = document.getElementById("continuityPlanSummary");
+const continuityPlanListEl = document.getElementById("continuityPlanList");
+const gtfsChapasSummaryEl = document.getElementById("gtfsChapasSummary");
+const gtfsChapasListEl = document.getElementById("gtfsChapasList");
 
 let driversCache = [];
 let usersCache = [];
@@ -184,6 +192,8 @@ let supLiveRouteByServiceId = new Map();
 let supLiveHighlightedServiceId = null;
 let deadheadMap = null;
 let deadheadRouteLayer = null;
+let depotMap = null;
+let depotMapMarkersLayer = null;
 let supLiveRefreshInterval = null;
 let currentLiveServices = [];
 let serviceDetailRouteMap = null;
@@ -225,6 +235,7 @@ const TAB_MODULE_MAP = {
   tabExportarMotoristas: "dados",
   tabListaMotoristas: "administracao",
   tabViaturas: "dados",
+  tabParquesPernoita: "planeamento",
   tabIntegracoesGps: "dados",
   tabMensagensComunicacao: "comunicacao",
   tabMensagensPresets: "comunicacao",
@@ -1185,6 +1196,14 @@ function openSupervisorTab(tabId) {
   if (tabId === "tabViaturas") {
     loadVehicleRegistry();
     loadOdometerReconciliationReport();
+  }
+  if (tabId === "tabParquesPernoita") {
+    loadDepots();
+    loadDepotDeadheadEstimate();
+    generateVehicleContinuityPlan();
+    generateGtfsAutonomousChapas();
+    ensureDepotMap();
+    if (depotMap) setTimeout(() => depotMap.invalidateSize(), 80);
   }
   if (tabId === "tabEditorGtfs") {
     loadGtfsFeeds();
@@ -4952,6 +4971,446 @@ function ensureDeadheadMap() {
   deadheadRouteLayer = L.layerGroup().addTo(deadheadMap);
 }
 
+function ensureDepotMap() {
+  if (!depotMapEl || depotMap) return;
+  depotMap = L.map(depotMapEl).setView([38.7223, -9.1393], 11);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+    maxZoom: 19,
+    attribution: "&copy; OpenStreetMap contributors",
+  }).addTo(depotMap);
+  depotMapMarkersLayer = L.layerGroup().addTo(depotMap);
+  depotMap.on("click", (event) => {
+    const lat = Number(event?.latlng?.lat);
+    const lng = Number(event?.latlng?.lng);
+    const latInput = document.getElementById("depotLat");
+    const lngInput = document.getElementById("depotLng");
+    if (latInput) latInput.value = Number.isFinite(lat) ? lat.toFixed(6) : "";
+    if (lngInput) lngInput.value = Number.isFinite(lng) ? lng.toFixed(6) : "";
+  });
+}
+
+function populateDepotSelectOptions(rows) {
+  const select = document.getElementById("vehicleDepotSelect");
+  if (!select) return;
+  const options = ['<option value="">-- Selecionar parque --</option>'].concat(
+    (rows || []).map((item) => `<option value="${item.id}">${item.depot_name} (${item.assigned_vehicles_count || 0}/${item.capacity_total || 0})</option>`)
+  );
+  select.innerHTML = options.join("");
+}
+
+async function loadDepots() {
+  if (!supToken || !depotsListEl) return;
+  ensureDepotMap();
+  depotsListEl.innerHTML = '<article class="service-card-item">A carregar parques...</article>';
+  try {
+    const response = await fetch(`${API_BASE}/supervisor/depots`, { headers: getAuthHeaders() });
+    const data = await response.json().catch(() => []);
+    if (!response.ok) {
+      depotsListEl.innerHTML = `<article class="service-card-item">${data.message || "Erro ao carregar parques."}</article>`;
+      return;
+    }
+    const rows = Array.isArray(data) ? data : [];
+    populateDepotSelectOptions(rows);
+    if (depotMapMarkersLayer) depotMapMarkersLayer.clearLayers();
+    if (!rows.length) {
+      depotsListEl.innerHTML = '<article class="service-card-item">Sem parques registados.</article>';
+      return;
+    }
+    depotsListEl.innerHTML = rows
+      .map(
+        (row) => `<article class="service-card-item">
+          <strong>${row.depot_name || "-"}</strong>
+          <div>Código: ${row.depot_code || "-"}</div>
+          <div>Capacidade: ${row.capacity_total || 0} | Viaturas associadas: ${row.assigned_vehicles_count || 0}</div>
+          <div>Localização: ${Number(row.lat).toFixed(6)}, ${Number(row.lng).toFixed(6)}</div>
+          <div>Estado: ${asPgBool(row.is_active) ? "Ativo" : "Inativo"}</div>
+        </article>`
+      )
+      .join("");
+    if (depotMapMarkersLayer) {
+      const bounds = [];
+      rows.forEach((row) => {
+        const lat = Number(row.lat);
+        const lng = Number(row.lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) return;
+        bounds.push([lat, lng]);
+        L.marker([lat, lng])
+          .bindPopup(`<strong>${row.depot_name || "-"}</strong><br/>Capacidade: ${row.capacity_total || 0}`)
+          .addTo(depotMapMarkersLayer);
+      });
+      if (bounds.length && depotMap) depotMap.fitBounds(bounds, { padding: [20, 20], maxZoom: 14 });
+    }
+  } catch (_error) {
+    depotsListEl.innerHTML = '<article class="service-card-item">Erro de rede ao carregar parques.</article>';
+  }
+}
+
+async function saveDepot(event) {
+  event.preventDefault();
+  if (!supToken) return;
+  const payload = {
+    depotCode: String(document.getElementById("depotCode")?.value || "").trim() || null,
+    depotName: String(document.getElementById("depotName")?.value || "").trim(),
+    capacityTotal: Number(document.getElementById("depotCapacityTotal")?.value || 0),
+    lat: Number(document.getElementById("depotLat")?.value),
+    lng: Number(document.getElementById("depotLng")?.value),
+    notes: String(document.getElementById("depotNotes")?.value || "").trim() || null,
+    isActive: document.getElementById("depotIsActive")?.checked !== false,
+  };
+  if (!payload.depotName) {
+    alert("Indique o nome do parque.");
+    return;
+  }
+  if (!Number.isFinite(payload.lat) || !Number.isFinite(payload.lng)) {
+    alert("Clique no mapa ou preencha latitude/longitude válidas.");
+    return;
+  }
+  const response = await fetch(`${API_BASE}/supervisor/depots`, {
+    method: "POST",
+    headers: getAuthHeaders(),
+    body: JSON.stringify(payload),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao guardar parque.");
+    return;
+  }
+  const form = document.getElementById("depotForm");
+  if (form) form.reset();
+  const activeEl = document.getElementById("depotIsActive");
+  if (activeEl) activeEl.checked = true;
+  await loadDepots();
+}
+
+async function assignVehicleToDepot(event) {
+  event.preventDefault();
+  if (!supToken) return;
+  const imei = normalizeImeiDigits(document.getElementById("vehicleDepotImei")?.value);
+  const depotId = Number(document.getElementById("vehicleDepotSelect")?.value);
+  if (!imei) {
+    alert("Indique um IMEI válido.");
+    return;
+  }
+  if (!Number.isFinite(depotId) || depotId <= 0) {
+    alert("Selecione um parque.");
+    return;
+  }
+  const response = await fetch(`${API_BASE}/supervisor/vehicles/${encodeURIComponent(imei)}/depot`, {
+    method: "PATCH",
+    headers: getAuthHeaders(),
+    body: JSON.stringify({ depotId }),
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    alert(data.message || "Erro ao associar viatura ao parque.");
+    return;
+  }
+  await Promise.all([loadDepots(), loadVehicleRegistry()]);
+}
+
+async function loadDepotDeadheadEstimate() {
+  if (!supToken || !depotDeadheadSummaryEl || !depotDeadheadListEl) return;
+  const dateInput = document.getElementById("depotDeadheadDate");
+  const date = String(dateInput?.value || "").trim();
+  const query = date ? `?date=${encodeURIComponent(date)}` : "";
+  depotDeadheadSummaryEl.textContent = "A calcular estimativa...";
+  depotDeadheadListEl.innerHTML = '<article class="service-card-item">A carregar dados...</article>';
+  const response = await fetch(`${API_BASE}/supervisor/depots/deadhead-estimate${query}`, { headers: getAuthHeaders() });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    depotDeadheadSummaryEl.textContent = data.message || "Erro ao calcular estimativa.";
+    depotDeadheadListEl.innerHTML = "";
+    return;
+  }
+  const totals = data?.totals || {};
+  depotDeadheadSummaryEl.textContent = [
+    `Data: ${data?.date || "hoje"}`,
+    `Viaturas consideradas: ${totals.vehicles || 0}`,
+    `Viaturas sem parque: ${totals.vehicles_without_depot || 0}`,
+    `Km vazio estimado total: ${Number(totals.estimated_deadhead_km || 0).toFixed(3)}`,
+  ].join("\n");
+  const rows = Array.isArray(data?.rows) ? data.rows : [];
+  if (!rows.length) {
+    depotDeadheadListEl.innerHTML = '<article class="service-card-item">Sem dados para o período selecionado.</article>';
+    return;
+  }
+  depotDeadheadListEl.innerHTML = rows
+    .map(
+      (row) => `<article class="service-card-item">
+        <strong>Frota ${row.fleet_number || "-"}</strong>
+        <div>Parque: ${row.depot_name || "Sem parque atribuído"}</div>
+        <div>1.º serviço (origem): ${row.start_location || "-"}</div>
+        <div>Último serviço (fim): ${row.end_location || "-"}</div>
+        <div>Vazio parque -> 1.º serviço: ${
+          row.deadhead_to_first_service_km == null ? "-" : Number(row.deadhead_to_first_service_km).toFixed(3)
+        } km</div>
+        <div>Vazio último serviço -> parque: ${
+          row.deadhead_back_to_depot_km == null ? "-" : Number(row.deadhead_back_to_depot_km).toFixed(3)
+        } km</div>
+      </article>`
+    )
+    .join("");
+}
+
+async function generateVehicleContinuityPlan() {
+  if (!supToken || !continuityPlanSummaryEl || !continuityPlanListEl) return;
+  const date = String(document.getElementById("continuityPlanDate")?.value || "").trim();
+  const maxDriveMin = Number(document.getElementById("continuityPlanMaxDriveMin")?.value || 540);
+  const params = new URLSearchParams();
+  if (date) params.set("date", date);
+  if (Number.isFinite(maxDriveMin)) params.set("maxDriveMin", String(maxDriveMin));
+  const query = params.toString() ? `?${params.toString()}` : "";
+  continuityPlanSummaryEl.textContent = "A gerar proposta de continuidade...";
+  continuityPlanListEl.innerHTML = '<article class="service-card-item">A calcular...</article>';
+  try {
+    const response = await fetch(`${API_BASE}/supervisor/planning/vehicle-continuity${query}`, {
+      headers: getAuthHeaders(),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      continuityPlanSummaryEl.textContent = data.message || "Erro ao gerar proposta.";
+      continuityPlanListEl.innerHTML = "";
+      return;
+    }
+    const summary = data?.summary || {};
+    continuityPlanSummaryEl.textContent = [
+      `Data: ${data?.date || "hoje"}`,
+      `Linhas analisadas: ${summary.lines || 0}`,
+      `Transbordos atuais: ${summary.current_transfers || 0}`,
+      `Transbordos propostos: ${summary.proposed_transfers || 0}`,
+      `Redução estimada: ${summary.transfer_reduction || 0}`,
+      `Trocas sugeridas de viatura: ${summary.suggested_reassignments || 0}`,
+      `Limite condução/viatura: ${data?.max_drive_min_per_vehicle || 540} min`,
+    ].join("\n");
+    const plans = Array.isArray(data?.line_plans) ? data.line_plans : [];
+    if (!plans.length) {
+      continuityPlanListEl.innerHTML = '<article class="service-card-item">Sem dados para gerar proposta.</article>';
+      return;
+    }
+    continuityPlanListEl.innerHTML = plans
+      .map((plan) => {
+        const suggestions = Array.isArray(plan.suggested_reassignments) ? plan.suggested_reassignments : [];
+        const suggestionsHtml = suggestions.length
+          ? suggestions
+              .slice(0, 8)
+              .map(
+                (s) =>
+                  `<li>${s.service_code || "#"} ${s.service_schedule || "-"}: ${s.from_fleet_number || "-"} -> ${
+                    s.to_fleet_number || "-"
+                  } (${s.drive_min || 0} min)</li>`
+              )
+              .join("")
+          : "<li>Sem alterações sugeridas.</li>";
+        return `<article class="service-card-item">
+          <strong>Linha ${plan.line_code || "-"}</strong>
+          <div>Viatura dominante sugerida: ${plan.dominant_fleet_number || "-"}</div>
+          <div>Serviços: ${plan.services_count || 0}</div>
+          <div>Transbordos: ${plan.current_transfers || 0} -> ${plan.proposed_transfers || 0}</div>
+          <div>Redução: ${plan.transfer_reduction || 0}</div>
+          <ul>${suggestionsHtml}</ul>
+        </article>`;
+      })
+      .join("");
+  } catch (_error) {
+    continuityPlanSummaryEl.textContent = "Erro de rede ao gerar proposta.";
+    continuityPlanListEl.innerHTML = "";
+  }
+}
+
+function getGtfsChapasParams() {
+  const mode = String(document.getElementById("gtfsChapasMode")?.value || "balanced").trim() || "balanced";
+  const minTurnaroundMin = Number(document.getElementById("gtfsChapasTurnaroundMin")?.value || 10);
+  const lineCodes = String(document.getElementById("gtfsChapasLineCodes")?.value || "").trim();
+  const maxVehicles = Number(document.getElementById("gtfsChapasMaxVehicles")?.value);
+  const fleetCapFromTrackers = document.getElementById("gtfsChapasFleetCapFromTrackers")?.checked === true;
+  const planningClass = String(document.getElementById("gtfsChapasPlanningClass")?.value || "").trim();
+  const maxDriveBlockMin = Number(document.getElementById("gtfsChapasMaxDriveBlockMin")?.value ?? 270);
+  const minUninterruptedBreakMin = Number(document.getElementById("gtfsChapasMinUninterruptedBreakMin")?.value ?? 45);
+  const euSplitBreak = document.getElementById("gtfsChapasEuSplitBreak")?.checked === true;
+  const operativeIdleResetMin = Number(document.getElementById("gtfsChapasOperativeIdleResetMin")?.value ?? 0);
+  const params = new URLSearchParams();
+  params.set("mode", mode);
+  if (Number.isFinite(minTurnaroundMin)) params.set("minTurnaroundMin", String(minTurnaroundMin));
+  if (lineCodes) params.set("lineCodes", lineCodes);
+  if (Number.isFinite(maxVehicles) && maxVehicles > 0) params.set("maxVehicles", String(Math.floor(maxVehicles)));
+  if (fleetCapFromTrackers) params.set("fleetCapFromTrackers", "1");
+  if (planningClass) params.set("planningClass", planningClass);
+  if (Number.isFinite(maxDriveBlockMin)) params.set("maxDriveBlockMin", String(maxDriveBlockMin));
+  if (Number.isFinite(minUninterruptedBreakMin)) {
+    params.set("minUninterruptedBreakMin", String(minUninterruptedBreakMin));
+    params.set("minRestBetweenBlocksMin", String(minUninterruptedBreakMin));
+  }
+  if (euSplitBreak) params.set("euSplitBreak", "1");
+  if (Number.isFinite(operativeIdleResetMin) && operativeIdleResetMin > 0) {
+    params.set("operativeIdleResetMin", String(operativeIdleResetMin));
+  }
+  return params;
+}
+
+async function downloadGtfsAutonomousChapasXlsx(scope) {
+  if (!supToken) return;
+  const params = getGtfsChapasParams();
+  params.set("format", "xlsx");
+  const path =
+    scope === "range" ? `${API_BASE}/supervisor/planning/gtfs-autonomous-chapas-range` : `${API_BASE}/supervisor/planning/gtfs-autonomous-chapas`;
+  if (scope !== "range") {
+    const date = String(document.getElementById("gtfsChapasDate")?.value || "").trim();
+    if (date) params.set("date", date);
+  } else {
+    const fromDate = String(document.getElementById("gtfsChapasFromDate")?.value || "").trim();
+    const toDate = String(document.getElementById("gtfsChapasToDate")?.value || "").trim();
+    if (!fromDate || !toDate) {
+      alert("Indique datas inicial e final para exportar o período.");
+      return;
+    }
+    params.set("fromDate", fromDate);
+    params.set("toDate", toDate);
+  }
+  try {
+    const response = await fetch(`${path}?${params.toString()}`, { headers: getAuthHeaders() });
+    const cd = response.headers.get("Content-Disposition") || "";
+    const match = cd.match(/filename="?([^";]+)"?/i);
+    let filename = match ? match[1] : scope === "range" ? "chapas-gtfs-periodo.xlsx" : "chapas-gtfs-dia.xlsx";
+    filename = decodeURIComponent(filename);
+    if (!response.ok) {
+      const err = await response.json().catch(() => ({}));
+      alert(err.message || "Erro ao exportar Excel.");
+      return;
+    }
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement("a");
+    anchor.href = url;
+    anchor.download = filename;
+    anchor.rel = "noopener";
+    document.body.appendChild(anchor);
+    anchor.click();
+    anchor.remove();
+    URL.revokeObjectURL(url);
+  } catch (_error) {
+    alert("Erro de rede ao exportar Excel.");
+  }
+}
+
+async function generateGtfsAutonomousChapas() {
+  if (!supToken || !gtfsChapasSummaryEl || !gtfsChapasListEl) return;
+  const date = String(document.getElementById("gtfsChapasDate")?.value || "").trim();
+  const params = getGtfsChapasParams();
+  if (date) params.set("date", date);
+  gtfsChapasSummaryEl.textContent = "A gerar chapas automáticas (dia)...";
+  gtfsChapasListEl.innerHTML = '<article class="service-card-item">A processar...</article>';
+  try {
+    const response = await fetch(`${API_BASE}/supervisor/planning/gtfs-autonomous-chapas?${params.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      gtfsChapasSummaryEl.textContent = data.message || "Erro ao gerar chapas automáticas.";
+      gtfsChapasListEl.innerHTML = "";
+      return;
+    }
+    const s = data?.summary || {};
+    const warnLines = Array.isArray(data?.warnings) && data.warnings.length ? `\nAlertas:\n${data.warnings.join("\n")}` : "";
+    gtfsChapasSummaryEl.textContent = [
+      `Data: ${data?.date || "hoje"}`,
+      `Modo: ${data?.mode || "-"}`,
+      `Viaturas necessárias: ${s.vehicles_required || 0}`,
+      `Serviços GTFS atribuídos: ${(s.services_assigned != null ? s.services_assigned : s.services_total) || 0}`,
+      `Serviços por atribuir: ${s.services_unassigned ?? 0}`,
+      `Cupo máx. aplicado (viaturas): ${data?.fleet_cap_applied != null ? data.fleet_cap_applied : "—"}`,
+      `Linhas filtradas: ${(data.line_codes_filter || []).length ? data.line_codes_filter.join(", ") : "(todas)"}`,
+      `Condução total: ${s.total_drive_min || 0} min`,
+      `Vazio estimado total: ${Number(s.total_deadhead_km || 0).toFixed(3)} km`,
+      `Viaturas sem parque definido: ${s.vehicles_without_depot || 0}`,
+      warnLines,
+    ]
+      .filter(Boolean)
+      .join("\n");
+    const plans = Array.isArray(data?.vehicle_plans) ? data.vehicle_plans : [];
+    if (!plans.length) {
+      gtfsChapasListEl.innerHTML = '<article class="service-card-item">Sem serviços GTFS ativos para esta data.</article>';
+      return;
+    }
+    gtfsChapasListEl.innerHTML = plans
+      .map((plan) => {
+        const preview = Array.isArray(plan.services)
+          ? plan.services
+              .slice(0, 7)
+              .map((svc) => `<li>${svc.line_code || "-"} | ${svc.first_departure_time || "-"} -> ${svc.last_departure_time || "-"}</li>`)
+              .join("")
+          : "<li>Sem serviços.</li>";
+        return `<article class="service-card-item">
+          <strong>${plan.vehicle_plan_id || "-"}</strong>
+          <div>Parque sugerido: ${plan.depot_name || "Sem parque"}</div>
+          <div>Serviços: ${plan.services_count || 0}</div>
+          <div>Condução: ${plan.total_drive_min || 0} min</div>
+          <div>Vazio total estimado: ${Number(plan.total_deadhead_km || 0).toFixed(3)} km</div>
+          <ul>${preview}</ul>
+        </article>`;
+      })
+      .join("");
+  } catch (_error) {
+    gtfsChapasSummaryEl.textContent = "Erro de rede ao gerar chapas automáticas.";
+    gtfsChapasListEl.innerHTML = "";
+  }
+}
+
+async function generateGtfsAutonomousChapasRange() {
+  if (!supToken || !gtfsChapasSummaryEl || !gtfsChapasListEl) return;
+  const fromDate = String(document.getElementById("gtfsChapasFromDate")?.value || "").trim();
+  const toDate = String(document.getElementById("gtfsChapasToDate")?.value || "").trim();
+  if (!fromDate || !toDate) {
+    alert("Indique data inicial e final para gerar o período.");
+    return;
+  }
+  const params = getGtfsChapasParams();
+  params.set("fromDate", fromDate);
+  params.set("toDate", toDate);
+  gtfsChapasSummaryEl.textContent = "A gerar cenário GTFS para período...";
+  gtfsChapasListEl.innerHTML = '<article class="service-card-item">A processar período...</article>';
+  try {
+    const response = await fetch(`${API_BASE}/supervisor/planning/gtfs-autonomous-chapas-range?${params.toString()}`, {
+      headers: getAuthHeaders(),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      gtfsChapasSummaryEl.textContent = data.message || "Erro ao gerar cenário por período.";
+      gtfsChapasListEl.innerHTML = "";
+      return;
+    }
+    const t = data?.totals || {};
+    gtfsChapasSummaryEl.textContent = [
+      `Período: ${data?.from_date || "-"} -> ${data?.to_date || "-"}`,
+      `Modo: ${data?.mode || "-"}`,
+      `Dias analisados: ${t.days || 0}`,
+      `Serviços GTFS atribuídos (total): ${t.services_total || 0}`,
+      `Serviços por atribuir (total): ${t.services_unassigned_total || 0}`,
+      `Viaturas/dia (média): ${Number(t.average_vehicles_per_day || 0).toFixed(2)}`,
+      `Condução total: ${t.total_drive_min || 0} min`,
+      `Vazio total estimado: ${Number(t.total_deadhead_km || 0).toFixed(3)} km`,
+    ].join("\n");
+    const rows = Array.isArray(data?.daily_plans) ? data.daily_plans : [];
+    if (!rows.length) {
+      gtfsChapasListEl.innerHTML = '<article class="service-card-item">Sem resultados no período.</article>';
+      return;
+    }
+    gtfsChapasListEl.innerHTML = rows
+      .map(
+        (row) => `<article class="service-card-item">
+          <strong>${row.date || "-"}</strong>
+          <div>Viaturas necessárias: ${row?.summary?.vehicles_required || 0}</div>
+          <div>Serviços GTFS: ${row?.summary?.services_total || 0}</div>
+          <div>Condução total: ${row?.summary?.total_drive_min || 0} min</div>
+          <div>Vazio estimado: ${Number(row?.summary?.total_deadhead_km || 0).toFixed(3)} km</div>
+        </article>`
+      )
+      .join("");
+  } catch (_error) {
+    gtfsChapasSummaryEl.textContent = "Erro de rede ao gerar período.";
+    gtfsChapasListEl.innerHTML = "";
+  }
+}
+
 function formatDateTimePt(value) {
   if (!value) return "-";
   const dt = new Date(value);
@@ -5208,10 +5667,12 @@ function syncVehicleFormFromTrackerDevice(device) {
   const fleetInput = document.getElementById("vehicleFleetNumber");
   const plateInput = document.getElementById("vehiclePlateNumber");
   const activeInput = document.getElementById("vehicleIsActive");
+  const planningClassInput = document.getElementById("vehiclePlanningClass");
   if (imeiInput) imeiInput.value = normalizeImeiDigits(device?.imei || "");
   if (fleetInput) fleetInput.value = String(device?.fleet_number || "").trim();
   if (plateInput) plateInput.value = String(device?.plate_number || "").trim();
   if (activeInput) activeInput.value = asPgBool(device?.is_active) ? "true" : "false";
+  if (planningClassInput) planningClassInput.value = String(device?.planning_class || "").trim();
 }
 
 function formatVehicleKm(value) {
@@ -5245,6 +5706,7 @@ async function loadVehicleRegistry() {
             <div>Matrícula: ${item.plate_number || "-"}</div>
             <div>Km instalação: ${formatVehicleKm(item.install_odometer_km)}</div>
             <div>Km atual: ${formatVehicleKm(item.current_odometer_km)}</div>
+            <div>Tipologia planeamento: ${String(item.planning_class || "").trim() || "-"}</div>
             <div>Estado: ${asPgBool(item.is_active) ? "Ativa" : "Inativa"}</div>
             <div class="stack-actions">
               <input type="number" step="0.1" min="0" id="vehicle-current-${imei}" placeholder="Novo km atual" />
@@ -5268,6 +5730,7 @@ async function saveVehicleRegistry(event) {
   const installOdometerKmRaw = document.getElementById("vehicleInstallOdometerKm")?.value;
   const currentOdometerKmRaw = document.getElementById("vehicleCurrentOdometerKm")?.value;
   const isActive = document.getElementById("vehicleIsActive")?.value === "true";
+  const planningClass = String(document.getElementById("vehiclePlanningClass")?.value || "").trim();
   if (!imei || !fleetNumber) {
     alert("IMEI e nº de frota são obrigatórios.");
     return;
@@ -5279,6 +5742,7 @@ async function saveVehicleRegistry(event) {
     isActive,
     installOdometerKm: installOdometerKmRaw === "" ? null : Number(installOdometerKmRaw),
     currentOdometerKm: currentOdometerKmRaw === "" ? null : Number(currentOdometerKmRaw),
+    planningClass: planningClass || null,
   };
   const response = await fetch(`${API_BASE}/integrations/teltonika/devices`, {
     method: "POST",
@@ -5566,6 +6030,42 @@ if (trackerDeviceFormEl) {
 if (vehicleRegistryFormEl) {
   vehicleRegistryFormEl.addEventListener("submit", saveVehicleRegistry);
 }
+const depotFormEl = document.getElementById("depotForm");
+if (depotFormEl) {
+  depotFormEl.addEventListener("submit", saveDepot);
+}
+const vehicleDepotAssignFormEl = document.getElementById("vehicleDepotAssignForm");
+if (vehicleDepotAssignFormEl) {
+  vehicleDepotAssignFormEl.addEventListener("submit", assignVehicleToDepot);
+}
+const refreshDepotsBtnEl = document.getElementById("refreshDepotsBtn");
+if (refreshDepotsBtnEl) {
+  refreshDepotsBtnEl.addEventListener("click", loadDepots);
+}
+const refreshDepotDeadheadBtnEl = document.getElementById("refreshDepotDeadheadBtn");
+if (refreshDepotDeadheadBtnEl) {
+  refreshDepotDeadheadBtnEl.addEventListener("click", loadDepotDeadheadEstimate);
+}
+const generateContinuityPlanBtnEl = document.getElementById("generateContinuityPlanBtn");
+if (generateContinuityPlanBtnEl) {
+  generateContinuityPlanBtnEl.addEventListener("click", generateVehicleContinuityPlan);
+}
+const generateGtfsChapasBtnEl = document.getElementById("generateGtfsChapasBtn");
+if (generateGtfsChapasBtnEl) {
+  generateGtfsChapasBtnEl.addEventListener("click", generateGtfsAutonomousChapas);
+}
+const generateGtfsChapasRangeBtnEl = document.getElementById("generateGtfsChapasRangeBtn");
+if (generateGtfsChapasRangeBtnEl) {
+  generateGtfsChapasRangeBtnEl.addEventListener("click", generateGtfsAutonomousChapasRange);
+}
+const exportGtfsChapasDayXlsxBtnEl = document.getElementById("exportGtfsChapasDayXlsxBtn");
+if (exportGtfsChapasDayXlsxBtnEl) {
+  exportGtfsChapasDayXlsxBtnEl.addEventListener("click", () => downloadGtfsAutonomousChapasXlsx("day"));
+}
+const exportGtfsChapasRangeXlsxBtnEl = document.getElementById("exportGtfsChapasRangeXlsxBtn");
+if (exportGtfsChapasRangeXlsxBtnEl) {
+  exportGtfsChapasRangeXlsxBtnEl.addEventListener("click", () => downloadGtfsAutonomousChapasXlsx("range"));
+}
 const refreshVehicleRegistryBtn = document.getElementById("refreshVehicleRegistryBtn");
 if (refreshVehicleRegistryBtn) {
   refreshVehicleRegistryBtn.addEventListener("click", loadVehicleRegistry);
@@ -5648,11 +6148,34 @@ if (deadheadFromDateEl && !deadheadFromDateEl.value) {
 if (deadheadToDateEl && !deadheadToDateEl.value) {
   deadheadToDateEl.value = todayISOInLisbon();
 }
+const depotDeadheadDateEl = document.getElementById("depotDeadheadDate");
+if (depotDeadheadDateEl && !depotDeadheadDateEl.value) {
+  depotDeadheadDateEl.value = todayISOInLisbon();
+}
+const continuityPlanDateEl = document.getElementById("continuityPlanDate");
+if (continuityPlanDateEl && !continuityPlanDateEl.value) {
+  continuityPlanDateEl.value = todayISOInLisbon();
+}
+const gtfsChapasDateEl = document.getElementById("gtfsChapasDate");
+if (gtfsChapasDateEl && !gtfsChapasDateEl.value) {
+  gtfsChapasDateEl.value = todayISOInLisbon();
+}
+const gtfsChapasFromDateEl = document.getElementById("gtfsChapasFromDate");
+if (gtfsChapasFromDateEl && !gtfsChapasFromDateEl.value) {
+  gtfsChapasFromDateEl.value = todayISOInLisbon();
+}
+const gtfsChapasToDateEl = document.getElementById("gtfsChapasToDate");
+if (gtfsChapasToDateEl && !gtfsChapasToDateEl.value) {
+  gtfsChapasToDateEl.value = todayISOInLisbon();
+}
 if (gtfsFeedKeyEl && !gtfsFeedKeyEl.value) {
   gtfsFeedKeyEl.value = "default";
 }
 if (deadheadFromDateEl) deadheadFromDateEl.addEventListener("change", loadDeadheadMovements);
 if (deadheadToDateEl) deadheadToDateEl.addEventListener("change", loadDeadheadMovements);
+if (depotDeadheadDateEl) depotDeadheadDateEl.addEventListener("change", loadDepotDeadheadEstimate);
+if (continuityPlanDateEl) continuityPlanDateEl.addEventListener("change", generateVehicleContinuityPlan);
+if (gtfsChapasDateEl) gtfsChapasDateEl.addEventListener("change", generateGtfsAutonomousChapas);
 if (deadheadFleetFilterEl) {
   deadheadFleetFilterEl.addEventListener("keydown", (event) => {
     if (event.key === "Enter") {

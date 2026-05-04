@@ -45,6 +45,7 @@ async function ensureTrackerTables() {
     `ALTER TABLE tracker_devices
        ADD COLUMN IF NOT EXISTS current_odometer_updated_at TIMESTAMPTZ`
   );
+  await db.query(`ALTER TABLE tracker_devices ADD COLUMN IF NOT EXISTS planning_class VARCHAR(80)`);
   await db.query(
     `CREATE INDEX IF NOT EXISTS idx_tracker_devices_fleet
      ON tracker_devices(fleet_number)`
@@ -885,6 +886,7 @@ router.get("/teltonika/devices", authMiddleware, requireRoles("supervisor", "adm
     await ensureOdometerLogsTable();
     const result = await db.query(
       `SELECT imei, fleet_number, plate_number, provider, is_active,
+              planning_class,
               install_odometer_km, current_odometer_km, current_odometer_updated_at,
               created_at, updated_at
        FROM tracker_devices
@@ -900,6 +902,10 @@ router.post("/teltonika/devices", authMiddleware, requireRoles("supervisor", "ad
   const imei = normalizeImei(req.body?.imei);
   const fleetNumber = String(req.body?.fleetNumber || "").trim() || null;
   const plateNumber = String(req.body?.plateNumber || "").trim() || null;
+  const planningClass =
+    req.body?.planningClass == null || String(req.body.planningClass).trim() === ""
+      ? null
+      : String(req.body.planningClass).trim();
   const isActive = req.body?.isActive !== false;
   const installOdometerKmRaw = req.body?.installOdometerKm;
   const currentOdometerKmRaw = req.body?.currentOdometerKm;
@@ -922,13 +928,14 @@ router.post("/teltonika/devices", authMiddleware, requireRoles("supervisor", "ad
     await ensureOdometerLogsTable();
     const result = await db.query(
       `INSERT INTO tracker_devices (
-         imei, fleet_number, plate_number, provider, is_active,
+         imei, fleet_number, plate_number, planning_class, provider, is_active,
          install_odometer_km, current_odometer_km, current_odometer_updated_at, updated_at
        )
-       VALUES ($1, $2, $3, 'teltonika', $4, $5, $6, CASE WHEN $6 IS NULL THEN NULL ELSE NOW() END, NOW())
+       VALUES ($1, $2, $3, $4, 'teltonika', $5, $6, $7, CASE WHEN $7 IS NULL THEN NULL ELSE NOW() END, NOW())
        ON CONFLICT (imei) DO UPDATE
        SET fleet_number = EXCLUDED.fleet_number,
            plate_number = EXCLUDED.plate_number,
+           planning_class = EXCLUDED.planning_class,
            is_active = EXCLUDED.is_active,
            install_odometer_km = COALESCE(EXCLUDED.install_odometer_km, tracker_devices.install_odometer_km),
            current_odometer_km = COALESCE(EXCLUDED.current_odometer_km, tracker_devices.current_odometer_km),
@@ -937,10 +944,10 @@ router.post("/teltonika/devices", authMiddleware, requireRoles("supervisor", "ad
              ELSE NOW()
            END,
            updated_at = NOW()
-       RETURNING imei, fleet_number, plate_number, provider, is_active,
+       RETURNING imei, fleet_number, plate_number, planning_class, provider, is_active,
                  install_odometer_km, current_odometer_km, current_odometer_updated_at,
                  created_at, updated_at`,
-      [imei, fleetNumber, plateNumber, isActive, installOdometerKm, currentOdometerKm]
+      [imei, fleetNumber, plateNumber, planningClass, isActive, installOdometerKm, currentOdometerKm]
     );
     const saved = result.rows[0];
     if (Number.isFinite(currentOdometerKm)) {

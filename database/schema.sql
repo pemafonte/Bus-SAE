@@ -350,6 +350,30 @@ CREATE INDEX IF NOT EXISTS idx_tracker_devices_fleet
 CREATE INDEX IF NOT EXISTS idx_tracker_devices_plate
   ON tracker_devices(plate_number);
 
+CREATE TABLE IF NOT EXISTS depots (
+  id BIGSERIAL PRIMARY KEY,
+  depot_code VARCHAR(40) UNIQUE,
+  depot_name VARCHAR(120) NOT NULL,
+  lat DOUBLE PRECISION NOT NULL,
+  lng DOUBLE PRECISION NOT NULL,
+  capacity_total INT NOT NULL DEFAULT 0,
+  is_active BOOLEAN NOT NULL DEFAULT TRUE,
+  notes TEXT,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+ALTER TABLE tracker_devices
+  ADD COLUMN IF NOT EXISTS depot_id BIGINT REFERENCES depots(id) ON DELETE SET NULL;
+
+CREATE INDEX IF NOT EXISTS idx_depots_active
+  ON depots(is_active, depot_name);
+CREATE INDEX IF NOT EXISTS idx_tracker_devices_depot
+  ON tracker_devices(depot_id);
+
+ALTER TABLE tracker_devices
+  ADD COLUMN IF NOT EXISTS planning_class VARCHAR(80);
+
 -- ===============================
 -- Incremental migration (2026-04)
 -- ===============================

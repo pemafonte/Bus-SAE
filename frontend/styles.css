@@ -1042,6 +1042,14 @@ select:focus-visible,
   margin-top: 8px;
 }
 
+#depotMap {
+  width: 100%;
+  height: 320px;
+  border-radius: 8px;
+  border: 1px solid #d1d5db;
+  margin-top: 8px;
+}
+
 #gtfsAnalyticsMap {
   width: 100%;
   height: 360px;

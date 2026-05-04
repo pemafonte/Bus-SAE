@@ -112,6 +112,22 @@ function lisbonMinutesOfDay(dateLike) {
   return hh * 60 + mm;
 }
 
+function haversineDistanceKm(lat1, lng1, lat2, lng2) {
+  const aLat = Number(lat1);
+  const aLng = Number(lng1);
+  const bLat = Number(lat2);
+  const bLng = Number(lng2);
+  if (![aLat, aLng, bLat, bLng].every(Number.isFinite)) return null;
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const earthRadiusKm = 6371;
+  const dLat = toRad(bLat - aLat);
+  const dLng = toRad(bLng - aLng);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(aLat)) * Math.cos(toRad(bLat)) * Math.sin(dLng / 2) ** 2;
+  return 2 * earthRadiusKm * Math.asin(Math.sqrt(h));
+}
+
 function parseGtfsTimeToRelativeMinutes(rawTime) {
   const match = String(rawTime || "")
     .trim()
@@ -132,6 +148,450 @@ function parseServiceScheduleRange(rawSchedule) {
   if (!Number.isFinite(start) || !Number.isFinite(end)) return null;
   if (end <= start) return null;
   return { start, end };
+}
+
+function formatDateIso(dateObj) {
+  if (!(dateObj instanceof Date) || Number.isNaN(dateObj.getTime())) return null;
+  const y = dateObj.getUTCFullYear();
+  const m = String(dateObj.getUTCMonth() + 1).padStart(2, "0");
+  const d = String(dateObj.getUTCDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
+}
+
+function enumerateDates(fromIso, toIso, hardLimit = 62) {
+  const from = parseDateOnly(fromIso);
+  const to = parseDateOnly(toIso);
+  if (!from || !to) return [];
+  const start = new Date(`${from}T00:00:00Z`);
+  const end = new Date(`${to}T00:00:00Z`);
+  if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime()) || end < start) return [];
+  const out = [];
+  for (let d = new Date(start); d <= end; d.setUTCDate(d.getUTCDate() + 1)) {
+    out.push(formatDateIso(d));
+    if (out.length >= hardLimit) break;
+  }
+  return out;
+}
+
+function normalizePlanMode(rawMode) {
+  const mode = String(rawMode || "").trim().toLowerCase();
+  if (["conservative", "balanced", "aggressive"].includes(mode)) return mode;
+  return "balanced";
+}
+
+function resolveModeWeights(mode) {
+  if (mode === "conservative") {
+    return { waitWeight: 0.04, deadheadWeight: 2.0, lineChangePenalty: 18 };
+  }
+  if (mode === "aggressive") {
+    return { waitWeight: 0.015, deadheadWeight: 1.0, lineChangePenalty: 4 };
+  }
+  return { waitWeight: 0.025, deadheadWeight: 1.4, lineChangePenalty: 10 };
+}
+
+function parseServiceWindowFromGtfs(row) {
+  const startMin = parseGtfsTimeToRelativeMinutes(row.first_departure_time);
+  const endMin = parseGtfsTimeToRelativeMinutes(row.last_departure_time);
+  if (!Number.isFinite(startMin) || !Number.isFinite(endMin)) return null;
+  const normalizedEnd = endMin <= startMin ? endMin + 24 * 60 : endMin;
+  return {
+    start_min: startMin,
+    end_min: normalizedEnd,
+    drive_min: Math.max(1, normalizedEnd - startMin),
+  };
+}
+
+function estimateCompatCost(prevService, nextService, policy) {
+  const waitMin = Math.max(0, Number(nextService.start_min) - Number(prevService.end_min));
+  const deadheadKm = haversineDistanceKm(prevService.end_lat, prevService.end_lng, nextService.start_lat, nextService.start_lng) || 0;
+  const lineChangePenalty = String(prevService.line_code || "") === String(nextService.line_code || "") ? 0 : policy.lineChangePenalty;
+  const score = waitMin * policy.waitWeight + deadheadKm * policy.deadheadWeight + lineChangePenalty;
+  return { score, wait_min: waitMin, deadhead_km: deadheadKm };
+}
+
+function chooseBestDepotForVehicle(vehicle, depots) {
+  if (!Array.isArray(depots) || !depots.length || !vehicle?.services?.length) return null;
+  const first = vehicle.services[0];
+  const last = vehicle.services[vehicle.services.length - 1];
+  let best = null;
+  for (const depot of depots) {
+    const toFirst = haversineDistanceKm(depot.lat, depot.lng, first.start_lat, first.start_lng) || 0;
+    const fromLast = haversineDistanceKm(last.end_lat, last.end_lng, depot.lat, depot.lng) || 0;
+    const total = toFirst + fromLast;
+    if (!best || total < best.total_deadhead_km) {
+      best = {
+        depot_id: depot.id,
+        depot_name: depot.depot_name,
+        deadhead_to_first_km: Number(toFirst.toFixed(3)),
+        deadhead_back_to_depot_km: Number(fromLast.toFixed(3)),
+        total_deadhead_km: total,
+      };
+    }
+  }
+  if (!best) return null;
+  return {
+    depot_id: best.depot_id,
+    depot_name: best.depot_name,
+    deadhead_to_first_km: best.deadhead_to_first_km,
+    deadhead_back_to_depot_km: best.deadhead_back_to_depot_km,
+    total_deadhead_km: Number(best.total_deadhead_km.toFixed(3)),
+  };
+}
+
+function normalizeLineCodesInput(raw) {
+  if (raw == null || raw === "") return [];
+  const chunks = Array.isArray(raw) ? raw : [raw];
+  const out = new Set();
+  chunks.forEach((item) => {
+    String(item)
+      .split(/[,;\n]/)
+      .map((token) => String(token || "").trim())
+      .filter(Boolean)
+      .forEach((token) => out.add(token.toLowerCase()));
+  });
+  return [...out];
+}
+
+function parseGtfsChapasPlanningParams(queryLike = {}) {
+  const mode = normalizePlanMode(queryLike.mode);
+  const minTurnaroundMin = Number.isFinite(Number(queryLike.minTurnaroundMin))
+    ? Math.min(Math.max(Math.round(Number(queryLike.minTurnaroundMin)), 3), 120)
+    : 10;
+  const maxVehiclesRaw = Number(queryLike.maxVehicles);
+  const maxVehicles = Number.isFinite(maxVehiclesRaw) && maxVehiclesRaw > 0 ? Math.floor(maxVehiclesRaw) : null;
+  const fleetCapFromTrackers = parseBooleanLike(queryLike.fleetCapFromTrackers, false);
+  const planningClassFilter = String(queryLike.planningClass || "").trim();
+  let maxDriveBlockMin = Number(queryLike.maxDriveBlockMin);
+  if (!Number.isFinite(maxDriveBlockMin)) maxDriveBlockMin = 270;
+  maxDriveBlockMin = Math.min(Math.max(Math.round(maxDriveBlockMin), 0), 900);
+  let minRestBetweenBlocksMin = Number(queryLike.minRestBetweenBlocksMin);
+  if (!Number.isFinite(minRestBetweenBlocksMin)) minRestBetweenBlocksMin = 45;
+  minRestBetweenBlocksMin = Math.min(Math.max(Math.round(minRestBetweenBlocksMin), 0), 240);
+  /** Pausa obrigatória ininterrupta (Reg. UE 561/2006 tipo: 45 min após 4h30 condução). */
+  let minUninterruptedBreakMin = Number(
+    queryLike.minUninterruptedBreakMin ?? queryLike.mandatoryBreakMin ?? queryLike.minMandatoryBreakMin
+  );
+  if (!Number.isFinite(minUninterruptedBreakMin)) minUninterruptedBreakMin = minRestBetweenBlocksMin;
+  minUninterruptedBreakMin = Math.min(Math.max(Math.round(minUninterruptedBreakMin), 0), 240);
+  const euSplitBreak = parseBooleanLike(queryLike.euSplitBreak, false);
+  let splitBreakFirstSegmentMin = Number(queryLike.splitBreakFirstSegmentMin);
+  if (!Number.isFinite(splitBreakFirstSegmentMin)) splitBreakFirstSegmentMin = 15;
+  splitBreakFirstSegmentMin = Math.min(Math.max(Math.round(splitBreakFirstSegmentMin), 1), 120);
+  let splitBreakSecondSegmentMin = Number(queryLike.splitBreakSecondSegmentMin);
+  if (!Number.isFinite(splitBreakSecondSegmentMin)) splitBreakSecondSegmentMin = 30;
+  splitBreakSecondSegmentMin = Math.min(Math.max(Math.round(splitBreakSecondSegmentMin), 1), 120);
+  /** Zera contador de bloco após intervalo longo entre serviços sem obrigação UE pendente (0 = desligado). Útil para pernoita ou folga. */
+  let operativeIdleResetMin = Number(queryLike.operativeIdleResetMin ?? queryLike.overnightIdleResetMin);
+  if (!Number.isFinite(operativeIdleResetMin)) operativeIdleResetMin = 0;
+  operativeIdleResetMin = Math.min(Math.max(Math.round(operativeIdleResetMin), 0), 24 * 60);
+  const lineCodesNormalized = normalizeLineCodesInput(queryLike.lineCodes ?? queryLike.lines ?? queryLike.line);
+  return {
+    mode,
+    minTurnaroundMin,
+    fleetCapFromTrackers,
+    planningClassFilter,
+    maxVehicles,
+    maxDriveBlockMin,
+    minRestBetweenBlocksMin,
+    minUninterruptedBreakMin,
+    euSplitBreak,
+    splitBreakFirstSegmentMin,
+    splitBreakSecondSegmentMin,
+    operativeIdleResetMin,
+    lineCodesNormalized,
+  };
+}
+
+async function resolveFleetVehicleCap(planningOpts) {
+  await ensureTrackerTables();
+  let cap = planningOpts?.maxVehicles != null ? planningOpts.maxVehicles : null;
+  if (planningOpts?.fleetCapFromTrackers) {
+    const cls = String(planningOpts.planningClassFilter || "").trim();
+    const counted = await db.query(
+      `SELECT COUNT(*)::int AS c
+       FROM tracker_devices
+       WHERE is_active = TRUE
+         AND (
+           TRIM(COALESCE($1::text, '')) = ''
+           OR LOWER(TRIM(COALESCE(planning_class, ''))) = LOWER(TRIM($1::text)))
+       `,
+      [cls]
+    );
+    const trackersCount = counted.rows[0]?.c ?? 0;
+    cap = cap == null ? trackersCount : Math.min(cap, trackersCount);
+  }
+  return cap;
+}
+
+/** Rótulo legível das opções UE (informação apenas). */
+function plannerRestPolicyDescription(opts) {
+  if (!opts?.euSplitBreak) {
+    return `Pausa única (${opts?.minUninterruptedBreakMin || 45} min) após atingir limite UE de condução continua (${opts?.maxDriveBlockMin || 270} min)`;
+  }
+  const a = opts.splitBreakFirstSegmentMin || 15;
+  const b = opts.splitBreakSecondSegmentMin || 30;
+  const u = opts.minUninterruptedBreakMin ?? opts.minRestBetweenBlocksMin ?? 45;
+  return `Limite UE ${opts?.maxDriveBlockMin || 270} min; depois: ${u} min ininterruptos OU ${a} min num intervalo entre serviços + ${b} min noutro intervalo entre serviços`;
+}
+
+/** Estado interno planeamento viatura (motorista UE simplificado nos intervalos entre serviços). */
+function clonePlannerDutyState(src) {
+  return {
+    drive_acc_since_qualifying_rest_min: Number(src.drive_acc_since_qualifying_rest_min || 0),
+    mandatory_break_pending: !!src.mandatory_break_pending,
+    eu_split_waiting_second_pause: !!src.eu_split_waiting_second_pause,
+  };
+}
+
+function plannerOperationalCarryIdleReset(sim, idleGapMinutes, plannerOpts) {
+  const idle = Math.max(0, Number(idleGapMinutes) || 0);
+  /** Política operacional opcional: intervalos longos (ex. pernoita) zeram bloco mesmo sem modelo UE estrito — desactivável com operativeIdleResetMin=0. */
+  const resetThr = plannerOpts.operativeIdleResetMin;
+  if (!Number.isFinite(resetThr) || resetThr <= 0 || idle < resetThr) return;
+  if (sim.mandatory_break_pending) return;
+  sim.drive_acc_since_qualifying_rest_min = 0;
+  sim.eu_split_waiting_second_pause = false;
+}
+
+/**
+ * Consumo de intervalos entre dois serviços consecutivos pela mesma viatura.
+ * Só conta como descanso o tempo disponível desde o `fim` do anterior até à primeira partida seguinte no GTFS chapeado.
+ */
+function plannerConsumeDutyIdleGap(sim, idleGapMinutes, plannerOpts) {
+  plannerOperationalCarryIdleReset(sim, idleGapMinutes, plannerOpts);
+  const idle = Math.max(0, Number(idleGapMinutes) || 0);
+  const maxDrive = plannerOpts.maxDriveBlockMin;
+  const minUninterrupted = plannerOpts.minUninterruptedBreakMin ?? plannerOpts.minRestBetweenBlocksMin ?? 45;
+  /** Obrigatoriedade forte: após exceder o limite de condução. */
+  if (!sim.mandatory_break_pending || maxDrive <= 0 || idle <= 0) return;
+  if (!plannerOpts.euSplitBreak) {
+    if (idle >= minUninterrupted) {
+      sim.drive_acc_since_qualifying_rest_min = 0;
+      sim.mandatory_break_pending = false;
+      sim.eu_split_waiting_second_pause = false;
+    }
+    return;
+  }
+  const firstSeg = plannerOpts.splitBreakFirstSegmentMin || 15;
+  const secondSeg = plannerOpts.splitBreakSecondSegmentMin || 30;
+  /** Uma só janela pode ser suficiente (ex.: 45 contíguos dispensam parcelas 15/30 seguidas nos mesmos 45…). Preferência explícito: sempre que idle >= uninterrupted, fecha. */
+  if (idle >= minUninterrupted) {
+    sim.drive_acc_since_qualifying_rest_min = 0;
+    sim.mandatory_break_pending = false;
+    sim.eu_split_waiting_second_pause = false;
+    return;
+  }
+  if (!sim.eu_split_waiting_second_pause) {
+    if (idle >= firstSeg) {
+      sim.eu_split_waiting_second_pause = true;
+      return;
+    }
+    return;
+  }
+  /** Aguardamos segundo intervenção de segunda pausa (nova janela entre serviços). */
+  if (idle >= secondSeg) {
+    sim.drive_acc_since_qualifying_rest_min = 0;
+    sim.mandatory_break_pending = false;
+    sim.eu_split_waiting_second_pause = false;
+  }
+}
+
+/** Após cada servício conduzido, atualiza obrigações. */
+function plannerRegisterTripDrive(sim, tripDriveMinutes, plannerOpts) {
+  const dm = Math.max(0, Number(tripDriveMinutes) || 0);
+  sim.drive_acc_since_qualifying_rest_min = Number(sim.drive_acc_since_qualifying_rest_min || 0) + dm;
+  const maxDrive = plannerOpts.maxDriveBlockMin;
+  if (maxDrive > 0 && sim.drive_acc_since_qualifying_rest_min >= maxDrive) {
+    sim.mandatory_break_pending = true;
+    sim.eu_split_waiting_second_pause = false;
+  }
+}
+
+function gtfsPlannerDriverRulesAllow(vehicle, svc, plannerOpts) {
+  const prev = vehicle.services[vehicle.services.length - 1];
+  const maxBlock = plannerOpts.maxDriveBlockMin;
+  const svcDrive = Number(svc.drive_min || 0);
+  if (!prev) {
+    if (maxBlock > 0 && svcDrive > maxBlock) return false;
+    return true;
+  }
+  if (Number(prev.end_min) + plannerOpts.minTurnaroundMin > Number(svc.start_min)) return false;
+  const idleGap = Number(svc.start_min) - Number(prev.end_min);
+  const sim = clonePlannerDutyState({
+    drive_acc_since_qualifying_rest_min: Number(vehicle.drive_acc_since_qualifying_rest_min || 0),
+    mandatory_break_pending: vehicle.mandatory_break_pending,
+    eu_split_waiting_second_pause: vehicle.eu_split_waiting_second_pause,
+  });
+  plannerConsumeDutyIdleGap(sim, idleGap, plannerOpts);
+  /** Condução do próximo bloco só permitida quando não ficou pendência UE. */
+  if (sim.mandatory_break_pending) return false;
+  /** Após ciclo válido não pode já abrir próximo ciclo dentro do próprio GTFS-trip (sem intervalo). */
+  if (maxBlock > 0 && Number(sim.drive_acc_since_qualifying_rest_min || 0) + svcDrive > maxBlock) {
+    return false;
+  }
+  return true;
+}
+
+function gtfsPlannerUpdateDutyStateWithTrip(vehicle, svc, plannerOpts) {
+  const prev = vehicle.services[vehicle.services.length - 1];
+  vehicle.drive_acc_since_qualifying_rest_min = Number(vehicle.drive_acc_since_qualifying_rest_min || 0);
+  vehicle.mandatory_break_pending = !!vehicle.mandatory_break_pending;
+  vehicle.eu_split_waiting_second_pause = !!vehicle.eu_split_waiting_second_pause;
+  if (!prev) {
+    plannerRegisterTripDrive(vehicle, svc.drive_min, plannerOpts);
+    return;
+  }
+  const idleGap = Number(svc.start_min) - Number(prev.end_min);
+  plannerConsumeDutyIdleGap(vehicle, idleGap, plannerOpts);
+  plannerRegisterTripDrive(vehicle, svc.drive_min, plannerOpts);
+}
+
+function gtfsPlannerUpdateDriveAccumulator(vehicle, svc, plannerOpts) {
+  gtfsPlannerUpdateDutyStateWithTrip(vehicle, svc, plannerOpts);
+}
+
+function plannerInitDutyVehicleSkeleton() {
+  return {
+    drive_acc_since_qualifying_rest_min: 0,
+    mandatory_break_pending: false,
+    eu_split_waiting_second_pause: false,
+  };
+}
+
+function buildGtfsChapasFlatRows(plan) {
+  const date = plan.date;
+  const rows = [];
+  (plan.vehicle_plans || []).forEach((vp) => {
+    (vp.services || []).forEach((svc) => {
+      rows.push({
+        data: date,
+        viatura_planeada: vp.vehicle_plan_id,
+        trip_id: svc.trip_id,
+        service_id_gtfs: svc.service_id,
+        linha: svc.line_code,
+        headsign: svc.trip_headsign,
+        origem_paragem: svc.start_stop_name,
+        destino_paragem: svc.end_stop_name,
+        primeira_partida: svc.first_departure_time,
+        ultima_partida: svc.last_departure_time,
+        duracao_servico_min: svc.drive_min,
+        espera_desde_servico_ant_min: svc.waiting_from_previous_min,
+        vazio_desde_servico_ant_km: svc.deadhead_from_previous_km,
+        parque_sugerido: vp.depot_name,
+      });
+    });
+  });
+  return rows;
+}
+
+function buildGtfsChapasUnassignedRows(plan) {
+  const date = plan.date;
+  return (plan.unassigned_services || []).map((svc) => ({
+    data: date,
+    trip_id: svc.trip_id,
+    service_id_gtfs: svc.service_id,
+    linha: svc.line_code,
+    primeira_partida: svc.first_departure_time,
+    ultima_partida: svc.last_departure_time,
+    motivo: svc.unassigned_reason || "sem_slot_compativel",
+    detalhe: svc.unassigned_detail || "",
+  }));
+}
+
+async function respondGtfsChapasDailyXlsx(res, planningOpts, serviceDate, plan) {
+  const wb = XLSX.utils.book_new();
+  const summarySheet = XLSX.utils.json_to_sheet([
+    {
+      data: plan.date,
+      modo: plan.mode,
+      turnaround_minimo: plan.min_turnaround_min,
+      limite_bloco_conducao_min: planningOpts.maxDriveBlockMin,
+      pausa_ue_ininterrupta_min: planningOpts.minUninterruptedBreakMin,
+      pausa_minima_entre_blocos_min: planningOpts.minRestBetweenBlocksMin,
+      pausa_ue_frac_15_30: planningOpts.euSplitBreak ? "sim" : "nao",
+      reset_contador_intervalo_oper_min: planningOpts.operativeIdleResetMin || 0,
+      linhas_filtradas: (plan.line_codes_filter || []).join(", ") || "(todas)",
+      cupo_max_viaturas: plan.fleet_cap_applied ?? "",
+      ...(plan.summary || {}),
+    },
+  ]);
+  XLSX.utils.book_append_sheet(wb, summarySheet, "Resumo");
+  const chapasSheet = XLSX.utils.json_to_sheet(buildGtfsChapasFlatRows(plan));
+  XLSX.utils.book_append_sheet(wb, chapasSheet, "Chapas");
+  const unmatched = buildGtfsChapasUnassignedRows(plan);
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(unmatched.length ? unmatched : [{ info: "Sem serviços por atribuir." }]),
+    "Por_atribuir"
+  );
+  const buffer = XLSX.write(wb, { bookType: "xlsx", type: "buffer" });
+  const safeDate = String(plan.date || serviceDate || "dia").replace(/[^\d-]/g, "");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="chapas-gtfs-${safeDate}-${plan.mode}.xlsx"`
+  );
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  return res.send(buffer);
+}
+
+async function respondGtfsChapasRangeXlsx(res, planningOpts, fromDate, toDate, bundle) {
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet([
+      {
+        periodo_ini: bundle.from_date,
+        periodo_fim: bundle.to_date,
+        modo: bundle.mode,
+        turnaround_minimo: bundle.min_turnaround_min,
+        limite_bloco_conducao_min: planningOpts.maxDriveBlockMin,
+        pausa_ue_ininterrupta_min: planningOpts.minUninterruptedBreakMin,
+        pausa_minima_entre_blocos_min: planningOpts.minRestBetweenBlocksMin,
+        pausa_ue_frac_15_30: planningOpts.euSplitBreak ? "sim" : "nao",
+        reset_contador_intervalo_oper_min: planningOpts.operativeIdleResetMin || 0,
+        linhas_filtradas: (planningOpts.lineCodesNormalized || []).join(", ") || "(todas)",
+        ...bundle.totals,
+      },
+    ]),
+    "Resumo"
+  );
+  const diaRows =
+    bundle.daily_plans?.map((entry) => ({
+      data: entry.date,
+      viaturas: entry.summary?.vehicles_required,
+      servicos_gtfs_atribuidos: entry.summary?.services_assigned,
+      servicos_por_atribuir: entry.summary?.services_unassigned,
+      conducao_total_min: entry.summary?.total_drive_min,
+      vazio_total_km: entry.summary?.total_deadhead_km,
+    })) || [];
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(diaRows.length ? diaRows : [{ info: "Sem dados." }]), "Por_dia");
+  const detalhe = [];
+  (bundle.detailed_daily_plans || []).forEach((plan) => {
+    detalhe.push(...buildGtfsChapasFlatRows(plan));
+  });
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(detalhe.length ? detalhe : [{ info: "Sem chapas geradas." }]),
+    "Detalhe_servicos"
+  );
+  const unRows = [];
+  (bundle.detailed_daily_plans || []).forEach((plan) => {
+    unRows.push(...buildGtfsChapasUnassignedRows(plan));
+  });
+  XLSX.utils.book_append_sheet(
+    wb,
+    XLSX.utils.json_to_sheet(unRows.length ? unRows : [{ info: "Sem filas por atribuir." }]),
+    "Por_atribuir"
+  );
+  const buffer = XLSX.write(wb, { bookType: "xlsx", type: "buffer" });
+  const safeFrom = String(fromDate || "ini").replace(/[^\d-]/g, "");
+  const safeTo = String(toDate || "fim").replace(/[^\d-]/g, "");
+  res.setHeader(
+    "Content-Disposition",
+    `attachment; filename="chapas-gtfs-${safeFrom}_${safeTo}-${bundle.mode}.xlsx"`
+  );
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  return res.send(buffer);
 }
 
 function hasScheduleOverlap(scheduleA, scheduleB) {
@@ -858,6 +1318,7 @@ async function ensureTrackerTables() {
       updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
     )`
   );
+  await db.query(`ALTER TABLE tracker_devices ADD COLUMN IF NOT EXISTS planning_class VARCHAR(80)`);
   await db.query(
     `CREATE INDEX IF NOT EXISTS idx_tracker_devices_fleet
      ON tracker_devices(fleet_number)`
@@ -865,6 +1326,35 @@ async function ensureTrackerTables() {
   await db.query(
     `CREATE INDEX IF NOT EXISTS idx_tracker_devices_plate
      ON tracker_devices(plate_number)`
+  );
+}
+
+async function ensureDepotTables() {
+  await db.query(
+    `CREATE TABLE IF NOT EXISTS depots (
+      id BIGSERIAL PRIMARY KEY,
+      depot_code VARCHAR(40) UNIQUE,
+      depot_name VARCHAR(120) NOT NULL,
+      lat DOUBLE PRECISION NOT NULL,
+      lng DOUBLE PRECISION NOT NULL,
+      capacity_total INT NOT NULL DEFAULT 0,
+      is_active BOOLEAN NOT NULL DEFAULT TRUE,
+      notes TEXT,
+      created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+      updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+    )`
+  );
+  await db.query(
+    `ALTER TABLE tracker_devices
+       ADD COLUMN IF NOT EXISTS depot_id BIGINT REFERENCES depots(id) ON DELETE SET NULL`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_depots_active
+     ON depots(is_active, depot_name)`
+  );
+  await db.query(
+    `CREATE INDEX IF NOT EXISTS idx_tracker_devices_depot
+     ON tracker_devices(depot_id)`
   );
 }
 
@@ -3288,6 +3778,765 @@ router.get("/services/live", async (_req, res) => {
     return res.json(result.rows);
   } catch (_error) {
     return res.status(500).json({ message: "Erro ao listar serviços em execução." });
+  }
+});
+
+router.get("/depots", async (_req, res) => {
+  try {
+    await ensureTrackerTables();
+    await ensureDepotTables();
+    const result = await db.query(
+      `SELECT
+         d.id,
+         d.depot_code,
+         d.depot_name,
+         d.lat,
+         d.lng,
+         d.capacity_total,
+         d.is_active,
+         d.notes,
+         d.updated_at,
+         COUNT(td.id)::int AS assigned_vehicles_count
+       FROM depots d
+       LEFT JOIN tracker_devices td ON td.depot_id = d.id AND td.is_active = TRUE
+       GROUP BY d.id
+       ORDER BY d.depot_name ASC, d.id ASC`
+    );
+    return res.json(result.rows);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao listar parques de pernoita." });
+  }
+});
+
+router.post("/depots", async (req, res) => {
+  const code = String(req.body?.depotCode || "").trim() || null;
+  const name = String(req.body?.depotName || "").trim();
+  const lat = Number(req.body?.lat);
+  const lng = Number(req.body?.lng);
+  const capacityTotalRaw = Number(req.body?.capacityTotal);
+  const isActive = req.body?.isActive !== false;
+  const notes = String(req.body?.notes || "").trim() || null;
+  if (!name) return res.status(400).json({ message: "Indique o nome do parque." });
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) {
+    return res.status(400).json({ message: "Indique latitude/longitude válidas." });
+  }
+  const capacityTotal = Number.isFinite(capacityTotalRaw) ? Math.max(0, Math.round(capacityTotalRaw)) : 0;
+  try {
+    await ensureTrackerTables();
+    await ensureDepotTables();
+    const result = await db.query(
+      `INSERT INTO depots (depot_code, depot_name, lat, lng, capacity_total, is_active, notes, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+       RETURNING id, depot_code, depot_name, lat, lng, capacity_total, is_active, notes, updated_at`,
+      [code, name, lat, lng, capacityTotal, isActive, notes]
+    );
+    return res.status(201).json(result.rows[0]);
+  } catch (error) {
+    if (error?.code === "23505") {
+      return res.status(409).json({ message: "Já existe um parque com esse código." });
+    }
+    return res.status(500).json({ message: "Erro ao criar parque de pernoita." });
+  }
+});
+
+router.patch("/depots/:depotId", async (req, res) => {
+  const depotId = Number(req.params.depotId);
+  if (!Number.isFinite(depotId) || depotId <= 0) {
+    return res.status(400).json({ message: "Identificador de parque inválido." });
+  }
+  const code = req.body?.depotCode == null ? null : String(req.body.depotCode).trim() || null;
+  const name = req.body?.depotName == null ? null : String(req.body.depotName).trim();
+  const lat = req.body?.lat == null ? null : Number(req.body.lat);
+  const lng = req.body?.lng == null ? null : Number(req.body.lng);
+  const capacity = req.body?.capacityTotal == null ? null : Number(req.body.capacityTotal);
+  const isActive = typeof req.body?.isActive === "boolean" ? req.body.isActive : null;
+  const notes = req.body?.notes == null ? null : String(req.body.notes).trim() || null;
+  if (lat != null && !Number.isFinite(lat)) return res.status(400).json({ message: "Latitude inválida." });
+  if (lng != null && !Number.isFinite(lng)) return res.status(400).json({ message: "Longitude inválida." });
+  if (capacity != null && !Number.isFinite(capacity)) return res.status(400).json({ message: "Capacidade inválida." });
+  try {
+    await ensureTrackerTables();
+    await ensureDepotTables();
+    const result = await db.query(
+      `UPDATE depots
+       SET depot_code = COALESCE($2, depot_code),
+           depot_name = COALESCE(NULLIF($3, ''), depot_name),
+           lat = COALESCE($4, lat),
+           lng = COALESCE($5, lng),
+           capacity_total = COALESCE($6, capacity_total),
+           is_active = COALESCE($7, is_active),
+           notes = COALESCE($8, notes),
+           updated_at = NOW()
+       WHERE id = $1
+       RETURNING id, depot_code, depot_name, lat, lng, capacity_total, is_active, notes, updated_at`,
+      [depotId, code, name, lat, lng, capacity == null ? null : Math.max(0, Math.round(capacity)), isActive, notes]
+    );
+    if (!result.rowCount) return res.status(404).json({ message: "Parque não encontrado." });
+    return res.json(result.rows[0]);
+  } catch (error) {
+    if (error?.code === "23505") {
+      return res.status(409).json({ message: "Já existe um parque com esse código." });
+    }
+    return res.status(500).json({ message: "Erro ao atualizar parque de pernoita." });
+  }
+});
+
+router.patch("/vehicles/:imei/depot", async (req, res) => {
+  const imei = String(req.params.imei || "").replace(/\D/g, "");
+  const depotId = Number(req.body?.depotId);
+  if (!imei) return res.status(400).json({ message: "IMEI inválido." });
+  if (!Number.isFinite(depotId) || depotId <= 0) {
+    return res.status(400).json({ message: "Selecione um parque válido." });
+  }
+  try {
+    await ensureTrackerTables();
+    await ensureDepotTables();
+    const depotRes = await db.query(`SELECT id FROM depots WHERE id = $1 LIMIT 1`, [depotId]);
+    if (!depotRes.rowCount) return res.status(404).json({ message: "Parque não encontrado." });
+    const result = await db.query(
+      `UPDATE tracker_devices
+       SET depot_id = $2, updated_at = NOW()
+       WHERE imei = $1
+       RETURNING imei, fleet_number, plate_number, depot_id`,
+      [imei, depotId]
+    );
+    if (!result.rowCount) return res.status(404).json({ message: "Viatura não encontrada para o IMEI indicado." });
+    return res.json(result.rows[0]);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao associar viatura ao parque." });
+  }
+});
+
+async function fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormalized = []) {
+  const dateIso = parseDateOnly(serviceDate) || parseDateOnly(new Date().toISOString().slice(0, 10));
+  if (!dateIso) return [];
+  const dateObj = new Date(`${dateIso}T00:00:00Z`);
+  const jsWeekday = dateObj.getUTCDay();
+  const weekday = jsWeekday === 0 ? 7 : jsWeekday; // 1..7, Monday-first
+  const lineFilter = Array.isArray(lineCodesNormalized) ? lineCodesNormalized.map((code) => String(code || "").trim().toLowerCase()).filter(Boolean) : [];
+  const result = await db.query(
+    `WITH target_feed AS (
+       SELECT feed_key
+       FROM gtfs_feeds
+       WHERE is_active = TRUE
+       ORDER BY updated_at DESC NULLS LAST, created_at DESC NULLS LAST
+       LIMIT 1
+     ),
+     trip_base AS (
+       SELECT
+         t.trip_id,
+         t.service_id,
+         t.feed_key,
+         COALESCE(NULLIF(TRIM(r.route_short_name), ''), NULLIF(TRIM(r.route_long_name), ''), t.route_id) AS line_code,
+         t.trip_headsign
+       FROM gtfs_trips t
+       JOIN gtfs_routes r ON r.route_id = t.route_id
+       JOIN target_feed tf ON tf.feed_key = t.feed_key
+     ),
+     active_flags AS (
+       SELECT
+         tb.trip_id,
+         tb.service_id,
+         tb.feed_key,
+         tb.line_code,
+         tb.trip_headsign,
+         EXISTS (
+           SELECT 1
+           FROM gtfs_calendars c
+           WHERE c.feed_key = tb.feed_key
+             AND c.service_id = tb.service_id
+             AND c.is_active = TRUE
+             AND $1::date BETWEEN c.start_date AND c.end_date
+             AND CASE $2::int
+                   WHEN 1 THEN c.monday
+                   WHEN 2 THEN c.tuesday
+                   WHEN 3 THEN c.wednesday
+                   WHEN 4 THEN c.thursday
+                   WHEN 5 THEN c.friday
+                   WHEN 6 THEN c.saturday
+                   WHEN 7 THEN c.sunday
+                   ELSE 0
+                 END = 1
+         ) AS base_active,
+         EXISTS (
+           SELECT 1
+           FROM gtfs_calendar_dates cd
+           WHERE cd.feed_key = tb.feed_key
+             AND cd.service_id = tb.service_id
+             AND cd.calendar_date = $1::date
+             AND cd.exception_type = 1
+         ) AS added_by_exception,
+         EXISTS (
+           SELECT 1
+           FROM gtfs_calendar_dates cd
+           WHERE cd.feed_key = tb.feed_key
+             AND cd.service_id = tb.service_id
+             AND cd.calendar_date = $1::date
+             AND cd.exception_type = 2
+         ) AS removed_by_exception
+       FROM trip_base tb
+     )
+     SELECT
+       af.trip_id,
+       af.service_id,
+       af.line_code,
+       af.trip_headsign,
+       fst.departure_time AS first_departure_time,
+       lst.departure_time AS last_departure_time,
+       fs.stop_name AS start_stop_name,
+       fs.stop_lat AS start_lat,
+       fs.stop_lon AS start_lng,
+       ls.stop_name AS end_stop_name,
+       ls.stop_lat AS end_lat,
+       ls.stop_lon AS end_lng
+     FROM active_flags af
+     LEFT JOIN LATERAL (
+       SELECT st.departure_time, st.stop_id
+       FROM gtfs_stop_times st
+       WHERE st.feed_key = af.feed_key
+         AND st.trip_id = af.trip_id
+       ORDER BY st.stop_sequence ASC
+       LIMIT 1
+     ) fst ON TRUE
+     LEFT JOIN LATERAL (
+       SELECT st.departure_time, st.stop_id
+       FROM gtfs_stop_times st
+       WHERE st.feed_key = af.feed_key
+         AND st.trip_id = af.trip_id
+       ORDER BY st.stop_sequence DESC
+       LIMIT 1
+     ) lst ON TRUE
+    LEFT JOIN gtfs_stops fs ON fs.feed_key = af.feed_key AND fs.stop_id = fst.stop_id
+    LEFT JOIN gtfs_stops ls ON ls.feed_key = af.feed_key AND ls.stop_id = lst.stop_id
+    WHERE (af.base_active OR af.added_by_exception)
+      AND NOT af.removed_by_exception
+      AND (
+        COALESCE(array_length($3::text[], 1), 0) = 0
+        OR LOWER(TRIM(COALESCE(af.line_code, ''))) = ANY ($3::text[])
+      )`,
+    [dateIso, weekday, lineFilter]
+  );
+  return result.rows
+    .map((row) => {
+      const window = parseServiceWindowFromGtfs(row);
+      if (!window) return null;
+      return {
+        ...row,
+        service_code: row.trip_id,
+        ...window,
+      };
+    })
+    .filter(Boolean)
+    .sort((a, b) => Number(a.start_min) - Number(b.start_min));
+}
+
+async function buildAutonomousChapasPlan(serviceDate, options = {}) {
+  const minTurnaroundMin = Number.isFinite(Number(options.minTurnaroundMin))
+    ? Math.min(Math.max(Math.round(Number(options.minTurnaroundMin)), 3), 120)
+    : 10;
+  const mode = normalizePlanMode(options.mode);
+  const modePolicy = resolveModeWeights(mode);
+  const lineCodesNormalized = Array.isArray(options.lineCodesNormalized) ? options.lineCodesNormalized : [];
+  const maxDriveBlockMin = Number.isFinite(Number(options.maxDriveBlockMin))
+    ? Math.min(Math.max(Math.round(Number(options.maxDriveBlockMin)), 0), 900)
+    : 270;
+  const minRestBetweenBlocksMin = Number.isFinite(Number(options.minRestBetweenBlocksMin))
+    ? Math.min(Math.max(Math.round(Number(options.minRestBetweenBlocksMin)), 0), 240)
+    : 45;
+  const minUninterruptedBreakMin = Number.isFinite(Number(options.minUninterruptedBreakMin))
+    ? Math.min(Math.max(Math.round(Number(options.minUninterruptedBreakMin)), 0), 240)
+    : minRestBetweenBlocksMin;
+  const euSplitBreak = parseBooleanLike(options.euSplitBreak, false);
+  const splitBreakFirstSegmentMin = Number.isFinite(Number(options.splitBreakFirstSegmentMin))
+    ? Math.min(Math.max(Math.round(Number(options.splitBreakFirstSegmentMin)), 1), 120)
+    : 15;
+  const splitBreakSecondSegmentMin = Number.isFinite(Number(options.splitBreakSecondSegmentMin))
+    ? Math.min(Math.max(Math.round(Number(options.splitBreakSecondSegmentMin)), 1), 120)
+    : 30;
+  let operativeIdleResetMin = Number(options.operativeIdleResetMin);
+  if (!Number.isFinite(operativeIdleResetMin)) operativeIdleResetMin = 0;
+  operativeIdleResetMin = Math.min(Math.max(Math.round(operativeIdleResetMin), 0), 24 * 60);
+  const plannerDriverOpts = {
+    minTurnaroundMin,
+    maxDriveBlockMin,
+    minRestBetweenBlocksMin,
+    minUninterruptedBreakMin,
+    euSplitBreak,
+    splitBreakFirstSegmentMin,
+    splitBreakSecondSegmentMin,
+    operativeIdleResetMin,
+  };
+  await ensureDepotTables();
+  const depotsRes = await db.query(
+    `SELECT id, depot_name, lat, lng
+     FROM depots
+     WHERE is_active = TRUE
+     ORDER BY depot_name ASC`
+  );
+  const depots = depotsRes.rows || [];
+  const fleetCap = await resolveFleetVehicleCap(options);
+  const candidates = await fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormalized);
+  const unassignedServices = [];
+  const vehicles = [];
+  let nextVehicleId = 1;
+  const canOpenNewVehicle = () => fleetCap == null || vehicles.length < fleetCap;
+
+  for (const svc of candidates) {
+    let bestVehicle = null;
+    let bestMeta = null;
+    for (const vehicle of vehicles) {
+      if (!vehicle?.services?.length) continue;
+      const last = vehicle.services[vehicle.services.length - 1];
+      if (!last) continue;
+      if (!gtfsPlannerDriverRulesAllow(vehicle, svc, plannerDriverOpts)) continue;
+      const meta = estimateCompatCost(last, svc, modePolicy);
+      if (!bestMeta || meta.score < bestMeta.score) {
+        bestMeta = meta;
+        bestVehicle = vehicle;
+      }
+    }
+    let chosen = bestVehicle;
+    let meta = bestMeta;
+    if (!chosen && canOpenNewVehicle()) {
+      chosen = {
+        vehicle_plan_id: `AUTO-${String(nextVehicleId).padStart(3, "0")}`,
+        services: [],
+        ...plannerInitDutyVehicleSkeleton(),
+      };
+      nextVehicleId += 1;
+      vehicles.push(chosen);
+      meta = { score: 0, wait_min: 0, deadhead_km: 0 };
+    }
+    if (!chosen) {
+      unassignedServices.push({
+        ...svc,
+        unassigned_reason: fleetCap != null ? "cupo_viaturas_atribuicao_impossivel" : "sem_viatura_compative",
+        unassigned_detail:
+          fleetCap != null ? `Limite físico (${fleetCap} viaturas) com regras de pausa/rotação.` : "Sem viatura válida cumprindo turnaround e pausas.",
+      });
+      continue;
+    }
+    const prevSvc = chosen.services[chosen.services.length - 1];
+    let waitMin = 0;
+    let deadKm = 0;
+    if (prevSvc && meta) {
+      waitMin = Math.round(Number(meta.wait_min ?? 0));
+      deadKm = Number((meta.deadhead_km ?? 0).toFixed(3));
+    }
+    chosen.services.push({
+      ...svc,
+      deadhead_from_previous_km: deadKm,
+      waiting_from_previous_min: waitMin,
+    });
+    gtfsPlannerUpdateDriveAccumulator(chosen, svc, plannerDriverOpts);
+  }
+
+  const vehiclePlans = vehicles.map((vehicle) => {
+    const assignedDepot = chooseBestDepotForVehicle(vehicle, depots);
+    const driveMin = vehicle.services.reduce((acc, s) => acc + Number(s.drive_min || 0), 0);
+    const interServiceDeadhead = vehicle.services.reduce((acc, s) => acc + Number(s.deadhead_from_previous_km || 0), 0);
+    return {
+      vehicle_plan_id: vehicle.vehicle_plan_id,
+      depot_id: assignedDepot?.depot_id || null,
+      depot_name: assignedDepot?.depot_name || null,
+      deadhead_to_first_km: assignedDepot?.deadhead_to_first_km ?? null,
+      deadhead_back_to_depot_km: assignedDepot?.deadhead_back_to_depot_km ?? null,
+      total_deadhead_km: Number((interServiceDeadhead + Number(assignedDepot?.total_deadhead_km || 0)).toFixed(3)),
+      total_drive_min: Math.round(driveMin),
+      services_count: vehicle.services.length,
+      services: vehicle.services,
+    };
+  });
+
+  const summary = vehiclePlans.reduce(
+    (acc, plan) => {
+      acc.vehicles_required += 1;
+      acc.services_total += Number(plan.services_count || 0);
+      acc.total_drive_min += Number(plan.total_drive_min || 0);
+      acc.total_deadhead_km += Number(plan.total_deadhead_km || 0);
+      if (!plan.depot_id) acc.vehicles_without_depot += 1;
+      return acc;
+    },
+    {
+      vehicles_required: 0,
+      services_total: 0,
+      total_drive_min: 0,
+      total_deadhead_km: 0,
+      vehicles_without_depot: 0,
+    }
+  );
+  const warnings = [];
+  if (maxDriveBlockMin > 0) {
+    const longBlocks = candidates.filter((trip) => Number(trip.drive_min) > maxDriveBlockMin);
+    if (longBlocks.length) {
+      warnings.push(`${longBlocks.length} serviços excedem o limite ${maxDriveBlockMin} min (condução contínua do trip GTFS).`);
+    }
+  }
+  return {
+    date: parseDateOnly(serviceDate),
+    mode,
+    min_turnaround_min: minTurnaroundMin,
+    line_codes_filter: lineCodesNormalized,
+    fleet_cap_applied: fleetCap,
+    fleet_cap_from_trackers: parseBooleanLike(options.fleetCapFromTrackers, false),
+    planning_class_filter: options.planningClassFilter || "",
+    constraints: {
+      ...plannerDriverOpts,
+      regulatory_reference_hint:
+        "Alinhamento simplificado aos tempos obrigatórios de pausa após o limiar de condução contínua (Reg. UE 561/2006 tipo 4h30 + 45 min); viagens GTFS inteiras são atómicas (sem parte do trip).",
+      policy_description_pt: plannerRestPolicyDescription(plannerDriverOpts),
+    },
+    warnings,
+    unassigned_services: unassignedServices,
+    summary: {
+      ...summary,
+      services_gtfs_candidates: candidates.length,
+      services_assigned: summary.services_total,
+      services_unassigned: unassignedServices.length,
+      total_deadhead_km: Number(summary.total_deadhead_km.toFixed(3)),
+      average_drive_min_per_vehicle: summary.vehicles_required
+        ? Math.round(summary.total_drive_min / summary.vehicles_required)
+        : 0,
+    },
+    vehicle_plans: vehiclePlans,
+  };
+}
+
+router.get("/planning/gtfs-autonomous-chapas", async (req, res) => {
+  try {
+    const plannerOpts = parseGtfsChapasPlanningParams(req.query);
+    const date =
+      parseDateOnly(String(req.query.date || "").trim()) || parseDateOnly(new Date().toISOString().slice(0, 10));
+    const plan = await buildAutonomousChapasPlan(date, plannerOpts);
+    if (String(req.query.format || "").trim().toLowerCase() === "xlsx") {
+      return respondGtfsChapasDailyXlsx(res, plannerOpts, date, plan);
+    }
+    return res.json(plan);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao gerar chapas automáticas por GTFS." });
+  }
+});
+
+router.get("/planning/gtfs-autonomous-chapas-range", async (req, res) => {
+  try {
+    const fromDate = parseDateOnly(String(req.query.fromDate || "").trim());
+    const toDate = parseDateOnly(String(req.query.toDate || "").trim());
+    const plannerOpts = parseGtfsChapasPlanningParams(req.query);
+    const days = enumerateDates(fromDate, toDate, 92);
+    if (!days.length) {
+      return res.status(400).json({ message: "Período inválido. Indique fromDate e toDate válidas." });
+    }
+    if (String(req.query.format || "").trim().toLowerCase() === "xlsx" && days.length > 62) {
+      return res.status(400).json({ message: "Exportação Excel limitada a 62 dias nesta versão. Reduza o período." });
+    }
+    const dailyPlansFull = [];
+    for (const day of days) {
+      // Serie diaria para KPIs mensais e exportação detalhada.
+      // eslint-disable-next-line no-await-in-loop
+      dailyPlansFull.push(await buildAutonomousChapasPlan(day, plannerOpts));
+    }
+    const totals = dailyPlansFull.reduce(
+      (acc, p) => {
+        acc.days += 1;
+        acc.services_total += Number(p?.summary?.services_total || 0);
+        acc.services_unassigned_total += Number(p?.summary?.services_unassigned || 0);
+        acc.vehicle_days += Number(p?.summary?.vehicles_required || 0);
+        acc.total_drive_min += Number(p?.summary?.total_drive_min || 0);
+        acc.total_deadhead_km += Number(p?.summary?.total_deadhead_km || 0);
+        return acc;
+      },
+      {
+        days: 0,
+        services_total: 0,
+        services_unassigned_total: 0,
+        vehicle_days: 0,
+        total_drive_min: 0,
+        total_deadhead_km: 0,
+      }
+    );
+    const bundle = {
+      from_date: fromDate,
+      to_date: toDate,
+      mode: plannerOpts.mode,
+      min_turnaround_min: plannerOpts.minTurnaroundMin,
+      totals: {
+        ...totals,
+        total_deadhead_km: Number(totals.total_deadhead_km.toFixed(3)),
+        average_vehicles_per_day: totals.days ? Number((totals.vehicle_days / totals.days).toFixed(2)) : 0,
+      },
+      daily_plans: dailyPlansFull.map((p) => ({
+        date: p.date,
+        summary: p.summary,
+      })),
+      detailed_daily_plans: dailyPlansFull,
+    };
+
+    if (String(req.query.format || "").trim().toLowerCase() === "xlsx") {
+      return respondGtfsChapasRangeXlsx(res, plannerOpts, fromDate, toDate, bundle);
+    }
+    return res.json(bundle);
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao gerar cenário GTFS para o período." });
+  }
+});
+
+router.get("/depots/deadhead-estimate", async (req, res) => {
+  try {
+    const dateRaw = String(req.query.date || "").trim();
+    const serviceDate = dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? dateRaw : null;
+    await ensureTrackerTables();
+    await ensureDepotTables();
+    await ensurePlannedServiceLocationColumns();
+    const result = await db.query(
+      `WITH roster_base AS (
+         SELECT
+           dr.service_date,
+           td.imei,
+           td.fleet_number,
+           td.plate_number,
+           td.depot_id,
+           d.depot_name,
+           d.lat AS depot_lat,
+           d.lng AS depot_lng,
+           ps.start_location,
+           ps.end_location,
+           ps.service_schedule,
+           substring(COALESCE(ps.service_schedule, '') FROM '(\\d{1,2}:\\d{2})') AS hhmm_start,
+           substring(COALESCE(ps.service_schedule, '') FROM '-\\s*(\\d{1,2}:\\d{2})') AS hhmm_end
+         FROM daily_roster dr
+         JOIN planned_services ps ON ps.id = dr.planned_service_id
+         JOIN tracker_devices td
+           ON (
+             LOWER(TRIM(COALESCE(td.fleet_number, ''))) = LOWER(TRIM(COALESCE(ps.fleet_number, '')))
+             OR LOWER(TRIM(COALESCE(td.plate_number, ''))) = LOWER(TRIM(COALESCE(ps.plate_number, '')))
+           )
+         LEFT JOIN depots d ON d.id = td.depot_id
+         WHERE dr.service_date = COALESCE($1::date, CURRENT_DATE)
+           AND td.is_active = TRUE
+           AND COALESCE(ps.kms_carga, 0) > 0
+       ),
+       starts AS (
+         SELECT DISTINCT ON (imei)
+           imei, fleet_number, plate_number, depot_id, depot_name, depot_lat, depot_lng, service_date, start_location
+         FROM roster_base
+         ORDER BY imei, hhmm_start ASC NULLS LAST
+       ),
+       ends AS (
+         SELECT DISTINCT ON (imei)
+           imei, end_location
+         FROM roster_base
+         ORDER BY imei, hhmm_end DESC NULLS LAST
+       )
+       SELECT
+         s.imei,
+         s.fleet_number,
+         s.plate_number,
+         s.depot_id,
+         s.depot_name,
+         s.depot_lat,
+         s.depot_lng,
+         s.service_date,
+         s.start_location,
+         e.end_location,
+         fp.first_lat,
+         fp.first_lng,
+         lp.last_lat,
+         lp.last_lng
+       FROM starts s
+       LEFT JOIN ends e ON e.imei = s.imei
+       LEFT JOIN LATERAL (
+         SELECT sp.lat AS first_lat, sp.lng AS first_lng
+         FROM services sv
+         JOIN service_points sp ON sp.service_id = sv.id
+         WHERE ((sv.started_at AT TIME ZONE 'Europe/Lisbon')::date) = s.service_date
+           AND (
+             LOWER(TRIM(COALESCE(sv.fleet_number, ''))) = LOWER(TRIM(COALESCE(s.fleet_number, '')))
+             OR LOWER(TRIM(COALESCE(sv.plate_number, ''))) = LOWER(TRIM(COALESCE(s.plate_number, '')))
+           )
+         ORDER BY sp.captured_at ASC
+         LIMIT 1
+       ) fp ON TRUE
+       LEFT JOIN LATERAL (
+         SELECT sp.lat AS last_lat, sp.lng AS last_lng
+         FROM services sv
+         JOIN service_points sp ON sp.service_id = sv.id
+         WHERE ((sv.started_at AT TIME ZONE 'Europe/Lisbon')::date) = s.service_date
+           AND (
+             LOWER(TRIM(COALESCE(sv.fleet_number, ''))) = LOWER(TRIM(COALESCE(s.fleet_number, '')))
+             OR LOWER(TRIM(COALESCE(sv.plate_number, ''))) = LOWER(TRIM(COALESCE(s.plate_number, '')))
+           )
+         ORDER BY sp.captured_at DESC
+         LIMIT 1
+       ) lp ON TRUE
+       ORDER BY s.fleet_number ASC NULLS LAST, s.imei ASC`,
+      [serviceDate]
+    );
+
+    const rows = result.rows.map((row) => {
+      const startDistanceKm = haversineDistanceKm(row.depot_lat, row.depot_lng, row.first_lat, row.first_lng);
+      const endDistanceKm = haversineDistanceKm(row.last_lat, row.last_lng, row.depot_lat, row.depot_lng);
+      return {
+        ...row,
+        deadhead_to_first_service_km: startDistanceKm == null ? null : Number(startDistanceKm.toFixed(3)),
+        deadhead_back_to_depot_km: endDistanceKm == null ? null : Number(endDistanceKm.toFixed(3)),
+      };
+    });
+    const totals = rows.reduce(
+      (acc, row) => {
+        acc.vehicles += 1;
+        acc.estimated_deadhead_km += Number(row.deadhead_to_first_service_km || 0) + Number(row.deadhead_back_to_depot_km || 0);
+        if (!row.depot_id) acc.vehicles_without_depot += 1;
+        return acc;
+      },
+      { vehicles: 0, vehicles_without_depot: 0, estimated_deadhead_km: 0 }
+    );
+
+    return res.json({
+      date: serviceDate || null,
+      totals: {
+        ...totals,
+        estimated_deadhead_km: Number(totals.estimated_deadhead_km.toFixed(3)),
+      },
+      rows,
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao calcular estimativa de vazio por parque." });
+  }
+});
+
+router.get("/planning/vehicle-continuity", async (req, res) => {
+  try {
+    const dateRaw = String(req.query.date || "").trim();
+    const serviceDate = dateRaw && /^\d{4}-\d{2}-\d{2}$/.test(dateRaw) ? dateRaw : null;
+    const maxDriveRaw = Number(req.query.maxDriveMin);
+    const maxDriveMin = Number.isFinite(maxDriveRaw) ? Math.min(Math.max(Math.round(maxDriveRaw), 60), 900) : 540;
+    await ensurePlannedServiceLocationColumns();
+    const result = await db.query(
+      `SELECT
+         dr.id AS roster_id,
+         dr.service_date,
+         ps.id AS planned_service_id,
+         ps.service_code,
+         ps.line_code,
+         ps.fleet_number,
+         ps.plate_number,
+         ps.service_schedule,
+         ps.start_location,
+         ps.end_location,
+         ps.kms_carga
+       FROM daily_roster dr
+       JOIN planned_services ps ON ps.id = dr.planned_service_id
+       WHERE dr.service_date = COALESCE($1::date, CURRENT_DATE)
+         AND COALESCE(ps.kms_carga, 0) > 0
+       ORDER BY ps.line_code ASC NULLS LAST, ps.service_schedule ASC NULLS LAST`,
+      [serviceDate]
+    );
+
+    const services = result.rows.map((row) => {
+      const range = parseServiceScheduleRange(row.service_schedule);
+      const driveMin = range ? Math.max(1, range.end - range.start) : 240;
+      const startMin = range ? range.start : 9999;
+      return {
+        ...row,
+        drive_min: driveMin,
+        start_min: startMin,
+      };
+    });
+
+    const byLine = new Map();
+    const proposedVehicleMinutes = new Map();
+    const currentVehicleMinutes = new Map();
+    services.forEach((svc) => {
+      const line = String(svc.line_code || "").trim() || "(sem linha)";
+      if (!byLine.has(line)) byLine.set(line, []);
+      byLine.get(line).push({ ...svc });
+      const fleet = String(svc.fleet_number || "").trim() || "(sem frota)";
+      currentVehicleMinutes.set(fleet, Number(currentVehicleMinutes.get(fleet) || 0) + Number(svc.drive_min || 0));
+      proposedVehicleMinutes.set(fleet, Number(proposedVehicleMinutes.get(fleet) || 0) + Number(svc.drive_min || 0));
+    });
+
+    const linePlans = [];
+    let totalCurrentTransfers = 0;
+    let totalProposedTransfers = 0;
+    let totalSuggestedReassignments = 0;
+
+    for (const [lineCode, lineRowsRaw] of byLine.entries()) {
+      const lineRows = [...lineRowsRaw].sort((a, b) => Number(a.start_min) - Number(b.start_min));
+      const fleetDurationMap = new Map();
+      lineRows.forEach((svc) => {
+        const fleet = String(svc.fleet_number || "").trim() || "(sem frota)";
+        fleetDurationMap.set(fleet, Number(fleetDurationMap.get(fleet) || 0) + Number(svc.drive_min || 0));
+      });
+      const dominantFleet = [...fleetDurationMap.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || "(sem frota)";
+
+      let currentTransfers = 0;
+      for (let i = 1; i < lineRows.length; i += 1) {
+        if (String(lineRows[i - 1].fleet_number || "") !== String(lineRows[i].fleet_number || "")) currentTransfers += 1;
+      }
+
+      const proposedRows = lineRows.map((r) => ({ ...r, proposed_fleet_number: r.fleet_number }));
+      const suggestedReassignments = [];
+      for (const svc of proposedRows) {
+        const fromFleet = String(svc.proposed_fleet_number || "").trim() || "(sem frota)";
+        if (fromFleet === dominantFleet) continue;
+        const duration = Number(svc.drive_min || 0);
+        const dominantCurrent = Number(proposedVehicleMinutes.get(dominantFleet) || 0);
+        if (dominantCurrent + duration > maxDriveMin) continue;
+        proposedVehicleMinutes.set(dominantFleet, dominantCurrent + duration);
+        proposedVehicleMinutes.set(fromFleet, Math.max(0, Number(proposedVehicleMinutes.get(fromFleet) || 0) - duration));
+        svc.proposed_fleet_number = dominantFleet;
+        suggestedReassignments.push({
+          planned_service_id: svc.planned_service_id,
+          service_code: svc.service_code,
+          service_schedule: svc.service_schedule,
+          from_fleet_number: fromFleet,
+          to_fleet_number: dominantFleet,
+          drive_min: duration,
+        });
+      }
+
+      let proposedTransfers = 0;
+      for (let i = 1; i < proposedRows.length; i += 1) {
+        if (String(proposedRows[i - 1].proposed_fleet_number || "") !== String(proposedRows[i].proposed_fleet_number || "")) {
+          proposedTransfers += 1;
+        }
+      }
+
+      totalCurrentTransfers += currentTransfers;
+      totalProposedTransfers += proposedTransfers;
+      totalSuggestedReassignments += suggestedReassignments.length;
+      linePlans.push({
+        line_code: lineCode,
+        dominant_fleet_number: dominantFleet,
+        services_count: lineRows.length,
+        current_transfers: currentTransfers,
+        proposed_transfers: proposedTransfers,
+        transfer_reduction: currentTransfers - proposedTransfers,
+        suggested_reassignments: suggestedReassignments,
+      });
+    }
+
+    linePlans.sort((a, b) => b.transfer_reduction - a.transfer_reduction);
+    return res.json({
+      date: serviceDate || null,
+      max_drive_min_per_vehicle: maxDriveMin,
+      summary: {
+        lines: linePlans.length,
+        current_transfers: totalCurrentTransfers,
+        proposed_transfers: totalProposedTransfers,
+        transfer_reduction: totalCurrentTransfers - totalProposedTransfers,
+        suggested_reassignments: totalSuggestedReassignments,
+      },
+      line_plans: linePlans,
+      vehicle_minutes: [...proposedVehicleMinutes.entries()]
+        .map(([fleet_number, total_drive_min]) => ({ fleet_number, total_drive_min }))
+        .sort((a, b) => b.total_drive_min - a.total_drive_min),
+      current_vehicle_minutes: [...currentVehicleMinutes.entries()]
+        .map(([fleet_number, total_drive_min]) => ({ fleet_number, total_drive_min }))
+        .sort((a, b) => b.total_drive_min - a.total_drive_min),
+    });
+  } catch (_error) {
+    return res.status(500).json({ message: "Erro ao gerar plano de continuidade por viatura." });
   }
 });
 
