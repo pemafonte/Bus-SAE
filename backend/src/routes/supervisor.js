@@ -128,6 +128,44 @@ function haversineDistanceKm(lat1, lng1, lat2, lng2) {
   return 2 * earthRadiusKm * Math.asin(Math.sqrt(h));
 }
 
+/** Vazio encadeado tratado como nulo quando o terminal operacional é o mesmo (Largo José Lúcio e variantes de nome). */
+const GTFS_CHAPAS_HUB_SAME_TERMINAL_MAX_KM = 0.28;
+
+function normalizeChapasStopLabelForHub(raw) {
+  return String(raw || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Identifica paragens do hub «Largo José Lúcio» / «Lg. José Lúcio» (GTFS pode repetir códigos/nomes ligeiramente diferentes). */
+function stopMatchesLargoJoseLucioHub(stopName) {
+  const s = normalizeChapasStopLabelForHub(stopName);
+  if (!s || !s.includes("lucio")) return false;
+  const jose = /\bjose\b/.test(s) || s.includes(" jose");
+  if (!jose) return false;
+  return /\blg\.?\b/.test(s) || s.includes("largo");
+}
+
+/**
+ * Quilómetros de vazio entre fim de um serviço e início do seguinte na mesma chapa.
+ * Se o serviço anterior termina no Largo José Lúcio e o seguinte inicia nesse terminal (nome ou muito perto), usa 0 km
+ * para o planeador e para o Excel — evita penalizar encadeamentos correctos com paragens GTFS duplicadas no mesmo local.
+ */
+function gtfsChapasChainingDeadheadKm(prevService, nextService) {
+  if (!prevService || !nextService) return 0;
+  const km = haversineDistanceKm(prevService.end_lat, prevService.end_lng, nextService.start_lat, nextService.start_lng);
+  const geoKm = km == null ? Infinity : km;
+  const endHub = stopMatchesLargoJoseLucioHub(prevService.end_stop_name);
+  const startHub = stopMatchesLargoJoseLucioHub(nextService.start_stop_name);
+  if (endHub && startHub) return 0;
+  if (endHub && geoKm <= GTFS_CHAPAS_HUB_SAME_TERMINAL_MAX_KM) return 0;
+  if (startHub && geoKm <= GTFS_CHAPAS_HUB_SAME_TERMINAL_MAX_KM) return 0;
+  return km || 0;
+}
+
 function parseGtfsTimeToRelativeMinutes(rawTime) {
   const match = String(rawTime || "")
     .trim()
@@ -203,7 +241,7 @@ function parseServiceWindowFromGtfs(row) {
 
 function estimateCompatCost(prevService, nextService, policy) {
   const waitMin = Math.max(0, Number(nextService.start_min) - Number(prevService.end_min));
-  const deadheadKm = haversineDistanceKm(prevService.end_lat, prevService.end_lng, nextService.start_lat, nextService.start_lng) || 0;
+  const deadheadKm = gtfsChapasChainingDeadheadKm(prevService, nextService);
   const pairs = policy?.line_volta_pair_tokens || [];
   const lineChangePenalty = lineCodesSameOrVoltaPair(prevService.line_code, nextService.line_code, pairs)
     ? 0
@@ -792,6 +830,7 @@ async function respondGtfsChapasDailyXlsx(res, planningOpts, serviceDate, plan) 
       feed_gtfs_nome: plan.feed_name_used ?? "",
       feed_gtfs_seleccao_automatica: plan.feed_auto_selected ? "sim" : "nao",
       cupo_max_viaturas: plan.fleet_cap_applied ?? "",
+      hub_terminal_encadeado_vazio_zero: "Largo Jose Lucio (nome ou <=280 m)",
       ...(plan.summary || {}),
     },
   ]);
@@ -4737,6 +4776,8 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
     line_volta_auto_threshold_m: lineVoltaAutoThresholdResolved,
     trip_endpoints_note_pt:
       "Origem e destino de cada serviço vêm da primeira e da última stop_time da trip (nomes, IDs de paragem em GTFS, coordenadas). O sentido pode constar em trips.direction_id (0/1) quando o feed preenche o campo.",
+    terminal_hub_chaining_note_pt:
+      "Vazio entre serviços consecutivos na mesma chapa: quando o destino e a origem seguinte são o terminal «Largo José Lúcio» (ou nomes GTFS equivalentes, ex. «Lg. José Lúcio») ou a distância em linha recta é ≤280 m com uma das paragens identificada como esse hub, o vazio encadeado contabiliza-se como 0 km — alinhado ao ponto de início de serviços nesse largo.",
     feed_key_used: feedRes.feed_key,
     feed_name_used: feedRes.feed_name,
     feed_auto_selected: feedRes.auto_selected,

@@ -5547,6 +5547,7 @@ async function generateGtfsAutonomousChapas() {
       warnLines,
       calNote,
       data?.trip_endpoints_note_pt ? `\n${data.trip_endpoints_note_pt}` : "",
+      data?.terminal_hub_chaining_note_pt ? `\n${data.terminal_hub_chaining_note_pt}` : "",
       data?.auto_line_volta_pairs === false ? "Deteção automática ida/volta: desligada" : "",
       data?.auto_line_volta_pairs !== false && data?.line_volta_auto_threshold_m != null
         ? `Deteção automática ida/volta: activa (limiar ${data.line_volta_auto_threshold_m} m)`
@@ -5635,6 +5636,7 @@ async function generateGtfsAutonomousChapasRange() {
       rangeFeedHint,
       calNoteRange,
       firstDetailed?.trip_endpoints_note_pt ? `\n${firstDetailed.trip_endpoints_note_pt}` : "",
+      firstDetailed?.terminal_hub_chaining_note_pt ? `\n${firstDetailed.terminal_hub_chaining_note_pt}` : "",
       firstDetailed?.auto_line_volta_pairs === false ? "Deteção automática ida/volta: desligada" : "",
       firstDetailed?.auto_line_volta_pairs !== false && firstDetailed?.line_volta_auto_threshold_m != null
         ? `Deteção automática ida/volta: activa (limiar ${firstDetailed.line_volta_auto_threshold_m} m) — valores do 1.º dia do período`
