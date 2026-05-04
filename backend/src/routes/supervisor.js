@@ -4122,6 +4122,54 @@ async function fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormali
     .sort((a, b) => Number(a.start_min) - Number(b.start_min));
 }
 
+async function buildGtfsChapasZeroCandidatesDiagnostics(serviceDate, feedKey, lineCodesNormalized) {
+  const noLineFiltered = await fetchGtfsOperationalServicesForDate(serviceDate, [], feedKey);
+  const nCal = noLineFiltered.length;
+  const wanted = Array.isArray(lineCodesNormalized)
+    ? lineCodesNormalized.map((c) => String(c || "").trim().toLowerCase()).filter(Boolean)
+    : [];
+  if (nCal === 0) {
+    return {
+      reason: "no_calendar_trips_for_date",
+      trips_if_no_line_filter: 0,
+      line_codes_filter_applied: wanted,
+      hint_pt:
+        "Neste feed e data não há trips GTFS válidas segundo o calendário (datas de vigência / dia da semana / calendar_dates). Experimente outro dia útil ou confira os calendários no editor GTFS.",
+    };
+  }
+  if (wanted.length > 0) {
+    const seenLc = new Set();
+    const uniqueDisplay = [];
+    for (const r of noLineFiltered) {
+      const c = String(r.line_code || "").trim();
+      const k = c.toLowerCase();
+      if (!k || seenLc.has(k)) continue;
+      seenLc.add(k);
+      uniqueDisplay.push(c);
+      if (uniqueDisplay.length >= 15) break;
+    }
+    return {
+      reason: "line_filter_excludes_all",
+      trips_if_no_line_filter: nCal,
+      line_codes_filter_applied: wanted,
+      example_public_line_codes_today: uniqueDisplay.length ? uniqueDisplay : null,
+      hint_pt:
+        `O filtro de linhas (${wanted.join(", ")}) não coincide com nenhuma trip neste dia: há ${nCal} serviço(s) no feed sem esse filtro. ` +
+          (uniqueDisplay.length
+            ? `Exemplos de códigos de linha neste dia no GTFS (route_short_name ou fallback): ${uniqueDisplay.join(", ")}. `
+            : "") +
+          "Deixe o campo «Linhas» em branco para ver todas.",
+    };
+  }
+  return {
+    reason: "all_trips_filtered_by_time_parse",
+    trips_if_no_line_filter: nCal,
+    line_codes_filter_applied: [],
+    hint_pt:
+      "Há trips no calendário mas nenhuma com horários válidos nas stop_times para este dia — verifique importação GTFS ou partidas inconsistentes.",
+  };
+}
+
 async function buildAutonomousChapasPlan(serviceDate, options = {}) {
   const minTurnaroundMin = Number.isFinite(Number(options.minTurnaroundMin))
     ? Math.min(Math.max(Math.round(Number(options.minTurnaroundMin)), 3), 120)
@@ -4181,6 +4229,9 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
     }
   }
   const candidates = await fetchGtfsOperationalServicesForDate(serviceDate, lineCodesNormalized, feedRes.feed_key);
+  const chapasDiagnostics = !candidates.length
+    ? await buildGtfsChapasZeroCandidatesDiagnostics(serviceDate, feedRes.feed_key, lineCodesNormalized)
+    : null;
   const unassignedServices = [];
   const vehicles = [];
   let nextVehicleId = 1;
@@ -4314,6 +4365,9 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
     : null;
 
   const warnings = [];
+  if (chapasDiagnostics?.hint_pt) {
+    warnings.push(chapasDiagnostics.hint_pt);
+  }
   if ((options.baseDepotId || String(options.baseDepotName || "").trim()) && !forcedBaseDepot) {
     warnings.push("Parque base (baseDepotId / baseDepotName) não corresponde a nenhum parque activo.");
   }
@@ -4347,6 +4401,7 @@ async function buildAutonomousChapasPlan(serviceDate, options = {}) {
     feed_selection_hint: feedRes.auto_selected
       ? "Modo automático: está a usar o feed GTFS activo mais recentemente actualizado. Com vários feeds importados, seleccione explicitamente o feed no selector «GTFS» do gerador de chapas se os serviços não corresponderem à operação."
       : null,
+    chapas_diagnostics: chapasDiagnostics,
     fleet_cap_applied: fleetCap,
     assign_all_services: parseBooleanLike(options.assignAllServices, false),
     coverage_overflow_vehicles: coverageOverflowVehicles,
@@ -4453,6 +4508,7 @@ router.get("/planning/gtfs-autonomous-chapas-range", async (req, res) => {
       feed_name_used: dailyPlansFull[0]?.feed_name_used ?? null,
       feed_auto_selected: dailyPlansFull[0]?.feed_auto_selected ?? null,
       feed_selection_hint: dailyPlansFull[0]?.feed_selection_hint ?? null,
+      chapas_diagnostics: dailyPlansFull[0]?.chapas_diagnostics ?? null,
       totals: {
         ...totals,
         total_deadhead_km: Number(totals.total_deadhead_km.toFixed(3)),

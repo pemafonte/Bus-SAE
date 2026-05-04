@@ -5531,7 +5531,9 @@ async function generateGtfsAutonomousChapasRange() {
     const sampleBd = Array.isArray(data?.detailed_daily_plans) && data.detailed_daily_plans.length ? data.detailed_daily_plans[0].base_depot : null;
     const depotCapGlob = Array.isArray(data?.detailed_daily_plans) && data.detailed_daily_plans.length ? !!data.detailed_daily_plans[0].depot_capacity_used_as_fleet_cap : false;
     const rangeFeedHint = data?.feed_selection_hint ? `\n${data.feed_selection_hint}` : "";
+    const rangeDiagHint = data?.chapas_diagnostics?.hint_pt ? `${data.chapas_diagnostics.hint_pt}` : "";
     gtfsChapasSummaryEl.textContent = [
+      rangeDiagHint,
       `Período: ${data?.from_date || "-"} -> ${data?.to_date || "-"}`,
       `Modo: ${data?.mode || "-"}`,
       data?.feed_key_used

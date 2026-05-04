@@ -778,12 +778,36 @@
           <section class="card card-top-gap">
             <h3>Gerador automático de chapas (GTFS)</h3>
             <p class="field-help field-help-tight">
-              Gera chapas autonomamente por viatura com base no GTFS e calendário ativo, minimizando frota necessária e
-              apresentando o impacto em vazio/carga para dia ou período (até mensal). Nesta fase sem Teltonika, as partidas ordenam‑se pela
-              primeira hora GTFS da trip e o vazio parque&nbsp;→&nbsp;serviço usa as coordenadas da primeira stop_time até ao parque base escolhido.
-              Com vários ficheiros GTFS importados, escolha explicitamente o <strong>feed</strong> abaixo; caso contrário usa-se o feed activo mais recentemente actualizado.
+              Junta serviços (trips) do GTFS ao longo do dia por viatura, segundo calendário e horários da feed escolhida. O «código da linha» usado no filtro
+              corresponde ao <strong>route_short_name</strong> do GTFS (ou nome longo / route_id como fallback)—não ao número da operação comercial tipo 1011, a menos
+              que esse seja mesmo o código no GTFS.
             </p>
-            <div class="ops-layout-compact">
+            <details class="gtfs-chapas-glossary">
+              <summary class="gtfs-chapas-glossary-summary">Ajuda rápida: para que serve cada controlo?</summary>
+              <dl class="gtfs-chapas-dl">
+                <dt>Feed GTFS</dt>
+                <dd>Um ficheiro / conjunto importado. Só conta uma feed de cada vez (calendários e routes dessa feed).</dd>
+                <dt>Parque base</dt>
+                <dd>Vazio inicial e final até à 1.ª stop da trip para todas as chapas geradas aqui.</dd>
+                <dt>Capacidade do parque</dt>
+                <dd>Limita o <em>número máximo</em> de viaturas (chapas) no modelo; pode esgotar antes de todas as trips se o cupo for baixo.</dd>
+                <dt>Atribuir todos os serviços</dt>
+                <dd>Se ficarem trips de fora por cupo ou regras UE, criam‑se chapas extra (uma viatura pode ficar só com um serviço).</dd>
+                <dt>Cenário (equilibrado / …)</dt>
+                <dd>Peso na escolha de encadear trocas de linha versus tempo de espera e vazio—não muda quantas trips vêm do GTFS.</dd>
+                <dt>Turnaround mínimo</dt>
+                <dd>Tempo obrigatório entre fim da viagem anterior e início da seguinte na <em>mesma</em> viatura.</dd>
+                <dt>Filtro de linhas</dt>
+                <dd><strong>Deixe vazio para todas as linhas.</strong> Com texto, apenas trips cuja linha coincide (após vírgulas). Um código errado dá resultado zero.</dd>
+                <dt>Máx. viaturas</dt>
+                <dd>Limite manual ao número de chapas; combine com capacidade do parque / Teltonika.</dd>
+                <dt>Cupar pela frota Teltonika</dt>
+                <dd>Limita ao número de rastreadores activos (+ tipologia opcional). Sem viaturas no registo, o cupo automático já não é forçado a zero.</dd>
+                <dt>Bloco UE / pausa / 15+30 / Reset operacional</dt>
+                <dd>Modelo simplificado de tempos obrigatórios entre bloques de condução na mesma chapa — só quando encadeia vários serviços.</dd>
+              </dl>
+            </details>
+            <div class="depot-form-fields gtfs-chapas-main-fields">
               <label for="gtfsChapasFeedKey">Feed GTFS</label>
               <select
                 id="gtfsChapasFeedKey"
@@ -791,67 +815,76 @@
               >
                 <option value="">Automático (feed activo mais recentemente actualizado)</option>
               </select>
-            </div>
-            <div class="ops-layout-compact">
-              <label for="gtfsChapasBaseDepot">Parque base (início/fim do dia)</label>
-              <select id="gtfsChapasBaseDepot" title="Viaturas partem e regressam sempre a este parque (vazio calculado até à 1.ª paragem GTFS da trip).">
+              <label for="gtfsChapasBaseDepot">Parque base (início/fim)</label>
+              <select id="gtfsChapasBaseDepot" title="Vazio até à primeira paragem GTFS das trips desta feed.">
                 <option value="">Automático (menor vazio entre parques activos)</option>
               </select>
               <label class="inline-checkbox">
                 <input id="gtfsChapasUseDepotCapacityAsCap" type="checkbox" />
-                Limitar número de chapas à capacidade do parque seleccionado
+                Limitar chapas à capacidade do parque seleccionado
               </label>
               <label class="inline-checkbox">
                 <input id="gtfsChapasAssignAllServices" type="checkbox" />
-                Atribuir todos os serviços (viaturas extra se o cupo ou regras UE bloquearem)
+                Atribuir todos os serviços (chapas extra se cupo ou regras UE bloquearem)
               </label>
             </div>
-            <div class="ops-layout-compact">
+            <div class="ops-layout-compact gtfs-chapas-day-row">
+              <label class="compact-label-inline" for="gtfsChapasDate">Dia único</label>
               <input id="gtfsChapasDate" type="date" />
+              <label class="compact-label-inline" for="gtfsChapasMode">Modo chapas</label>
               <select id="gtfsChapasMode">
-                <option value="balanced">Cenário equilibrado</option>
-                <option value="conservative">Conservador (menos trocas de linha)</option>
+                <option value="balanced">Equilibrado</option>
+                <option value="conservative">Conservador (menos mudanças de linha)</option>
                 <option value="aggressive">Agressivo (menos viaturas)</option>
               </select>
-              <input id="gtfsChapasTurnaroundMin" type="number" min="3" max="120" value="10" />
+              <label class="compact-label-inline" for="gtfsChapasTurnaroundMin">Turnaround (min)</label>
+              <input id="gtfsChapasTurnaroundMin" type="number" min="3" max="120" value="10" title="Entre dois serviços na mesma viatura" />
               <button type="button" id="generateGtfsChapasBtn">Gerar dia</button>
             </div>
-            <p class="field-help field-help-tight">
-              <strong>Filtros e constraints:</strong> linhas separadas por vírgula (código GTFS tal como aparece nas rotas activas).
-              Turnaround mínimo entre serviços na mesma viatura. Limite de bloco (ex. 270&nbsp;min) e pausa ininterrupta (ex. 45&nbsp;min)
-              seguem modelo-tipo Reg. UE&nbsp;561/2006 — activar “15+30 min” para duas pausas em intervalos entre serviços consecutivos da mesma viatura.
-              Intervalo longo “operacional” (opcional) zera o bloco após pernoita quando não há obrigação de pausa pendente.
-            </p>
-            <div class="ops-layout-compact">
-              <input id="gtfsChapasLineCodes" type="text" placeholder="Linhas ex.: 101, 405" />
-              <input id="gtfsChapasMaxVehicles" type="number" min="1" max="999" placeholder="Máx. viaturas (opc.)" />
-              <label class="inline-checkbox">
-                <input id="gtfsChapasFleetCapFromTrackers" type="checkbox" />
-                Cupar pela frota activa no registo Teltonika
-              </label>
-            </div>
-            <div class="ops-layout-compact">
-              <input id="gtfsChapasPlanningClass" type="text" placeholder="Filtrar frota pela tipologia (opcional)" />
-              <input id="gtfsChapasMaxDriveBlockMin" type="number" min="0" max="900" value="270" placeholder="Bloco max. (min)" />
-              <input id="gtfsChapasMinUninterruptedBreakMin" type="number" min="0" max="240" value="45" title="Pausa ininterrupta UE (min)" />
-              <label class="inline-checkbox">
-                <input id="gtfsChapasEuSplitBreak" type="checkbox" />
-                Pausa UE 15+30 (duas janelas entre serviços)
-              </label>
-            </div>
-            <div class="ops-layout-compact">
-              <input
-                id="gtfsChapasOperativeIdleResetMin"
-                type="number"
-                min="0"
-                max="1440"
-                value="0"
-                placeholder="Reset bloco após X min de intervalo (0=off)"
-              />
-              <small class="field-help field-help-tight">Ex.: 480 para contagens típicas de pernoita; só conta quando não há pausa obrigatória pendente.</small>
-            </div>
-            <div class="ops-layout-compact">
+            <details class="gtfs-chapas-section">
+              <summary>Filtro de linhas (opcional)—se der zero resultados, apague primeiro isto</summary>
+              <div class="depot-form-fields">
+                <label for="gtfsChapasLineCodes">Códigos de linha no GTFS (route_short_name, separados por vírgula)</label>
+                <input
+                  id="gtfsChapasLineCodes"
+                  type="text"
+                  autocomplete="off"
+                  placeholder="Ex.: 9, 405 — deixe vazio para TODAS as linhas da feed neste dia"
+                />
+              </div>
+            </details>
+            <details class="gtfs-chapas-section">
+              <summary>Cupo de viaturas (opcional)</summary>
+              <div class="depot-form-fields">
+                <label for="gtfsChapasMaxVehicles">Máximo de chapas / viaturas (deixe vazio = sem este limite)</label>
+                <input id="gtfsChapasMaxVehicles" type="number" min="1" max="999" placeholder="Opcional, ex.: 40" />
+                <label class="inline-checkbox">
+                  <input id="gtfsChapasFleetCapFromTrackers" type="checkbox" />
+                  Também limitar ao n.º de rastreadores Teltonika activos
+                </label>
+                <label for="gtfsChapasPlanningClass">Tipologia só para esse cupo Teltonika (opcional)</label>
+                <input id="gtfsChapasPlanningClass" type="text" maxlength="80" placeholder="Ex.: urbano_12m quando activer cupo Teltonika" />
+              </div>
+            </details>
+            <details class="gtfs-chapas-section">
+              <summary>Regras simplificadas de condutor UE (entre serviços na mesma chapa)</summary>
+              <div class="depot-form-fields">
+                <label for="gtfsChapasMaxDriveBlockMin">Limite bloco contínuo (min)—0 para não aplicar</label>
+                <input id="gtfsChapasMaxDriveBlockMin" type="number" min="0" max="900" value="270" />
+                <label for="gtfsChapasMinUninterruptedBreakMin">Pausa ininterrupta obrigatória após esse bloco (min)</label>
+                <input id="gtfsChapasMinUninterruptedBreakMin" type="number" min="0" max="240" value="45" />
+                <label class="inline-checkbox">
+                  <input id="gtfsChapasEuSplitBreak" type="checkbox" />
+                  Alternativa 15&nbsp;min + 30&nbsp;min em intervalos entre serviços (modelo-tipo UE)
+                </label>
+                <label for="gtfsChapasOperativeIdleResetMin">Zerar contador de bloco após folga longa entre serviços (min)—0 desactiva</label>
+                <input id="gtfsChapasOperativeIdleResetMin" type="number" min="0" max="1440" value="0" placeholder="480 pernoita típica" />
+              </div>
+            </details>
+            <div class="ops-layout-compact gtfs-chapas-range-export">
+              <label class="compact-label-inline" for="gtfsChapasFromDate">Desde</label>
               <input id="gtfsChapasFromDate" type="date" />
+              <label class="compact-label-inline" for="gtfsChapasToDate">Até</label>
               <input id="gtfsChapasToDate" type="date" />
               <button type="button" id="generateGtfsChapasRangeBtn">Gerar período</button>
               <button type="button" id="exportGtfsChapasDayXlsxBtn">Excel (dia)</button>

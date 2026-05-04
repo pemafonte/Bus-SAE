@@ -1404,6 +1404,51 @@ pre {
   color: #334155;
 }
 
+.gtfs-chapas-glossary,
+.gtfs-chapas-section {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(148, 163, 184, 0.85);
+  border-radius: 8px;
+  background: rgba(248, 250, 252, 0.92);
+}
+
+.gtfs-chapas-glossary-summary,
+.gtfs-chapas-section summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: #1e293b;
+}
+
+.gtfs-chapas-dl {
+  margin: 10px 0 0;
+  font-size: 13px;
+  line-height: 1.45;
+  color: #334155;
+}
+
+.gtfs-chapas-dl dt {
+  font-weight: 600;
+  margin-top: 10px;
+  color: #0f172a;
+}
+
+.gtfs-chapas-dl dd {
+  margin: 4px 0 0 0;
+}
+
+.compact-label-inline {
+  font-size: 12px;
+  font-weight: 600;
+  color: #334155;
+  white-space: nowrap;
+}
+
+.gtfs-chapas-day-row,
+.gtfs-chapas-range-export {
+  align-items: center;
+}
+
 .announce-head {
   display: flex;
   justify-content: space-between;
